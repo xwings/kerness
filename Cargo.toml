@@ -14,12 +14,15 @@ fancy-regex = "0.14"
 regex = "1.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-serde_yaml_ng = "0.10"
 shell-words = "1.1"
 # No gzip: Python's `urllib` never asked for a compressed body either, and the
 # feature drags in a `crc32fast` that needs a newer compiler than the one this
 # project builds with.
 ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+# The event-level API, not a `Value` deserializer: PyYAML resolves `yes` and
+# `no` to booleans and a serde front end has already thrown away the quoting
+# that decides whether it should.
+yaml-rust2 = { version = "0.11", default-features = false }
 
 [profile.release]
 lto = true

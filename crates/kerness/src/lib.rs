@@ -14,29 +14,43 @@
 //! writes its own state to disk after every turn and continues from that file
 //! the next time the same program runs.
 
+pub mod access;
+pub mod agent;
+pub mod agent_runtime;
 pub mod assets;
 pub mod channel;
 pub mod compaction;
 pub mod conversation;
 pub mod error;
+pub mod exec;
+pub mod gameplan;
+pub mod harness;
 pub mod http;
 pub mod jsonschema;
 pub mod logging;
 pub mod memory;
+pub mod orchestrator;
 pub mod persona;
+pub mod prompting;
 pub mod provider;
 pub mod pyfmt;
+pub mod session;
+pub mod sessionfile;
+pub mod skill;
 pub mod tooling;
 pub mod toolkit;
 pub mod toolschema;
 pub mod utils;
+pub mod yaml;
 
+pub use crate::agent::{Agent, Role};
 pub use crate::channel::{Channel, ConsoleChannel, FileChannel, LogChannel, MultiChannel};
 pub use crate::conversation::{ChatMessage, Conversation, Message, Turn};
 pub use crate::error::{Error, Result};
 pub use crate::memory::Memory;
 pub use crate::persona::PersonaConfig;
-pub use crate::provider::ProviderResponse;
+pub use crate::provider::{Provider, ProviderResponse};
+pub use crate::session::{Session, SessionConfig, SessionResult};
 pub use crate::tooling::{ToolCall, ToolHandler, ToolSpec};
 pub use crate::toolkit::{ToolDispatcher, ToolResult};
 pub use crate::toolschema::ToolDialect;

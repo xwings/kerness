@@ -37,6 +37,11 @@ pub enum Error {
     /// a missing persona or skill file is the caller's typo, not a broken
     /// contract.
     NotFound(String),
+    /// A file the caller wrote is malformed. Surfaced as Python's `ValueError`,
+    /// which is what the skill loader and agent validation raise rather than a
+    /// framework exception — a bad skill name is the author's typo, not a
+    /// broken session contract.
+    Value(String),
     /// Any other filesystem failure. Surfaced as Python's `OSError`.
     Io(String),
 }
@@ -77,6 +82,7 @@ impl fmt::Display for Error {
             | Error::GameplanLoad(msg)
             | Error::AccessDenied(msg)
             | Error::NotFound(msg)
+            | Error::Value(msg)
             | Error::Io(msg) => f.write_str(msg),
             Error::ProviderHttp {
                 status_code,
