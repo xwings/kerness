@@ -5,10 +5,10 @@
 //! arguments. The struct is assembled in [`PySession::new`] and nowhere else,
 //! so a Rust caller keeps the builder and a Python caller keeps the keywords.
 //!
-//! The `add_*` methods return the session itself, which is what makes the
-//! upstream chaining style work. In Rust that is `&mut Self`; here it is the
-//! same Python object handed back, so `Session(...).add_participant(...)`
-//! builds one session rather than dropping it.
+//! The `add_*` methods return the session itself, so that registration chains.
+//! In Rust that is `&mut Self`; here it is the same Python object handed back,
+//! so `Session(...).add_participant(...)` builds one session rather than
+//! dropping it.
 
 use std::path::PathBuf;
 use std::sync::Arc;

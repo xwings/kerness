@@ -621,7 +621,9 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("CHARS_PER_TOKEN", compaction::CHARS_PER_TOKEN)?;
     module.add("COMPACT_TO_FRACTION", compaction::COMPACT_TO_FRACTION)?;
     module.add("SUMMARY_PREFIX", compaction::SUMMARY_PREFIX)?;
+    module.add("SUMMARY_PROMPT", compaction::SUMMARY_PROMPT)?;
     module.add("MEMORY_HEADER", prompting::MEMORY_HEADER)?;
+    module.add("MEMORY_WRITE_HINT", prompting::MEMORY_WRITE_HINT)?;
     module.add("FORCED_END_NOTE", orchestrator::FORCED_END_NOTE)?;
     module.add("FOLLOWUP_PROMPT", agent_runtime::FOLLOWUP_PROMPT)?;
     module.add("MAX_INVALID_CALLS", agent_runtime::MAX_INVALID_CALLS)?;

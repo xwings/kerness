@@ -2,7 +2,8 @@
 //!
 //! `Conversation`, `ToolDispatcher`, `PromptAssembler`, `AgentRunner` and
 //! `OrchestratorLoop` are what `Session` is assembled from, and each is usable
-//! on its own — the upstream design, kept.
+//! on its own, which is what lets a harness that wants a different loop keep
+//! everything else.
 //!
 //! Two of them borrow in Rust and cannot in Python. [`PromptAssembler`] and
 //! [`AgentRunner`] hold references to the state they read through, which no
