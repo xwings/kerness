@@ -410,13 +410,27 @@ pub fn format_skills_index(skills: Vec<PySkillConfig>) -> String {
 /// Narrow a toolkit to what the active skills permit.
 #[pyfunction]
 #[pyo3(signature = (tools, gate=None))]
-pub fn apply_gate(tools: Vec<PyToolSpec>, gate: Option<Vec<String>>) -> Vec<PyToolSpec> {
-    let gate = gate.map(|names| names.into_iter().collect());
+pub fn apply_gate(
+    tools: Vec<PyToolSpec>,
+    gate: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PyToolSpec>> {
+    // A set is what callers hold — the gate is a membership test, and the
+    // skills that contribute to it overlap — so anything iterable of names is
+    // taken rather than a list alone.
+    let gate = match gate.filter(|object| !object.is_none()) {
+        None => None,
+        Some(names) => Some(
+            names
+                .try_iter()?
+                .map(|name| name?.extract::<String>())
+                .collect::<PyResult<_>>()?,
+        ),
+    };
     let kept = skill_runtime::apply_gate(&specs(&tools), gate.as_ref());
-    tools
+    Ok(tools
         .into_iter()
         .filter(|tool| kept.iter().any(|spec| spec.name == tool.inner.name))
-        .collect()
+        .collect())
 }
 
 // ------------------------------------------------------------------ prompting
@@ -500,12 +514,13 @@ pub struct PySessionSnapshot {
 #[pymethods]
 impl PySessionSnapshot {
     #[new]
-    #[pyo3(signature = (identity=None, turns=None, transcript=None, loop_state=None, compactions=0))]
+    // `loop` is a Rust keyword; the raw identifier keeps the Python keyword.
+    #[pyo3(signature = (identity=None, turns=None, transcript=None, r#loop=None, compactions=0))]
     fn new(
         identity: Option<&Bound<'_, PyAny>>,
         turns: Option<Vec<PyTurn>>,
         transcript: Option<Vec<crate::types::PyMessage>>,
-        loop_state: Option<&Bound<'_, PyAny>>,
+        r#loop: Option<&Bound<'_, PyAny>>,
         compactions: i64,
     ) -> PyResult<Self> {
         Ok(PySessionSnapshot {
@@ -517,7 +532,7 @@ impl PySessionSnapshot {
                     .into_iter()
                     .map(|message| message.inner)
                     .collect(),
-                loop_state: crate::convert::optional_map(loop_state)?,
+                loop_state: crate::convert::optional_map(r#loop)?,
                 compactions,
             },
         })

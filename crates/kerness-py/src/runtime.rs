@@ -111,7 +111,6 @@ impl PyConversation {
     }
 
     /// The turns, in order.
-    #[getter]
     fn turns(&self) -> Vec<PyTurn> {
         self.inner
             .turns()
@@ -123,7 +122,6 @@ impl PyConversation {
     }
 
     /// The public transcript, in order.
-    #[getter]
     fn transcript(&self) -> Vec<PyMessage> {
         self.inner
             .transcript()
@@ -230,16 +228,27 @@ impl PyPromptAssembler {
         parked: &'a Parked,
     ) -> PromptAssembler<'a> {
         let py = agent.py();
-        let text = |callable: &'a Py<PyAny>| {
-            move |_: &Agent| -> String {
-                park(
-                    parked,
-                    callable
-                        .bind(py)
-                        .call1((agent,))
-                        .and_then(|found| found.extract()),
-                )
-            }
+        let skills_for = move |_: &Agent| -> String {
+            park(
+                parked,
+                self.skills_for
+                    .bind(py)
+                    .call1((agent,))
+                    .and_then(|found| found.extract()),
+            )
+        };
+        // `memory_for` hands back the agent's memory, not its text, so that a
+        // caller can point two agents at the same file and have both see a
+        // write. Reading it here is what keeps the core taking plain content.
+        let memory_for = move |_: &Agent| -> String {
+            park(
+                parked,
+                self.memory_for
+                    .bind(py)
+                    .call1((agent,))
+                    .and_then(|memory| memory.call_method0("read"))
+                    .and_then(|content| content.extract()),
+            )
         };
         let tools_for = move || -> Vec<ToolSpec> {
             park(
@@ -250,13 +259,9 @@ impl PyPromptAssembler {
                     .and_then(|found| specs_from(&found)),
             )
         };
-        let assembler = PromptAssembler::new(
-            text(&self.skills_for),
-            text(&self.memory_for),
-            tools_for,
-            self.show_reasoning,
-        )
-        .with_memory_writable(self.memory_writable);
+        let assembler =
+            PromptAssembler::new(skills_for, memory_for, tools_for, self.show_reasoning)
+                .with_memory_writable(self.memory_writable);
         match &self.dialect_for {
             None => assembler,
             Some(callable) => assembler.with_dialect(move |_: &Agent| {

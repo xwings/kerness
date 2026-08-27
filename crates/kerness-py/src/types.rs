@@ -5,6 +5,7 @@
 //! is a `str`-backed `enum.Enum` written in Python, because callers compare it
 //! with `is` and only a real enum member satisfies that.
 
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use kerness::agent::Role;
@@ -153,6 +154,24 @@ fn stringify(value: &Bound<'_, PyAny>) -> PyResult<String> {
     Ok(value.str()?.to_string_lossy().into_owned())
 }
 
+/// A framework handler, seen from Python as an ordinary callable.
+///
+/// The built-in tools and the `Skill` tool are Rust closures, but `handler` is
+/// a documented attribute of a `ToolSpec` and callers do reach for it. This is
+/// what stands in for the function they would otherwise have found.
+#[pyclass(name = "ToolHandler", module = "kerness._core", frozen)]
+struct PyToolHandler {
+    inner: Arc<dyn ToolHandler>,
+}
+
+#[pymethods]
+impl PyToolHandler {
+    #[pyo3(signature = (arguments, actor=""))]
+    fn __call__(&self, arguments: &Bound<'_, PyDict>, actor: &str) -> PyResult<String> {
+        self.inner.call(&map_from_py(arguments)?, actor).raise()
+    }
+}
+
 /// A tool an agent may call.
 #[pyclass(name = "ToolSpec", module = "kerness._core", frozen)]
 pub struct PyToolSpec {
@@ -173,8 +192,17 @@ impl Clone for PyToolSpec {
 impl PyToolSpec {
     /// Wrap a framework spec whose handler is not a Python object.
     pub fn adopt(py: Python<'_>, inner: ToolSpec) -> Self {
+        let handler = Py::new(
+            py,
+            PyToolHandler {
+                inner: Arc::clone(&inner.handler),
+            },
+        );
         PyToolSpec {
-            handler: py.None(),
+            handler: match handler {
+                Ok(callable) => callable.into_any(),
+                Err(_) => py.None(),
+            },
             inner,
         }
     }
@@ -803,6 +831,28 @@ impl PyAgent {
             .raise()
     }
 
+    /// One provider call's messages: the system prompt, then *history*.
+    #[pyo3(signature = (history, default_prompt="", show_reasoning=None, skills_prompt=""))]
+    fn build_messages<'py>(
+        &self,
+        py: Python<'py>,
+        history: &Bound<'py, PyAny>,
+        default_prompt: &str,
+        show_reasoning: Option<bool>,
+        skills_prompt: &str,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let messages = self
+            .inner
+            .build_messages(
+                &messages_from_py(history)?,
+                default_prompt,
+                show_reasoning,
+                skills_prompt,
+            )
+            .raise()?;
+        messages_to_py(py, &messages)
+    }
+
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         let Ok(other) = other.downcast::<PyAgent>() else {
             return false;
@@ -878,8 +928,8 @@ impl PyMemory {
 #[pymethods]
 impl PyMemory {
     #[new]
-    #[pyo3(signature = (path="memory.md".to_string()))]
-    fn new(path: String) -> Self {
+    #[pyo3(signature = (path=PathBuf::from("memory.md")))]
+    fn new(path: PathBuf) -> Self {
         PyMemory {
             store: Store::Owned(Memory::new(path)),
         }
@@ -1006,7 +1056,7 @@ impl PySkillConfig {
         description: String,
         content: String,
         allowed_tools: Option<Vec<String>>,
-        base_dir: Option<String>,
+        base_dir: Option<PathBuf>,
         builtin: bool,
     ) -> Self {
         PySkillConfig {
@@ -1015,7 +1065,7 @@ impl PySkillConfig {
                 description,
                 content,
                 allowed_tools,
-                base_dir: base_dir.map(Into::into),
+                base_dir,
                 builtin,
             },
         }
@@ -1051,9 +1101,15 @@ impl PySkillConfig {
         self.inner.content = value;
     }
 
+    /// The tools this skill narrows a turn to, as a tuple: an absent list and
+    /// an empty one mean opposite things, so the value has to stay distinct
+    /// from the declaration that never named any.
     #[getter]
-    fn allowed_tools(&self) -> Option<Vec<String>> {
-        self.inner.allowed_tools.clone()
+    fn allowed_tools<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        match &self.inner.allowed_tools {
+            None => Ok(None),
+            Some(names) => Ok(Some(PyTuple::new(py, names)?)),
+        }
     }
 
     #[setter]
@@ -1070,8 +1126,8 @@ impl PySkillConfig {
     }
 
     #[setter]
-    fn set_base_dir(&mut self, value: Option<String>) {
-        self.inner.base_dir = value.map(Into::into);
+    fn set_base_dir(&mut self, value: Option<PathBuf>) {
+        self.inner.base_dir = value;
     }
 
     #[getter]

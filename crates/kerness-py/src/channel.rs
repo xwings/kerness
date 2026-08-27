@@ -10,7 +10,7 @@
 //! by the framework as a [`Channel`], and the framework's diagnostics arriving
 //! in Python's `logging` rather than on stderr.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use kerness::channel::Channel;
 use kerness::error::Result;
@@ -20,33 +20,54 @@ use pyo3::prelude::*;
 use crate::errors::Catch;
 
 /// A Python channel, seen as a framework [`Channel`].
-struct PyChannel {
+pub struct PyChannel {
     inner: Py<PyAny>,
     /// `type(inner).__name__`, read once: [`Channel::type_name`] is only ever
     /// read by a failure log, and it has to name something the caller can go
     /// and fix.
     name: String,
+    /// A channel that raises is reporting the caller's own bug — a broken
+    /// socket, a full disk — and they catch it by class. [`Error`] has no
+    /// variant that can carry a Python class, so the exception itself is kept
+    /// here and re-raised at the `run()` boundary; what travels through the
+    /// framework is only the summary that stops the run.
+    ///
+    /// [`Error`]: kerness::error::Error
+    parked: Mutex<Option<PyErr>>,
 }
 
-impl Channel for PyChannel {
-    fn send(&self, sender: &str, message: &str) -> Result<()> {
+impl PyChannel {
+    /// Call *method* on the channel, keeping any exception for `run()`.
+    fn call<A>(&self, method: &str, arguments: A) -> Result<()>
+    where
+        A: for<'py> IntoPyObject<'py, Target = pyo3::types::PyTuple>,
+    {
         Python::with_gil(|py| {
             self.inner
                 .bind(py)
-                .call_method1("send", (sender, message))
+                .call_method1(method, arguments)
                 .map(drop)
+                .inspect_err(|error| {
+                    let mut parked = self.parked.lock().expect("channel park poisoned");
+                    parked.get_or_insert_with(|| error.clone_ref(py));
+                })
         })
         .catch()
     }
 
+    /// Hand back the first exception a delivery raised, if there was one.
+    pub fn parked(&self) -> Option<PyErr> {
+        self.parked.lock().expect("channel park poisoned").take()
+    }
+}
+
+impl Channel for PyChannel {
+    fn send(&self, sender: &str, message: &str) -> Result<()> {
+        self.call("send", (sender, message))
+    }
+
     fn send_system(&self, message: &str) -> Result<()> {
-        Python::with_gil(|py| {
-            self.inner
-                .bind(py)
-                .call_method1("send_system", (message,))
-                .map(drop)
-        })
-        .catch()
+        self.call("send_system", (message,))
     }
 
     fn type_name(&self) -> String {
@@ -57,13 +78,14 @@ impl Channel for PyChannel {
 /// Wrap a Python channel so the framework can write to it.
 ///
 /// `None` for a `None` object, so a session with no channel stays silent.
-pub fn bind_channel(object: &Bound<'_, PyAny>) -> PyResult<Option<Arc<dyn Channel>>> {
+pub fn bind_channel(object: &Bound<'_, PyAny>) -> PyResult<Option<Arc<PyChannel>>> {
     if object.is_none() {
         return Ok(None);
     }
     Ok(Some(Arc::new(PyChannel {
         inner: object.clone().unbind(),
         name: object.get_type().name()?.to_string(),
+        parked: Mutex::new(None),
     })))
 }
 

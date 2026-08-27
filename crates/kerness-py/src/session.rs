@@ -22,8 +22,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::access::policy_from_py;
-use crate::channel::bind_channel;
-use crate::convert::{map_to_py, value_from_py};
+use crate::channel::{bind_channel, PyChannel};
+use crate::convert::{map_from_py, map_to_py, value_from_py};
 use crate::errors::Raise;
 use crate::provider::bind_provider;
 use crate::types::{PyAgent, PyMemory, PyMessage};
@@ -36,6 +36,48 @@ pub struct PySessionResult {
 
 #[pymethods]
 impl PySessionResult {
+    #[new]
+    #[pyo3(signature = (
+        topic=String::new(),
+        turns_completed=0,
+        consensus_reached=false,
+        history=Vec::new(),
+        final_summary=String::new(),
+        fields=None,
+        rounds_run=0,
+        phase_reached=String::new(),
+        end_reason=String::new(),
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        topic: String,
+        turns_completed: i64,
+        consensus_reached: bool,
+        history: Vec<PyMessage>,
+        final_summary: String,
+        fields: Option<&Bound<'_, PyDict>>,
+        rounds_run: i64,
+        phase_reached: String,
+        end_reason: String,
+    ) -> PyResult<Self> {
+        Ok(PySessionResult {
+            inner: SessionResult {
+                topic,
+                turns_completed,
+                consensus_reached,
+                history: history.into_iter().map(|message| message.inner).collect(),
+                final_summary,
+                fields: match fields {
+                    Some(dict) => map_from_py(dict)?,
+                    None => Default::default(),
+                },
+                rounds_run,
+                phase_reached,
+                end_reason,
+            },
+        })
+    }
+
     #[getter]
     fn topic(&self) -> &str {
         &self.inner.topic
@@ -125,6 +167,10 @@ impl ToolHandler for PyHandler {
 #[pyclass(name = "Session", module = "kerness._core")]
 pub struct PySession {
     inner: Session,
+    /// The same channel the run writes to, kept so that an exception it raised
+    /// can be re-raised from [`PySession::run`] rather than reported as the
+    /// framework error it had to be reduced to on the way through.
+    channel: Option<Arc<PyChannel>>,
 }
 
 impl PySession {
@@ -201,6 +247,10 @@ impl PySession {
         orchestrator_retries: Option<i64>,
         tool_results_in_history: bool,
     ) -> PyResult<Self> {
+        let bound_channel = match channel {
+            Some(object) => bind_channel(&object)?,
+            None => None,
+        };
         let config = SessionConfig {
             gameplan,
             topic,
@@ -208,10 +258,7 @@ impl PySession {
                 Some(object) => bind_provider(&object)?,
                 None => None,
             },
-            channel: match channel {
-                Some(object) => bind_channel(&object)?,
-                None => None,
-            },
+            channel: bound_channel.clone().map(|channel| channel as _),
             memory,
             memory_write,
             session_file,
@@ -231,6 +278,7 @@ impl PySession {
         };
         Ok(PySession {
             inner: Session::new(config).raise()?,
+            channel: bound_channel,
         })
     }
 
@@ -408,8 +456,12 @@ impl PySession {
 
     /// Execute the session, blocking until the loop terminates.
     fn run(&mut self) -> PyResult<PySessionResult> {
+        let finished = self.inner.run();
+        if let Some(raised) = self.channel.as_ref().and_then(|channel| channel.parked()) {
+            return Err(raised);
+        }
         Ok(PySessionResult {
-            inner: self.inner.run().raise()?,
+            inner: finished.raise()?,
         })
     }
 }
