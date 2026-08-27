@@ -7,8 +7,6 @@ that worse: losing the topic, losing the newest turn, thrashing, or trading a
 real conversation for a summary that never arrived.
 """
 
-import pytest
-
 from kerness.compaction import (
     COMPACT_TO_FRACTION,
     SUMMARY_PREFIX,

@@ -308,7 +308,7 @@ pub fn validate_harness(
 ) -> Result<Vec<String>> {
     let mut problems: Vec<String> = Vec::new();
 
-    if spec.agents.orchestrator.required && !orchestrator.is_some_and(|name| !name.is_empty()) {
+    if spec.agents.orchestrator.required && orchestrator.is_none_or(|name| name.is_empty()) {
         problems.push(format!(
             "gameplan '{}' requires an orchestrator; \
              add one with session.add_orchestrator(...)",

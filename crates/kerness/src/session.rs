@@ -2,10 +2,9 @@
 //!
 //! A [`Session`] holds the cast, the toolkit, the memory files and the access
 //! policy; [`Session::run`] validates all of it before the first provider call
-//! and then implements [`LoopHost`] for
-//! [`OrchestratorLoop`](crate::orchestrator::OrchestratorLoop). Who speaks,
-//! when the run ends and what it returns come from the gameplan's harness
-//! contract, not from here.
+//! and then implements [`LoopHost`] for [`OrchestratorLoop`]. Who speaks, when
+//! the run ends and what it returns come from the gameplan's harness contract,
+//! not from here.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

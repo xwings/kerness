@@ -1,0 +1,14 @@
+version: 2
+
+updates:
+  # The workspace lockfile. A bump that raises a transitive crate's own MSRV
+  # fails the `msrv` job in CI, which is where that news should arrive.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

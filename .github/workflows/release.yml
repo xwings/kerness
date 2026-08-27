@@ -1,0 +1,137 @@
+# Builds the release artifacts and attaches them to a GitHub Release. It does
+# not publish, anywhere. Uploading is a decision with a one-way door on it, and
+# a workflow that could take it accidentally is worse than one that cannot.
+#
+# To start publishing, add to the end of this file:
+#
+#   publish-pypi:
+#     needs: [verify-sdist]
+#     runs-on: ubuntu-latest
+#     environment: pypi
+#     permissions:
+#       id-token: write        # PyPI Trusted Publishing — no token in secrets
+#     steps:
+#       - uses: actions/download-artifact@v4
+#         with: {pattern: 'wheels-*', path: dist, merge-multiple: true}
+#       - uses: actions/download-artifact@v4
+#         with: {name: sdist, path: dist}
+#       - uses: PyO3/maturin-action@v1
+#         with: {command: upload, args: '--non-interactive dist/*'}
+#
+#   publish-crate:
+#     needs: [verify-sdist]
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: dtolnay/rust-toolchain@stable
+#       - run: cargo publish -p kerness --locked
+#         env:
+#           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+#
+# `kerness-py` is not published to crates.io: it is the wheel's contents, and
+# nothing depends on it as a crate.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wheels:
+    name: Wheel (${{ matrix.platform }} ${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux, runner: ubuntu-latest, target: x86_64 }
+          - { platform: linux, runner: ubuntu-24.04-arm, target: aarch64 }
+          - { platform: macos, runner: macos-13, target: x86_64 }
+          - { platform: macos, runner: macos-14, target: aarch64 }
+          - { platform: windows, runner: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      # One wheel per platform covers every supported Python: the extension is
+      # built against the stable ABI, so the tag is cp310-abi3, not cp310-cp310.
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform }}-${{ matrix.target }}
+          path: dist
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  verify-sdist:
+    name: Install the sdist from clean
+    needs: sdist
+    runs-on: ubuntu-latest
+    steps:
+      # Deliberately no checkout. The interpreter must find the gameplans, the
+      # personas and the skills inside the installed package, and a working
+      # tree sitting next to it would hide the case where it cannot.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: Install
+        run: pip install dist/*.tar.gz
+
+      - name: Self-check
+        run: python -m kerness.selfcheck
+
+  release:
+    name: Attach to the release
+    needs: [wheels, verify-sdist]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: true
+          generate_release_notes: true

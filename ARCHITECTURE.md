@@ -32,7 +32,7 @@ wrapper around the other's use case.
 
 | | |
 | --- | --- |
-| Rust | MSRV **1.80**; stable toolchain; 2021 edition |
+| Rust | MSRV **1.88**; stable toolchain; 2021 edition |
 | Python | **3.10+**, CPython, via the stable ABI (`abi3-py310`) |
 | Bindings | `pyo3` 0.23 with `extension-module` |
 | Build | `cargo` for the crate, `maturin` for the wheel |

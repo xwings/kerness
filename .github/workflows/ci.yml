@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch cancels the first: the older answer is about
+# a commit nobody is waiting on any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Unit tests live beside the code they test; the integration tests under
+      # crates/kerness/tests/ drive whole sessions through the public API.
+      - name: Test
+        run: cargo test --workspace
+
+      # Stronger rot check than reading them: an example that no longer matches
+      # the API fails here rather than the first time somebody copies it.
+      - name: Build examples
+        run: cargo build -p kerness --examples
+
+      # No API key and no network — a scripted provider drives a real gameplan
+      # to completion. If this passes, a clean clone can run something.
+      - name: Smoke test
+        run: cargo run -p kerness --example offline_debate
+
+      - name: Docs
+        run: cargo doc --no-deps -p kerness
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: Rust (MSRV 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      # --locked, because the MSRV is a claim about the committed resolution.
+      # Without it a dependency raising its own MSRV fails this job on a commit
+      # that changed nothing here, and the failure names a crate we do not own.
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
+
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The ends of the supported range. The abi3-py310 wheel is one build for
+        # every version in between, so the middle is the same artifact.
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # maturin develop wants a virtualenv, and this is the same layout the
+      # repository's own Verification commands assume.
+      - name: Install
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install 'maturin>=1.7,<2.0' 'ruff>=0.16,<0.17'
+          .venv/bin/maturin develop --extras dev
+
+      - name: Test
+        run: .venv/bin/python -m pytest tests/ -q
+
+      # Proves the installed package, not the source tree: the assets resolve,
+      # every module imports, and the constants agree across the boundary.
+      - name: Self-check
+        run: .venv/bin/python -m kerness.selfcheck
+
+      - name: Lint
+        run: .venv/bin/ruff check python tests examples

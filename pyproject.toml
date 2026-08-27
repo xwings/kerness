@@ -22,6 +22,22 @@ dev = ["pytest>=7.0", "pydantic>=2,<3"]
 [project.urls]
 Repository = "https://github.com/xwings/kerness"
 
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Pinned rather than left to the default, because the default is a moving
+# target: a ruff release that widens it would fail CI on a commit that changed
+# no Python. Widening the set here is a deliberate act, done together with the
+# edits that make the tree pass it.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# `bootstrap` hands the extension the three things it cannot declare itself,
+# and must run before any shim imports a name from it. Every import below that
+# call is late by construction.
+"python/kerness/__init__.py" = ["E402"]
+
 [tool.maturin]
 manifest-path = "crates/kerness-py/Cargo.toml"
 module-name = "kerness._core"

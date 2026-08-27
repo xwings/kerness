@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/xwings/kerness"
 
@@ -16,8 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 shell-words = "1.1"
 # No gzip: provider responses are JSON small enough that decompression buys
-# nothing, and the feature drags in a `crc32fast` that needs a newer compiler
-# than this project's MSRV.
+# nothing.
 ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
 # The event-level API, not a `Value` deserializer: frontmatter is read with
 # YAML 1.1 scalar rules, where `no` is a boolean but `"no"` is a string, and a
