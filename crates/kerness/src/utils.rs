@@ -20,8 +20,8 @@ fn is_token_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Whether a character is a regex `\w` — Unicode-aware, matching Python's
-/// default for `str` patterns.
+/// Whether a character is a regex `\w`, Unicode-aware — a keyword bounded by
+/// accented letters is still bounded.
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }

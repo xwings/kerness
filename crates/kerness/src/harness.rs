@@ -700,10 +700,10 @@ fn parse_bool(raw: Option<&Value>, default: bool, key: &str, source: &str) -> Re
     }
 }
 
-/// `int(value)`, which accepts a number or a decimal string and nothing else.
+/// An integer from a number or a decimal string, and nothing else.
 ///
-/// A bool is rejected before this is reached: Python's `bool` is an `int`
-/// subclass, so `max_rounds: true` would otherwise silently mean one round.
+/// A bool is refused rather than counted as 0 or 1, so `max_rounds: true`
+/// cannot quietly mean one round.
 fn coerce_int(value: &Value) -> Option<i64> {
     match value {
         Value::Bool(_) => None,
@@ -715,8 +715,8 @@ fn coerce_int(value: &Value) -> Option<i64> {
     }
 }
 
-/// Python's integer literal grammar: surrounding space, a sign, then digits
-/// that may be grouped with single underscores.
+/// The integer literal a frontmatter string may spell: surrounding space, a
+/// sign, then digits that may be grouped with single underscores.
 fn parse_int_literal(text: &str) -> Option<i64> {
     let text = text.trim();
     let (negative, digits) = match text.strip_prefix('-') {
@@ -751,7 +751,7 @@ fn text(data: &Map<String, Value>, key: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The Python type name, for the one error that reports it.
+/// The type name used by the one error that reports it.
 fn type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn a_scalar_of_the_wrong_type_is_rejected_not_coerced() {
-        // A bool is an int in Python, so a bare bool has to be caught too; and
+        // A bare bool has to be caught too, or it would count as 0 or 1; and
         // a quoted "false" is a string that must not become true merely
         // because non-empty strings are truthy.
         assert!(message(json!({"loop": {"max_rounds": "many"}})).contains("must be an integer"));

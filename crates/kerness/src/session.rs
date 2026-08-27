@@ -80,7 +80,7 @@ pub struct SessionResult {
 }
 
 impl SessionResult {
-    /// The final summary, under the name the Python API exposes.
+    /// The final summary, under the shorter name the Python bindings expose.
     pub fn summary(&self) -> &str {
         &self.final_summary
     }
@@ -88,11 +88,11 @@ impl SessionResult {
 
 /// Everything a session is configured with, before any agent is added.
 ///
-/// A struct rather than a builder because upstream's constructor is one call
-/// with seventeen keywords and no ordering rules between them: several of these
-/// decide what the session is built *out of* — `memory_write` picks the default
-/// toolkit, `access_policy` the access manager — so they have to be settled
-/// before construction rather than patched onto a half-built session.
+/// A struct rather than a builder, because several of these decide what the
+/// session is built *out of*: `memory_write` picks the default toolkit and
+/// `access_policy` builds the access manager. Both have to be settled before
+/// construction rather than patched onto a half-built session, and builder
+/// methods would advertise an ordering freedom that does not exist.
 #[derive(Clone)]
 pub struct SessionConfig {
     /// Gameplan name or path.
@@ -192,9 +192,9 @@ impl Memories {
 ///
 /// Tool handlers are `Arc<dyn ToolHandler>` and the dispatcher's tool source is
 /// an `Arc<dyn Fn>`: both are `Send + Sync + 'static`, so neither can hold a
-/// reference to the session that built them. Upstream's handlers are bound
-/// methods on `self` and reach the whole object; here they close over this
-/// instead, which is the same state by a different route.
+/// reference to the session that built them. What a built-in handler actually
+/// needs — the access manager, the memory files, the channel — lives here
+/// instead, behind one `Arc` every handler closes over.
 struct Shared {
     channel: Arc<dyn Channel>,
     provider: Option<Arc<dyn Provider>>,
@@ -330,9 +330,9 @@ pub struct Session {
     identity: Map<String, Value>,
     /// The loop's last published position, for `save()`.
     ///
-    /// Upstream reads `self._loop.snapshot()` back out of the loop it owns;
-    /// here the loop pushes its position through
-    /// [`LoopHost::record_position`] instead.
+    /// The loop is a local in [`Session::run`] and borrows the session for
+    /// the whole run, so its position cannot be read back out of it. It
+    /// pushes instead, through [`LoopHost::record_position`].
     loop_position: Map<String, Value>,
 }
 

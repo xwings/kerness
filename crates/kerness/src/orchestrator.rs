@@ -40,9 +40,10 @@ static JSON_FENCE_RE: LazyLock<Regex> =
 /// What the loop needs from the session, and nothing more.
 ///
 /// Every call can fail, because every one of them reaches a provider, a
-/// channel, or the session file. Upstream lets those raise straight out of
-/// `Session.run()`; the loop propagates them for the same reason, and takes no
-/// view on which are recoverable.
+/// channel, or the session file. The loop propagates those to its caller and
+/// takes no view on which are recoverable: retry policy belongs to the
+/// provider, and a run that cannot reach its channel has nowhere left to
+/// report a recovery anyway.
 pub trait LoopHost {
     /// Run one orchestrator turn and return its reply.
     fn orchestrator_turn(&mut self, purpose: &str) -> Result<String>;
@@ -67,13 +68,13 @@ pub trait LoopHost {
 
     /// Take a copy of the loop's position, for a host that persists it.
     ///
-    /// Upstream's session both owns the loop and *is* its host, and reads
-    /// `snapshot()` back from inside `deliver` while the run is still on the
-    /// stack. A Rust host cannot hold the loop and be handed to it at once, so
-    /// the loop pushes instead of being polled: this is called whenever the
-    /// position changes and always before a callback that might write it to
-    /// disk. A host that keeps no session file ignores it, which is the
-    /// default.
+    /// A host that persists its state needs the position at the moment it
+    /// writes, but it cannot ask for it: [`OrchestratorLoop::run`] borrows the
+    /// host for the whole run, so the host cannot also hold the loop and call
+    /// [`OrchestratorLoop::snapshot`] on it. The loop pushes instead of being
+    /// polled: this is called whenever the position changes and always before
+    /// a callback that might write it to disk. A host that keeps no session
+    /// file ignores it, which is the default.
     fn record_position(&mut self, _snapshot: Map<String, Value>) {}
 }
 
@@ -95,7 +96,8 @@ pub enum EndReason {
 }
 
 impl EndReason {
-    /// The name this reason is reported with, matching upstream's strings.
+    /// The name this reason is reported with, as it reaches callers on
+    /// `SessionResult::end_reason`.
     pub fn as_str(self) -> &'static str {
         match self {
             EndReason::Keyword => "keyword",
@@ -838,8 +840,11 @@ fn coerce(value: &Value, kind: ResultType) -> Value {
     }
 }
 
-/// `int(value)`, for the values JSON can hold. A bool is refused rather than
-/// counted as 0 or 1, matching the declared-type check upstream makes first.
+/// An integer, for the values JSON can hold.
+///
+/// A bool is refused rather than counted as 0 or 1. A harness that declared
+/// `type: int` and got `true` has a field the orchestrator filled in wrongly,
+/// and quietly reading it as 1 would put a made-up number in the result.
 fn as_int(value: &Value) -> Option<i64> {
     match value {
         Value::Bool(_) => None,

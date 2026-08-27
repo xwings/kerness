@@ -55,6 +55,6 @@ pub use crate::tooling::{ToolCall, ToolHandler, ToolSpec};
 pub use crate::toolkit::{ToolDispatcher, ToolResult};
 pub use crate::toolschema::ToolDialect;
 
-/// The release this crate implements, matching the Python package's
-/// `__version__`.
+/// This release. The Python bindings expose the same string as
+/// `kerness.__version__`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -163,8 +163,8 @@ fn extend(path: &[String], parts: &[&str]) -> Vec<String> {
     out
 }
 
-/// The breadcrumb as a Python tuple literal, which is how the message that
-/// carries it was written to read.
+/// The breadcrumb as a tuple literal, which is how the message carrying it
+/// reads.
 fn render_path(path: &[String]) -> String {
     let parts: Vec<String> = path.iter().map(|p| py_repr_str(p)).collect();
     match parts.len() {
@@ -252,7 +252,7 @@ fn type_matches(value: &Value, expected: &str) -> bool {
     }
 }
 
-/// Python's `type(value).__name__`, which is what the message promises.
+/// The type name the validation message promises.
 fn type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
@@ -265,7 +265,8 @@ fn type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Python `==` over JSON values: `1 == 1.0` and `True == 1` both hold.
+/// Equality over JSON values, as `enum` membership needs it: `1` and `1.0`
+/// are the same number, and `true` matches `1`.
 fn equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Number(a), Value::Number(b)) => match (a.as_f64(), b.as_f64()) {

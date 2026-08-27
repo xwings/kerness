@@ -1,24 +1,26 @@
-//! YAML parsing with PyYAML's scalar semantics.
+//! YAML parsing with 1.1 scalar semantics.
 //!
 //! Gameplans and skill files are Markdown with YAML frontmatter, and the
-//! frontmatter is a *contract* — a gameplan that parsed one way under the
-//! Python framework and another way here is a gameplan that silently changed
-//! meaning.
+//! frontmatter is a *contract*: it decides roles, participant bounds, loop
+//! limits, phases, and the result shape. How a bare scalar resolves is
+//! therefore a behavioural decision, not a formatting one.
 //!
-//! PyYAML implements YAML **1.1**, where `yes`, `no`, `on`, and `off` are
+//! This parser implements YAML **1.1**, where `yes`, `no`, `on`, and `off` are
 //! booleans, a leading zero means octal, and an exponent without a sign is not
 //! a number at all. Every modern YAML library implements 1.2, where none of
-//! that holds. `verdict_rethink: no` is the case that matters: 1.2 reads it as
-//! the string `"no"`, which the harness parser then rejects as "must be a
-//! boolean" — a working gameplan that stops loading.
+//! that holds. `verdict_rethink: no` is the case that decides it: 1.2 reads
+//! that as the string `"no"`, which the harness parser then rejects as "must
+//! be a boolean". Frontmatter is hand-written configuration sitting on top of
+//! hand-written prose, and an author who writes `no` there means false — a
+//! contract that refuses to load over that is a contract fighting its author.
 //!
 //! So the parser here reads *events*, not values. Only a plain (unquoted)
 //! scalar is resolved; `"no"` in quotes stays a string, which is the
 //! distinction a `Value`-level deserializer has already discarded by the time
 //! anything can look at it.
 //!
-//! Two things PyYAML does are deliberately not reproduced: a plain scalar that
-//! looks like a date stays a string rather than becoming a `datetime`, and
+//! Two 1.1 resolutions are deliberately dropped: a plain scalar that looks
+//! like a date stays a string rather than becoming a timestamp, and
 //! `.inf`/`.nan` stay strings because the JSON value model has no room for
 //! them. Neither is expressible in a harness field.
 

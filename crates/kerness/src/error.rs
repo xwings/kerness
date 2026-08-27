@@ -1,6 +1,7 @@
 //! The framework's error type.
 //!
-//! One flat enum stands in for the exception hierarchy the Python API exposes.
+//! One flat enum, which the Python bindings fan back out into an exception
+//! class per variant.
 //! The hierarchy is only two levels deep and callers branch on exactly one
 //! relationship — "is this a provider error?" — so [`Error::is_provider`]
 //! carries what a nested enum would have cost a type to express.
@@ -9,9 +10,9 @@ use std::fmt;
 
 /// Every way a run can fail.
 ///
-/// `Display` reproduces the Python message text verbatim; the bindings surface
-/// each variant as its own exception class, so the split here is the split a
-/// caller sees.
+/// `Display` is the message a caller reads, and the bindings surface each
+/// variant as its own exception class — so the split drawn here is the split
+/// every caller sees, in either language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// A provider failed in a way none of the specific variants describe.

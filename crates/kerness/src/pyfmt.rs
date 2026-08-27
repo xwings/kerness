@@ -1,7 +1,9 @@
 //! Rendering JSON values the way Python renders them.
 //!
-//! Framework text that a model reads — the tool prompt, validation errors,
-//! coerced result fields — was written against `json.dumps` and `repr`.
+//! The Python bindings are this framework's widest surface, so the text that
+//! reaches a caller or a model — the tool prompt, validation errors, coerced
+//! result fields — has to read the way a Python caller expects: `'a'` rather
+//! than `"a"`, `True` rather than `true`, a space after every separator.
 //! `serde_json`'s defaults differ in separators and in non-ASCII escaping, and
 //! those differences are visible in every prompt, so they are corrected here
 //! once rather than worked around at each call site.

@@ -132,13 +132,14 @@ fn split_frontmatter<'a>(text: &'a str, source: &str) -> Result<(Value, Option<&
     if !data.is_object() {
         return Err(Error::GameplanLoad(format!(
             "Frontmatter in {source} must be a mapping, got {}.",
-            python_type_name(&data)
+            type_name(&data)
         )));
     }
     Ok((data, Some(body)))
 }
 
-fn python_type_name(value: &Value) -> &'static str {
+/// The type name the frontmatter error reports.
+fn type_name(value: &Value) -> &'static str {
     match value {
         Value::Bool(_) => "bool",
         Value::Number(number) if number.is_f64() => "float",

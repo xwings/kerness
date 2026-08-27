@@ -36,7 +36,7 @@ impl AccessRequest {
 
 /// Answers "may this request proceed?".
 ///
-/// The console prompt that ships with the Python API is not implemented here:
+/// The console prompt that ships with the Python bindings is not here:
 /// it reads stdin, which belongs to the binding layer. An approver backed by a
 /// GUI, a webhook, or a config service implements this trait directly.
 pub trait ApprovePrompt: Send + Sync {
