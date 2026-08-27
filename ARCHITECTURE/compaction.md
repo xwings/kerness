@@ -20,8 +20,8 @@ under a hard limit, not to fill it exactly.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/compaction.rs` | estimation, the rewrite, and the summary request |
-| `crates/kerness-py/src/funcs.rs` | the four functions and four constants, re-exported |
-| `python/kerness/compaction.py` | re-export shim |
+| `bindings/python/src/funcs.rs` | the four functions and four constants, re-exported |
+| `bindings/python/kerness/compaction.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -58,11 +58,11 @@ cheaper model than the one running the session.
 ## How to Test
 
 ```sh
-cargo test -p kerness compaction                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_compaction.py -q  # pass = 0 failed
+cargo test -p kerness compaction                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_compaction.py -q # pass = 0 failed
 ```
 
-- `tests/test_compaction.py:49` — `test_it_leaves_a_short_conversation_alone`;
+- `bindings/python/tests/test_compaction.py:49` — `test_it_leaves_a_short_conversation_alone`;
   `:64` `test_the_result_is_topic_summary_then_recent_turns`; `:116`
   `test_the_summarizer_sees_only_the_dropped_turns`.
 - `:87` `test_the_newest_turn_is_kept_even_when_it_alone_is_too_big` and `:55`
@@ -73,7 +73,7 @@ cargo test -p kerness compaction                        # pass = 0 failed
 
 - `estimate_turns` measures the turns alone. The rest of the prompt — system
   prompt, tool schemas, memory block — is counted against the ceiling by the
-  session, not by this module (`tests/test_session.py:2209`), so a caller using
+  session, not by this module (`bindings/python/tests/test_session.py:2209`), so a caller using
   `compact` directly has to account for it themselves.
 - One compaction pass per check: a history far over the limit is halved once, not
   repeatedly, and is compacted again on the next check.

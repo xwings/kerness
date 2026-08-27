@@ -20,9 +20,9 @@ transcript, and lets a resumed session restore each independently.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/conversation.rs` | `ChatMessage`, `Message`, `Turn`, `Conversation` |
-| `crates/kerness-py/src/runtime.rs` | `PyConversation` |
-| `crates/kerness-py/src/types.rs` | `PyMessage` (`:486`), `PyTurn` (`:565`) |
-| `python/kerness/conversation.py` | re-export shim |
+| `bindings/python/src/runtime.rs` | `PyConversation` |
+| `bindings/python/src/types.rs` | `PyMessage` (`:486`), `PyTurn` (`:565`) |
+| `bindings/python/kerness/conversation.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -55,11 +55,11 @@ transcript, and lets a resumed session restore each independently.
 ## How to Test
 
 ```sh
-cargo test -p kerness conversation                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_conversation.py -q  # pass = 0 failed
+cargo test -p kerness conversation                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_conversation.py -q # pass = 0 failed
 ```
 
-- `tests/test_conversation.py:25` — `test_both_accessors_hand_back_a_fresh_list` —
+- `bindings/python/tests/test_conversation.py:25` — `test_both_accessors_hand_back_a_fresh_list` —
   `turns()` and `transcript()` are methods returning fresh lists, so mutating what
   a caller got back cannot corrupt the conversation.
 

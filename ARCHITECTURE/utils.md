@@ -20,7 +20,7 @@ the bar for living in this module rather than beside its only user.
 | ---- | ---- |
 | `crates/kerness/src/utils.rs` | text scanning, session-end detection, retry |
 | `crates/kerness/src/pyfmt.rs` | Python-compatible `repr`, `str`, `json.dumps`, truthiness |
-| `python/kerness/utils.py` | re-export shim |
+| `bindings/python/kerness/utils.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -64,12 +64,12 @@ exercise.
 ## How to Test
 
 ```sh
-cargo test -p kerness utils                        # pass = 0 failed
-cargo test -p kerness pyfmt                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_utils.py -q  # pass = 0 failed
+cargo test -p kerness utils                                       # pass = 0 failed
+cargo test -p kerness pyfmt                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_utils.py -q # pass = 0 failed
 ```
 
-- `tests/test_utils.py` is table-driven: `TestParseOrchestratorCall` (`:13`),
+- `bindings/python/tests/test_utils.py` is table-driven: `TestParseOrchestratorCall` (`:13`),
   `TestParseSessionEnd` (`:30`), and `TestParseMemoryMarkers` (`:44`) each
   parametrise the boundary cases their scan exists for, and `TestRetry` (`:60`)
   covers first-attempt success, recovery, and exhaustion.

@@ -21,8 +21,8 @@ the caller so a Python process can route them into `logging`.
 | ---- | ---- |
 | `crates/kerness/src/channel.rs` | the `Channel` trait and four implementations |
 | `crates/kerness/src/logging.rs` | the framework's own diagnostic sink |
-| `crates/kerness-py/src/channel.rs` | `PyChannel` — a Python object seen as a `Channel` |
-| `python/kerness/channel.py` | the base class Python subclasses |
+| `bindings/python/src/channel.rs` | `PyChannel` — a Python object seen as a `Channel` |
+| `bindings/python/kerness/channel.py` | the base class Python subclasses |
 
 ## Key Types and Entry Points
 
@@ -36,9 +36,9 @@ the caller so a Python process can route them into `logging`.
 - `crates/kerness/src/channel.rs:118` — `LogChannel` — one JSON object per line in
   a dated file under a log directory.
 - `crates/kerness/src/channel.rs:164` — `FileChannel` — plain text, appended.
-- `crates/kerness-py/src/channel.rs:23` — `PyChannel` — wraps a Python object;
+- `bindings/python/src/channel.rs:23` — `PyChannel` — wraps a Python object;
   the `parked` field holds the first exception a delivery raised.
-- `crates/kerness-py/src/channel.rs:59` — `parked()` — hands that exception back
+- `bindings/python/src/channel.rs:59` — `parked()` — hands that exception back
   so `Session.run` can re-raise it.
 - `crates/kerness/src/logging.rs:51` — `set_logger(logger)` — installed at import
   by `bootstrap`.
@@ -62,13 +62,13 @@ boundary. The same pattern appears for callbacks in `runtime.rs`.
 ## How to Test
 
 ```sh
-cargo test -p kerness channel                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_channel.py -q  # pass = 0 failed
+cargo test -p kerness channel                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_channel.py -q # pass = 0 failed
 ```
 
 - The Rust tests include a `BrokenChannel` (`channel.rs:327`) inside a
   `MultiChannel` to prove the other channels still receive the message.
-- `tests/test_channel.py:63` — `test_a_failing_channel_is_logged_and_does_not_starve_the_others` —
+- `bindings/python/tests/test_channel.py:63` — `test_a_failing_channel_is_logged_and_does_not_starve_the_others` —
   a `BrokenChannel` raising `RuntimeError` inside a `MultiChannel`; the other
   members still receive the message and the failure is logged.
 

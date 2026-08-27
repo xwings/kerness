@@ -18,8 +18,8 @@ different control flow implements `LoopHost` and keeps everything else. Serves
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/orchestrator.rs` | `LoopHost`, `LoopState`, `PhaseTracker`, `OrchestratorLoop`, result parsing |
-| `crates/kerness-py/src/runtime.rs:499,619` | `PyLoopState`, `PyOrchestratorLoop` |
-| `python/kerness/loop.py` | re-export shim |
+| `bindings/python/src/runtime.rs:499,619` | `PyLoopState`, `PyOrchestratorLoop` |
+| `bindings/python/kerness/loop.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -64,8 +64,8 @@ loop, its state, and the end reasons are exported.
 ## How to Test
 
 ```sh
-cargo test -p kerness orchestrator                # pass = 0 failed
-.venv/bin/python -m pytest tests/test_loop.py -q  # pass = 0 failed
+cargo test -p kerness orchestrator                               # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_loop.py -q # pass = 0 failed
 ```
 
 - The Rust tests drive a `StubHost` (`orchestrator.rs:909`) through fixed

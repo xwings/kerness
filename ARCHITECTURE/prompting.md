@@ -18,8 +18,8 @@ Serves **M2**.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/prompting.rs` | `PromptAssembler`, `memory_block`, the memory constants |
-| `crates/kerness-py/src/runtime.rs:210` | `PyPromptAssembler` |
-| `python/kerness/prompting.py` | re-export shim |
+| `bindings/python/src/runtime.rs:210` | `PyPromptAssembler` |
+| `bindings/python/kerness/prompting.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -58,11 +58,11 @@ file and both see a write — see [memory.md](memory.md).
 ## How to Test
 
 ```sh
-cargo test -p kerness prompting                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_prompting.py -q  # pass = 0 failed
+cargo test -p kerness prompting                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_prompting.py -q # pass = 0 failed
 ```
 
-- `tests/test_prompting.py:56` — `test_memory_with_nothing_in_it_renders_nothing` —
+- `bindings/python/tests/test_prompting.py:56` — `test_memory_with_nothing_in_it_renders_nothing` —
   and `:63` `test_only_a_writable_session_invites_notes`: the two branches in
   `memory_block`.
 - `:77` — `test_order_is_base_skills_tools_memory` — the fixed part order named in

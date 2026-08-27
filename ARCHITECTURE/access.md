@@ -23,14 +23,14 @@ escape rather than only for the happy path.
 | ---- | ---- |
 | `crates/kerness/src/access.rs` | `AccessPolicy`, `AccessManager`, the checks |
 | `crates/kerness/src/exec.rs` | the three tools the boundary exists for: run, read, list |
-| `crates/kerness-py/src/access.rs` | the pyclasses, and reading a Python `AccessPolicy` |
-| `python/kerness/access.py` | `AccessPolicy` as a dataclass, and the console prompt |
+| `bindings/python/src/access.rs` | the pyclasses, and reading a Python `AccessPolicy` |
+| `bindings/python/kerness/access.py` | `AccessPolicy` as a dataclass, and the console prompt |
 
-`AccessPolicy` is declared in Python (`python/kerness/access.py:83`) rather than
-as a pyclass because callers build one with keyword arguments and then mutate
-fields on it; `policy_from_py` (`crates/kerness-py/src/access.rs:113`) reads it
-into the Rust struct at the moment it is used, so a field assigned after
-construction still takes effect.
+`AccessPolicy` is declared in Python (`bindings/python/kerness/access.py:83`)
+rather than as a pyclass because callers build one with keyword arguments and
+then mutate fields on it; `policy_from_py` (`bindings/python/src/access.rs:113`)
+reads it into the Rust struct at the moment it is used, so a field assigned
+after construction still takes effect.
 
 ## Key Types and Entry Points
 
@@ -50,7 +50,7 @@ construction still takes effect.
   prompt implements; `None` means deny.
 - `crates/kerness/src/exec.rs:30` — `run_command(...)` — the only place a
   subprocess is spawned, with `DEFAULT_TIMEOUT` at `exec.rs:18`.
-- `python/kerness/access.py:21` — `prompt_on_console(req)` — deliberately Python:
+- `bindings/python/kerness/access.py:21` — `prompt_on_console(req)` — deliberately Python:
   it calls `input()`, and tests monkeypatch the module attribute.
 
 `AccessPolicy`'s derived `Default` and `AccessPolicy::new()` disagree on
@@ -70,11 +70,11 @@ on at `session.rs:348`.
 ## How to Test
 
 ```sh
-cargo test -p kerness access               # pass = 0 failed
-.venv/bin/python -m pytest tests/test_access.py -q   # pass = 0 failed
+cargo test -p kerness access                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_access.py -q # pass = 0 failed
 ```
 
-- `tests/test_access.py:150` — `test_traversal_out_of_an_allowed_dir_is_denied` —
+- `bindings/python/tests/test_access.py:150` — `test_traversal_out_of_an_allowed_dir_is_denied` —
   and `:161` `test_a_symlink_out_of_an_allowed_dir_is_denied`: the two escapes
   `check_path` exists to stop, tested at the layer that owns them.
 - `:259` `test_a_bare_policy_allows_nothing` and `:278`

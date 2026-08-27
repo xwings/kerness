@@ -23,8 +23,8 @@ what an agent can do with it.
 | `crates/kerness/src/skill/runtime.rs` | activation, the `Skill` tool, the tool gate |
 | `crates/kerness/src/skill/mod.rs` | the two submodules |
 | `crates/kerness/assets/skills/*/SKILL.md` | the built-in skills |
-| `crates/kerness-py/src/skill.rs` | `PySkillActivation`, `PySkillRegistry` |
-| `python/kerness/{skill_loader,skill_runtime}.py` | re-export shims |
+| `bindings/python/src/skill.rs` | `PySkillActivation`, `PySkillRegistry` |
+| `bindings/python/kerness/{skill_loader,skill_runtime}.py` | re-export shims |
 
 ## Key Types and Entry Points
 
@@ -64,17 +64,17 @@ what an agent can do with it.
 ## How to Test
 
 ```sh
-cargo test -p kerness skill                                  # pass = 0 failed
-.venv/bin/python -m pytest tests/test_skill_loader.py -q     # pass = 0 failed
-.venv/bin/python -m pytest tests/test_skill_runtime.py -q    # pass = 0 failed
+cargo test -p kerness skill                                               # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_skill_loader.py -q  # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_skill_runtime.py -q # pass = 0 failed
 ```
 
-- `tests/test_skill_runtime.py:138` — `test_a_builtin_bundle_is_listed_and_granted` —
+- `bindings/python/tests/test_skill_runtime.py:138` — `test_a_builtin_bundle_is_listed_and_granted` —
   and `:148` `test_an_untrusted_bundle_is_listed_but_not_granted`: the grant is
   conditional on the policy, and the listing is not.
-- `tests/test_skill_loader.py:59` — `test_absent_narrows_nothing_and_an_empty_list_narrows_to_nothing` —
+- `bindings/python/tests/test_skill_loader.py:59` — `test_absent_narrows_nothing_and_an_empty_list_narrows_to_nothing` —
   why `allowed_tools` stays `Option` all the way to Python.
-- `tests/test_skill_runtime.py:107` — `test_the_skill_tool_is_never_gated_out` — a
+- `bindings/python/tests/test_skill_runtime.py:107` — `test_the_skill_tool_is_never_gated_out` — a
   skill cannot narrow away the tool that loads skills.
 - `:49` — `test_the_body_is_served_once_per_turn` — a skill's text does not
   re-enter the context on every subsequent call.
@@ -82,7 +82,7 @@ cargo test -p kerness skill                                  # pass = 0 failed
 ## Open Gaps / Roadmap
 
 - The gate is a union across active skills
-  (`tests/test_skill_runtime.py:87`), so activating a broad skill widens what a
+  (`bindings/python/tests/test_skill_runtime.py:87`), so activating a broad skill widens what a
   narrow one permitted. Intersection would be the stricter reading but would make
   two useful skills mutually exclusive.
 - Bundle grants are read-only directory grants; a skill cannot ship a script and

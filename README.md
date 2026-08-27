@@ -46,7 +46,7 @@ Kerness is a **Rust crate**. `crates/kerness/` links no Python, spawns no
 threads, and runs a whole session on the calling thread — a stack trace from
 inside a tool handler reaches back to `Session::run`.
 
-`crates/kerness-py/` is a **binding**: a thin PyO3 layer that decides nothing.
+`bindings/python/` is a **binding**: a thin PyO3 layer that decides nothing.
 It forwards into the same kernel, so a session driven from Python takes the same
 code path as one driven from `main()`. What Python adds is what Python callers
 expect — a `Provider` you subclass, a lambda as a tool handler, a `pydantic`
@@ -294,16 +294,17 @@ or a different agent roster is refused, not half-applied.
 ## Layout
 
 ```text
-crates/kerness/           # the kernel, pure Rust — no PyO3, no Python
-  src/                    #   24 modules, 305 unit tests inline
-  tests/                  #   88 integration tests, over the public API only
-  examples/               #   8 runnable Rust harnesses, one needing no key
-  assets/                 #   bundled gameplans, personas, skills
-crates/kerness-py/        # the PyO3 extension module, kerness._core
-python/kerness/           # the Python package: shims, deliberate Python, assets
-tests/                    # pytest suite, over the binding
-examples/                 # runnable Python harnesses
-ARCHITECTURE/             # one document per subsystem
+crates/kerness/  # the kernel, pure Rust — no PyO3, no Python
+  src/           #   24 modules, 305 unit tests inline
+  tests/         #   88 integration tests, over the public API only
+  examples/      #   8 runnable Rust harnesses, one needing no key
+  assets/        #   bundled gameplans, personas, skills
+bindings/python/ # everything the wheel is built from
+  src/           #   the PyO3 extension module, kerness._core
+  kerness/       #   the Python package: shims, deliberate Python, assets
+  tests/         #   pytest suite, over the binding
+  examples/      #   runnable Python harnesses
+ARCHITECTURE/    # one document per subsystem
 ```
 
 The bundled `debate`, `discussion`, and `research` gameplans are worked examples
@@ -324,8 +325,8 @@ cargo build -p kerness --examples          # every example still compiles
 cargo run -p kerness --example offline_debate   # a whole session, no key
 
 maturin develop
-python -m pytest tests/ -q                 # 394 tests
-python -m kerness.selfcheck                # exit 0
+python -m pytest bindings/python/tests -q # 394 tests
+python -m kerness.selfcheck               # exit 0
 ```
 
 CI runs all of it on every push, on Rust stable and the 1.88 MSRV floor, and on

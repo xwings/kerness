@@ -26,8 +26,8 @@ that resolves `kerness.provider.http_post_json` at call time so `@patch` works.
 | `crates/kerness/src/provider/claude.rs` | Anthropic messages, API key or OAuth |
 | `crates/kerness/src/provider/custom.rs` | a caller-described endpoint |
 | `crates/kerness/src/http.rs` | `HttpTransport`, `UreqTransport`, `post_json` |
-| `crates/kerness-py/src/provider.rs` | `PyProviderCore`, `PyProvider`, the transport seam |
-| `python/kerness/provider.py` | the base class and six concrete providers, in Python |
+| `bindings/python/src/provider.rs` | `PyProviderCore`, `PyProvider`, the transport seam |
+| `bindings/python/kerness/provider.py` | the base class and six concrete providers, in Python |
 
 ## Key Types and Entry Points
 
@@ -45,14 +45,14 @@ that resolves `kerness.provider.http_post_json` at call time so `@patch` works.
   the Anthropic wire shape, which lifts the system message out of the list.
 - `crates/kerness/src/http.rs:24` — `HttpTransport` — the seam; `:73`
   `set_transport` installs a replacement; `:78` `post_json` is what providers call.
-- `python/kerness/provider.py:64` — `Provider` — the class user code subclasses.
-- `python/kerness/provider.py:86` — `effective_dialect()` and `:102`
+- `bindings/python/kerness/provider.py:64` — `Provider` — the class user code subclasses.
+- `bindings/python/kerness/provider.py:86` — `effective_dialect()` and `:102`
   `_chat_accepts_tools()` — deliberately Python: it is
   `inspect.signature(type(self).chat)` on the concrete subclass, and the core
   takes the answer as a capability flag.
-- `crates/kerness-py/src/provider.rs:596` — `install_transport()` — installs the
+- `bindings/python/src/provider.rs:596` — `install_transport()` — installs the
   transport that resolves `kerness.provider.http_post_json` at call time.
-- `crates/kerness-py/src/provider.rs:607` — `http_post_json(...)` — the unpatched
+- `bindings/python/src/provider.rs:607` — `http_post_json(...)` — the unpatched
   function, itself a `#[pyfunction]` over the same Rust code.
 
 ### Why the supplied methods are free functions
@@ -84,13 +84,13 @@ and response parsing stay in Rust either way.
 ## How to Test
 
 ```sh
-cargo test -p kerness provider                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_provider.py -q  # pass = 0 failed
+cargo test -p kerness provider                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_provider.py -q # pass = 0 failed
 ```
 
 - The Rust tests use a `Recorder` transport (`provider/mod.rs:451`) to assert the
   exact payload each backend builds, without a network call.
-- `tests/test_provider.py` covers the `@patch` seam, the native-tools fallback
+- `bindings/python/tests/test_provider.py` covers the `@patch` seam, the native-tools fallback
   when a provider rejects tool schemas, retry and backoff, and structured output
   through `pydantic`.
 
@@ -100,7 +100,7 @@ cargo test -p kerness provider                        # pass = 0 failed
   token-by-token output cannot get it.
 - Retry is a fixed backoff over `is_provider()` errors; there is no jitter and no
   respect for a `Retry-After` header.
-- `pydantic` is optional and imported lazily (`python/kerness/provider.py:48`);
+- `pydantic` is optional and imported lazily (`bindings/python/kerness/provider.py:48`);
   structured output raises a clear error when it is absent rather than degrading.
 - The minimum-interval throttle is per provider instance, so two providers
   against one endpoint do not coordinate.

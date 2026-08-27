@@ -18,8 +18,8 @@ malformed. Serves **M1**.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/jsonschema.rs` | both functions |
-| `crates/kerness-py/src/funcs.rs:202,214` | the two pyfunctions |
-| `python/kerness/jsonschema.py` | re-export shim |
+| `bindings/python/src/funcs.rs:202,214` | the two pyfunctions |
+| `bindings/python/kerness/jsonschema.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -47,8 +47,8 @@ either generated or received alongside a tool it is about to call.
 ## How to Test
 
 ```sh
-cargo test -p kerness jsonschema                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_jsonschema.py -q  # pass = 0 failed
+cargo test -p kerness jsonschema                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_jsonschema.py -q # pass = 0 failed
 ```
 
 - The Rust tests are where the coverage is: `strict_closes_objects_and_requires_every_property`,
@@ -58,7 +58,7 @@ cargo test -p kerness jsonschema                        # pass = 0 failed
   `enum_failures_quote_the_choices_the_way_python_would` and
   `required_and_type_failures_read_as_instructions`, because those strings go back
   to the model and are the module's real output.
-- `tests/test_jsonschema.py` holds one case, `test_closed_empty_object_rejects_every_argument`:
+- `bindings/python/tests/test_jsonschema.py` holds one case, `test_closed_empty_object_rejects_every_argument`:
   a tool that takes no arguments must reject every argument rather than ignore
   them.
 

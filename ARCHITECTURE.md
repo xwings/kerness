@@ -49,6 +49,9 @@ platform covers every supported Python.
 
 ## Workspace Layout
 
+One artifact per top-level directory: `crates/` is the crate, `bindings/` is
+everything the wheel is made of. Neither reaches into the other's tests.
+
 ```
 Cargo.toml                  workspace root, shared dependency versions
 crates/
@@ -57,18 +60,19 @@ crates/
     assets/                 built-in gameplans, personas, skills
     tests/                  88 integration tests over the crate's public surface
     examples/               8 harnesses driven from Rust alone
-  kerness-py/               the Python extension — thin, decides nothing
+bindings/
+  python/                   everything the wheel is built from
+    Cargo.toml              the `kerness-py` crate, a workspace member
     src/                    11 modules, one per boundary concern
-python/
-  kerness/                  the installed Python package
-    __init__.py             bootstrap + public surface
-    *.py                    per-subsystem re-export shims
-    provider.py             deliberate Python (see ARCHITECTURE/provider.md)
-    access.py               deliberate Python (console prompt)
-    selfcheck.py            deliberate Python (import health)
-    gameplans/ personas/ skills/   the same assets, installed
-tests/                      26 pytest modules over the Python surface
-examples/                   runnable harnesses, exercised by tests/test_examples.py
+    kerness/                the installed Python package
+      __init__.py           bootstrap + public surface
+      *.py                  per-subsystem re-export shims
+      provider.py           deliberate Python (see ARCHITECTURE/provider.md)
+      access.py             deliberate Python (console prompt)
+      selfcheck.py          deliberate Python (import health)
+      gameplans/ personas/ skills/   the same assets, installed
+    tests/                  26 pytest modules over the Python surface
+    examples/               runnable harnesses, walked by test_examples.py above
 .github/workflows/          CI on every push; release builds wheels and an sdist
 assets/                     project marks: logo.svg, logo-mark.svg
 README.md                   the public introduction
@@ -77,23 +81,31 @@ ARCHITECTURE.md             this file
 ARCHITECTURE/               one file per subsystem
 ```
 
-`crates/kerness/assets/` and `python/kerness/{gameplans,personas,skills}/` hold
-byte-identical copies. Both must exist: the crate cannot read the package's copy
-when used from Rust alone, and the wheel cannot ship the crate's. Nothing in the
-build keeps them in step, so `tests/test_packaging.py:30` asserts it directly.
+`pyproject.toml` stays at the root, because that is where a build backend is
+looked for; it points `manifest-path` and `python-source` at `bindings/python/`.
+Nothing else under `bindings/python/` reaches the wheel — maturin packages only
+the directory matching `module-name`, so `tests/` and `examples/` sit beside the
+package without shipping in it.
+
+`crates/kerness/assets/` and
+`bindings/python/kerness/{gameplans,personas,skills}/` hold byte-identical
+copies. Both must exist: the crate cannot read the package's copy when used from
+Rust alone, and the wheel cannot ship the crate's. Nothing in the build keeps
+them in step, so `bindings/python/tests/test_packaging.py:30` asserts it
+directly.
 
 ## Boot and Entry Flow
 
 ### From Python
 
-1. `import kerness` runs `python/kerness/__init__.py`.
+1. `import kerness` runs `bindings/python/kerness/__init__.py`.
 2. Line 12 calls `_core.bootstrap(exceptions, _enums.ToolDialect, <package dir>)`.
    The extension cannot declare three things itself, so they are handed down:
    the exception classes (two-argument constructors a `create_exception!` cannot
    express), the `ToolDialect` enum (callers compare members with `is`, so it
    must be a real `enum.Enum`), and the assets root (only the package knows where
    pip put it). `bootstrap` also installs the HTTP transport seam and the logger
-   — `crates/kerness-py/src/lib.rs:33`.
+   — `bindings/python/src/lib.rs:33`.
 3. The remaining imports pull the public names out of the per-subsystem shims.
 4. The caller builds a `Session(...)`, registers participants, tools, and skills,
    and calls `run()`.
@@ -153,14 +165,14 @@ The commands that gate a change. Each module file names the subset that proves
 its own status.
 
 ```sh
-cargo fmt --all -- --check                         # pass = exit 0
-cargo test --workspace -q                          # pass = 305 unit + 88 integration, 0 failed
-cargo clippy --workspace --all-targets -- -D warnings   # pass = exit 0
-cargo build -p kerness --examples                  # pass = all 8 compile
-cargo run -p kerness --example offline_debate      # pass = completes with no key, no network
-.venv/bin/maturin develop                          # pass = "Installed kerness-0.1.0"
-.venv/bin/python -m pytest tests/ -q               # pass = 394 passed
-.venv/bin/python -m kerness.selfcheck              # pass = "OK: all core checks passed", exit 0
+cargo fmt --all -- --check                            # pass = exit 0
+cargo test --workspace -q                             # pass = 305 unit + 88 integration, 0 failed
+cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
+cargo build -p kerness --examples                     # pass = all 8 compile
+cargo run -p kerness --example offline_debate         # pass = completes with no key, no network
+.venv/bin/maturin develop                             # pass = "Installed kerness-0.1.0"
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 394 passed
+.venv/bin/python -m kerness.selfcheck                 # pass = "OK: all core checks passed", exit 0
 ```
 
 `.github/workflows/ci.yml` runs all of the above on every push, plus

@@ -17,8 +17,8 @@ refused rather than half-applied. Serves **M2**.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/sessionfile.rs` | the snapshot, the identity check, save and load |
-| `crates/kerness-py/src/funcs.rs` | `PySessionSnapshot` and the four functions |
-| `python/kerness/sessionfile.py` | re-export shim |
+| `bindings/python/src/funcs.rs` | `PySessionSnapshot` and the four functions |
+| `bindings/python/kerness/sessionfile.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -38,7 +38,7 @@ refused rather than half-applied. Serves **M2**.
 
 The Python constructor takes `loop=` as a keyword, which is a Rust keyword; the
 binding uses the raw identifier `r#loop` so the Python name is the natural one
-(`crates/kerness-py/src/funcs.rs`).
+(`bindings/python/src/funcs.rs`).
 
 ## Interactions
 
@@ -53,11 +53,11 @@ binding uses the raw identifier `r#loop` so the Python name is the natural one
 ## How to Test
 
 ```sh
-cargo test -p kerness sessionfile                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_sessionfile.py -q  # pass = 0 failed
+cargo test -p kerness sessionfile                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_sessionfile.py -q # pass = 0 failed
 ```
 
-- `tests/test_sessionfile.py:31` — `test_every_kind_of_record_survives` — the round
+- `bindings/python/tests/test_sessionfile.py:31` — `test_every_kind_of_record_survives` — the round
   trip, across every record kind rather than one representative.
 - `:77` — `test_a_missing_file_is_not_an_error_and_is_not_created` — why `load_snapshot`
   returns `Result<Option<_>>`.

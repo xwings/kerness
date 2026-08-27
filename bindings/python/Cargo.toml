@@ -12,6 +12,6 @@ name = "_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-kerness = { path = "../kerness" }
+kerness = { path = "../../crates/kerness" }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 serde_json.workspace = true

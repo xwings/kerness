@@ -21,8 +21,8 @@ authority to address participants by name.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/agent.rs` | `Role`, `Agent`, system prompt and message assembly |
-| `crates/kerness-py/src/types.rs` | `PyAgent`, the pyclass callers construct |
-| `python/kerness/agent.py` | re-export shim |
+| `bindings/python/src/types.rs` | `PyAgent`, the pyclass callers construct |
+| `bindings/python/kerness/agent.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -57,11 +57,11 @@ print nothing legible in a test failure.
 ## How to Test
 
 ```sh
-cargo test -p kerness agent::                       # pass = 0 failed
-.venv/bin/python -m pytest tests/test_agent.py -q   # pass = 0 failed
+cargo test -p kerness agent::                                     # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_agent.py -q # pass = 0 failed
 ```
 
-- `tests/test_agent.py:21` — `test_every_decoration_is_appended_to_the_base` —
+- `bindings/python/tests/test_agent.py:21` — `test_every_decoration_is_appended_to_the_base` —
   and `:12` `test_an_undecorated_agent_gets_the_prompt_it_was_given`: decoration
   adds, never replaces.
 - `:88` — `test_the_system_prompt_leads_and_history_follows_in_order` — what

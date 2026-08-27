@@ -20,8 +20,8 @@ harness that wants a different loop but the same turn mechanics constructs an
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/agent_runtime.rs` | `AgentRunner` and the tool-call cycle |
-| `crates/kerness-py/src/runtime.rs` | `PyAgentRunner` |
-| `python/kerness/agent_runtime.py` | re-export shim |
+| `bindings/python/src/runtime.rs` | `PyAgentRunner` |
+| `bindings/python/kerness/agent_runtime.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -54,13 +54,13 @@ see [bindings.md](bindings.md).
 ## How to Test
 
 ```sh
-cargo test -p kerness agent_runtime                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_agent_runtime.py -q  # pass = 0 failed
+cargo test -p kerness agent_runtime                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_agent_runtime.py -q # pass = 0 failed
 ```
 
 - The Rust tests drive a `MockProvider` (`crates/kerness/src/agent_runtime.rs:290`)
   through a fixed reply sequence, so the cycle is exercised without a network call.
-- `tests/test_agent_runtime.py:128` — `test_a_model_stuck_on_invalid_json_does_not_loop_forever` —
+- `bindings/python/tests/test_agent_runtime.py:128` — `test_a_model_stuck_on_invalid_json_does_not_loop_forever` —
   the `MAX_INVALID_CALLS` cutoff — paired with `:139`
   `test_a_recovering_model_is_not_penalised_for_an_earlier_bad_block`, which is
   what makes the counter consecutive rather than cumulative.

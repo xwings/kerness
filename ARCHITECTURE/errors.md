@@ -21,8 +21,8 @@ declared in Python instead.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/error.rs` | the `Error` enum and `Result` alias |
-| `crates/kerness-py/src/errors.rs` | the map, both directions, and the `Raise`/`Catch` traits |
-| `python/kerness/exceptions.py` | the exception classes and their constructors |
+| `bindings/python/src/errors.rs` | the map, both directions, and the `Raise`/`Catch` traits |
+| `bindings/python/kerness/exceptions.py` | the exception classes and their constructors |
 
 ## Key Types and Entry Points
 
@@ -30,18 +30,18 @@ declared in Python instead.
 - `crates/kerness/src/error.rs:56` — `is_provider()` — the test the retry loop
   branches on; a provider error is retryable, others are not.
 - `crates/kerness/src/error.rs:103` — `Result<T>` — the crate-wide alias.
-- `crates/kerness-py/src/errors.rs:31` — `register(module)` — stores the classes
+- `bindings/python/src/errors.rs:31` — `register(module)` — stores the classes
   handed down by `bootstrap`.
-- `crates/kerness-py/src/errors.rs:55` — `to_py(error)` — `Error` to `PyErr`,
+- `bindings/python/src/errors.rs:55` — `to_py(error)` — `Error` to `PyErr`,
   constructing the right class with the right arguments.
-- `crates/kerness-py/src/errors.rs:92` — `from_py(py, error)` — `PyErr` to `Error`;
+- `bindings/python/src/errors.rs:92` — `from_py(py, error)` — `PyErr` to `Error`;
   a recognised class maps to its variant, and anything else becomes
   `Error::Session`.
-- `crates/kerness-py/src/errors.rs:146` — `Raise<T>` — `.raise()` on a
+- `bindings/python/src/errors.rs:146` — `Raise<T>` — `.raise()` on a
   `Result<T>`, used at every pyclass method return.
-- `crates/kerness-py/src/errors.rs:157` — `Catch<T>` — `.catch()` on a
+- `bindings/python/src/errors.rs:157` — `Catch<T>` — `.catch()` on a
   `PyResult<T>`, used wherever the framework calls into Python.
-- `python/kerness/exceptions.py:19` — `ProviderHTTPError(status_code, url, body)` —
+- `bindings/python/kerness/exceptions.py:19` — `ProviderHTTPError(status_code, url, body)` —
   the two-argument constructor the map has to preserve.
 
 ### Where `from_py` loses information
@@ -62,8 +62,8 @@ to close that gap; see [channel.md](channel.md).
 ## How to Test
 
 ```sh
-cargo test -p kerness error                    # pass = 0 failed
-.venv/bin/python -m pytest tests/ -q -k error  # pass = 0 failed
+cargo test -p kerness error                                  # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests -q -k error # pass = 0 failed
 ```
 
 - The provider, access, and gameplan test modules each assert the specific

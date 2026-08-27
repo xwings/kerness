@@ -11,7 +11,7 @@ from pathlib import Path
 
 import kerness
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 CRATE_ASSETS = ROOT / "crates" / "kerness" / "assets"
 PACKAGE_ASSETS = Path(kerness.__file__).resolve().parent
 

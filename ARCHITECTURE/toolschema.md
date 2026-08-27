@@ -17,9 +17,9 @@ framework falls back to the prompt rendering in [toolkit.md](toolkit.md), and
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/toolschema.rs` | `ToolDialect` and the per-dialect conversions |
-| `crates/kerness-py/src/types.rs:39` | `register_dialect`, and dialect conversion both ways |
-| `python/kerness/_enums.py:14` | `ToolDialect` as a real `enum.Enum` |
-| `python/kerness/toolschema.py` | re-export shim |
+| `bindings/python/src/types.rs:39` | `register_dialect`, and dialect conversion both ways |
+| `bindings/python/kerness/_enums.py:14` | `ToolDialect` as a real `enum.Enum` |
+| `bindings/python/kerness/toolschema.py` | re-export shim |
 
 `ToolDialect` is declared in Python rather than as a pyclass because callers
 compare members with `is`, which requires genuine enum member identity. The
@@ -58,18 +58,18 @@ value.
 ## How to Test
 
 ```sh
-cargo test -p kerness toolschema                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_toolschema.py -q  # pass = 0 failed
+cargo test -p kerness toolschema                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_toolschema.py -q # pass = 0 failed
 ```
 
-- `tests/test_toolschema.py` asserts exact wire shapes for each dialect in both
+- `bindings/python/tests/test_toolschema.py` asserts exact wire shapes for each dialect in both
   directions — `test_openai_uses_a_tool_role_message` (`:133`) against
   `test_anthropic_uses_a_user_message_carrying_the_error_flag_natively` (`:142`)
   is the pair that shows how far the dialects diverge.
-- `tests/test_toolschema.py:52` — `tool_schemas(ToolDialect.TEXT, [CMD]) is None`
+- `bindings/python/tests/test_toolschema.py:52` — `tool_schemas(ToolDialect.TEXT, [CMD]) is None`
   and `tool_schemas(ToolDialect.OPENAI, []) is None`: no native tools and no tools
   are both `None`, not an empty list.
-- `tests/test_provider.py:473` onward asserts `effective_dialect() is ToolDialect.OPENAI`
+- `bindings/python/tests/test_provider.py:473` onward asserts `effective_dialect() is ToolDialect.OPENAI`
   — identity, not equality. That is what requires the enum to be a real
   `enum.Enum` on the Python side rather than a pyclass.
 

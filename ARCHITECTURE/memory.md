@@ -16,8 +16,8 @@ writes there goes into the next agent's prompt verbatim. Serves **M1**.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/memory.rs` | the file and its four operations |
-| `crates/kerness-py/src/types.rs:914` | `PyMemory`, and the owned-vs-session distinction |
-| `python/kerness/memory.py` | re-export shim |
+| `bindings/python/src/types.rs:914` | `PyMemory`, and the owned-vs-session distinction |
+| `bindings/python/kerness/memory.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -30,7 +30,7 @@ writes there goes into the next agent's prompt verbatim. Serves **M1**.
   raw append versus an append that adds the entry separator; the second is what
   the `write_memory` tool calls.
 - `crates/kerness/src/memory.rs:90` — `write(content)` — replaces the file.
-- `crates/kerness-py/src/types.rs:921` — `of_session(memories)` on `PyMemory` — a
+- `bindings/python/src/types.rs:921` — `of_session(memories)` on `PyMemory` — a
   memory handle backed by the session's live store rather than an owned copy.
 
 ### Owned versus session-backed
@@ -53,14 +53,14 @@ not its text, so two agents pointed at one file both see each other's writes.
 ## How to Test
 
 ```sh
-cargo test -p kerness memory                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_memory.py -q  # pass = 0 failed
+cargo test -p kerness memory                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_memory.py -q # pass = 0 failed
 ```
 
-- `tests/test_memory.py:7` — `test_load_reads_what_is_there_and_creates_what_is_not`;
+- `bindings/python/tests/test_memory.py:7` — `test_load_reads_what_is_there_and_creates_what_is_not`;
   `:43` `test_an_entry_is_stored_verbatim_one_blank_line_apart`; `:63`
   `test_nothing_reaches_disk_until_there_is_something_to_write`.
-- `tests/test_session.py:1522` — `test_per_agent_memory` — and `:1570`
+- `bindings/python/tests/test_session.py:1522` — `test_per_agent_memory` — and `:1570`
   `test_agent_without_memory_uses_session_memory`: the owned-versus-session
   distinction, observed through a live session.
 

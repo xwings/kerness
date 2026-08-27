@@ -22,8 +22,8 @@ the rest.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/session.rs` | `SessionConfig`, `Session`, `Memories`, `SessionResult`, the `LoopHost` impl |
-| `crates/kerness-py/src/session.rs` | `PySession`, `PySessionResult`, the parked-channel re-raise |
-| `python/kerness/session.py` | re-export shim (`Message`, `Session`, `SessionResult`) |
+| `bindings/python/src/session.rs` | `PySession`, `PySessionResult`, the parked-channel re-raise |
+| `bindings/python/kerness/session.py` | re-export shim (`Message`, `Session`, `SessionResult`) |
 
 ## Key Types and Entry Points
 
@@ -74,17 +74,17 @@ Session is the assembly point, so it touches nearly everything:
 ## How to Test
 
 ```sh
-cargo test -p kerness session                          # pass = 0 failed
-.venv/bin/python -m pytest tests/test_session.py -q    # pass = 0 failed
-.venv/bin/python -m pytest tests/test_examples.py -q   # pass = 0 failed
+cargo test -p kerness session                                        # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_session.py -q  # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_examples.py -q # pass = 0 failed
 ```
 
 - The Rust tests drive a `SequenceProvider` (`session.rs:1521`) through a fixed
   reply sequence with a `CaptureChannel` (`:1594`) recording what was delivered.
-- `tests/test_session.py` is the suite's integration layer: 90 cases covering
+- `bindings/python/tests/test_session.py` is the suite's integration layer: 90 cases covering
   access refusals mid-run (`:366`), per-agent memory (`:1522`), resume across two
   runs (`:2099`), and compaction of a long run (`:2174`).
-- `tests/test_examples.py:132` — `test_every_name_it_reaches_for_still_exists` —
+- `bindings/python/tests/test_examples.py:132` — `test_every_name_it_reaches_for_still_exists` —
   parses each example's AST and resolves every imported name. It does not run
   them; it proves the public surface an example depends on has not moved.
 

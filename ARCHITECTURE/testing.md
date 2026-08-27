@@ -13,7 +13,7 @@ can be broken. A suite that catches one of those says nothing about the others.
 | --- | --- | --- |
 | Unit | `#[cfg(test)]` inside `crates/kerness/src/` | A function that computes the wrong answer. Reaches internals a caller cannot. |
 | Integration | `crates/kerness/tests/` | A session that cannot be *assembled* — a missing re-export, a type a dependent cannot name, a run whose parts are each right and whose whole is not. |
-| Python | `tests/` | Anything about the boundary: a value that crosses wrong, a subclass the extension will not accept, an asset the wheel did not install. |
+| Python | `bindings/python/tests/` | Anything about the boundary: a value that crosses wrong, a subclass the extension will not accept, an asset the wheel did not install. |
 
 The integration suite is the one that was missing. Before it, every claim about
 how a session actually runs — the orchestrator loop, resume, compaction, the
@@ -31,10 +31,10 @@ the pure-Rust caller the crate exists for unrepresented.
 | ---- | ---- |
 | `crates/kerness/tests/common/mod.rs` | the doubles all eight files share |
 | `crates/kerness/tests/*.rs` | one file per behaviour cluster, 88 tests |
-| `tests/conftest.py` | the Python suite's equivalent doubles |
-| `tests/test_*.py` | 26 modules, 394 tests |
+| `bindings/python/tests/conftest.py` | the Python suite's equivalent doubles |
+| `bindings/python/tests/test_*.py` | 26 modules, 394 tests |
 | `crates/kerness/examples/*.rs` | 8 examples, compiled by CI |
-| `examples/` | 7 Python examples, walked by `tests/test_examples.py` |
+| `bindings/python/examples/` | 7 Python examples, walked by `bindings/python/tests/test_examples.py` |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
 | `.github/workflows/release.yml` | wheels, sdist, and the clean-interpreter check |
 
@@ -98,12 +98,12 @@ The eight integration files:
 ## How to Test
 
 ```sh
-cargo fmt --all -- --check                              # pass = exit 0
-cargo clippy --workspace --all-targets -- -D warnings   # pass = exit 0
-cargo test --workspace -q                               # pass = 305 unit + 88 integration, 0 failed
-cargo build -p kerness --examples                       # pass = all 8 compile
-cargo run -p kerness --example offline_debate           # pass = completes with no key
-.venv/bin/python -m pytest tests/ -q                    # pass = 394 passed
+cargo fmt --all -- --check                            # pass = exit 0
+cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
+cargo test --workspace -q                             # pass = 305 unit + 88 integration, 0 failed
+cargo build -p kerness --examples                     # pass = all 8 compile
+cargo run -p kerness --example offline_debate         # pass = completes with no key
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 394 passed
 ```
 
 CI runs those, plus `cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D
@@ -126,6 +126,6 @@ project does not own.
 - CI runs on Linux only. The wheels for macOS and Windows are built at release
   time and their tests are not run there, so a platform-specific break arrives
   as a bad wheel rather than a red build.
-- Nothing checks that `crates/kerness/assets/` and `python/kerness/` hold the
-  same asset bytes from the Rust side; `tests/test_packaging.py:30` is the only
+- Nothing checks that `crates/kerness/assets/` and `bindings/python/kerness/` hold the
+  same asset bytes from the Rust side; `bindings/python/tests/test_packaging.py:30` is the only
   guard, and it needs the Python surface installed to run.

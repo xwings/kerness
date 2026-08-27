@@ -29,8 +29,8 @@ harness parser then rejects it as "must be a boolean".
 | ---- | ---- |
 | `crates/kerness/src/harness.rs` | the specs, the parser, and validation |
 | `crates/kerness/src/yaml.rs` | YAML 1.1 scalar resolution over an event stream |
-| `crates/kerness-py/src/types.rs` | seven spec pyclasses (`:1179`–`:1516`) |
-| `python/kerness/harness.py` | re-export shim |
+| `bindings/python/src/types.rs` | seven spec pyclasses (`:1179`–`:1516`) |
+| `bindings/python/kerness/harness.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -69,18 +69,18 @@ harness parser then rejects it as "must be a boolean".
 ## How to Test
 
 ```sh
-cargo test -p kerness harness                        # pass = 0 failed
-cargo test -p kerness yaml                           # pass = 0 failed
-.venv/bin/python -m pytest tests/test_harness.py -q  # pass = 0 failed
+cargo test -p kerness harness                                       # pass = 0 failed
+cargo test -p kerness yaml                                          # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_harness.py -q # pass = 0 failed
 ```
 
 - The YAML tests cover the 1.1 resolutions that differ from 1.2: `yes`/`no`/
   `on`/`off`, leading-zero octal, and an unsigned exponent that is not a number.
-- `tests/test_harness.py:129` — `test_unknown_tool_is_an_error_not_a_silent_drop`,
+- `bindings/python/tests/test_harness.py:129` — `test_unknown_tool_is_an_error_not_a_silent_drop`,
   `:134` `test_reserved_tool_name_rejected_at_load`, and `:78`
   `test_a_scalar_of_the_wrong_type_is_rejected_not_coerced`: the three ways the
   contract refuses rather than guesses.
-- `tests/test_harness.py:221` — `test_every_problem_is_reported_at_once` —
+- `bindings/python/tests/test_harness.py:221` — `test_every_problem_is_reported_at_once` —
   validation collects every failure before returning, so an author fixing three
   problems runs the loader once.
 

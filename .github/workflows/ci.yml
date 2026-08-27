@@ -100,7 +100,7 @@ jobs:
           .venv/bin/maturin develop --extras dev
 
       - name: Test
-        run: .venv/bin/python -m pytest tests/ -q
+        run: .venv/bin/python -m pytest bindings/python/tests -q
 
       # Proves the installed package, not the source tree: the assets resolve,
       # every module imports, and the constants agree across the boundary.
@@ -108,4 +108,4 @@ jobs:
         run: .venv/bin/python -m kerness.selfcheck
 
       - name: Lint
-        run: .venv/bin/ruff check python tests examples
+        run: .venv/bin/ruff check bindings/python

@@ -19,9 +19,9 @@ its result shaped (`ToolDispatcher`). Serves **M1**.
 | ---- | ---- |
 | `crates/kerness/src/tooling.rs` | `ToolSpec`, `ToolCall`, `ToolHandler`, parsing, prompt rendering |
 | `crates/kerness/src/toolkit.rs` | `ToolDispatcher`, `ToolResult`, `resolve` |
-| `crates/kerness-py/src/types.rs:65,162,176,291` | `PyToolCall`, `PyToolHandler`, `PyToolSpec`, `PyToolResult` |
-| `crates/kerness-py/src/runtime.rs:172` | `PyToolDispatcher` |
-| `python/kerness/{tooling,toolkit}.py` | re-export shims |
+| `bindings/python/src/types.rs:65,162,176,291` | `PyToolCall`, `PyToolHandler`, `PyToolSpec`, `PyToolResult` |
+| `bindings/python/src/runtime.rs:172` | `PyToolDispatcher` |
+| `bindings/python/kerness/{tooling,toolkit}.py` | re-export shims |
 
 ## Key Types and Entry Points
 
@@ -67,23 +67,23 @@ because the handler is a trait object: equality is by name and schema, and
 ## How to Test
 
 ```sh
-cargo test -p kerness tooling                        # pass = 0 failed
-cargo test -p kerness toolkit                        # pass = 0 failed
-.venv/bin/python -m pytest tests/test_tooling.py -q  # pass = 0 failed
-.venv/bin/python -m pytest tests/test_toolkit.py -q  # pass = 0 failed
+cargo test -p kerness tooling                                       # pass = 0 failed
+cargo test -p kerness toolkit                                       # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_tooling.py -q # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_toolkit.py -q # pass = 0 failed
 ```
 
-- `tests/test_tooling.py:12` — `test_a_call_is_found_in_every_wrapper_a_model_reaches_for` —
+- `bindings/python/tests/test_tooling.py:12` — `test_a_call_is_found_in_every_wrapper_a_model_reaches_for` —
   the parser's real job: models fence a call half a dozen different ways.
 - `:36` `test_output_that_merely_looks_like_one_is_left_alone` and `:46`
   `test_a_payload_with_nothing_callable_in_it_becomes_an_invalid_call` — the two
   failure directions, neither of which raises.
-- `tests/test_toolkit.py:108` — `test_absent_is_everything_empty_is_nothing_and_order_is_registration` —
+- `bindings/python/tests/test_toolkit.py:108` — `test_absent_is_everything_empty_is_nothing_and_order_is_registration` —
   `resolve`'s three-way distinction.
-- `tests/test_toolkit.py:93` asserts a handler that raises becomes a `ToolResult`
+- `bindings/python/tests/test_toolkit.py:93` asserts a handler that raises becomes a `ToolResult`
   carrying the error rather than propagating, and `:38` that the actor reaches
   only the handlers that asked for it.
-- `tests/test_skill_runtime.py:119` calls `spec.handler({"name": "a"})` directly —
+- `bindings/python/tests/test_skill_runtime.py:119` calls `spec.handler({"name": "a"})` directly —
   the `Skill` tool's handler is a Rust closure, so this is what proves
   `PyToolHandler` ([bindings.md](bindings.md)) makes it callable from Python.
 

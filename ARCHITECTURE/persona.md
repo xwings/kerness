@@ -17,8 +17,8 @@ the agent's system prompt. Serves **M2**.
 | ---- | ---- |
 | `crates/kerness/src/persona.rs` | loading, path resolution, and prompt rendering |
 | `crates/kerness/assets/personas/*.md` | the built-in personas |
-| `crates/kerness-py/src/types.rs:973` | `PyPersonaConfig` |
-| `python/kerness/persona_loader.py` | re-export shim |
+| `bindings/python/src/types.rs:973` | `PyPersonaConfig` |
+| `bindings/python/kerness/persona_loader.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -45,11 +45,11 @@ the agent's system prompt. Serves **M2**.
 ## How to Test
 
 ```sh
-cargo test -p kerness persona                                # pass = 0 failed
-.venv/bin/python -m pytest tests/test_persona_loader.py -q   # pass = 0 failed
+cargo test -p kerness persona                                              # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_persona_loader.py -q # pass = 0 failed
 ```
 
-- `tests/test_persona_loader.py:111` — `test_the_working_directory_wins_over_the_search_path` —
+- `bindings/python/tests/test_persona_loader.py:111` — `test_the_working_directory_wins_over_the_search_path` —
   precedence, which is the whole reason `search` is ordered.
 - `:126` — `test_the_error_lists_every_place_it_looked_and_no_more` — a missing
   persona names every candidate path, so an author can see which root was wrong.
@@ -61,4 +61,4 @@ cargo test -p kerness persona                                # pass = 0 failed
 - Personas are static text. There is no templating, so a persona that should vary
   by round has to be expressed as instructions rather than substitutions.
 - The built-ins stay framework-generic by project rule; domain personas ship with
-  the harness that needs them, as `examples/texas_holdem/personas/` does.
+  the harness that needs them, as `bindings/python/examples/texas_holdem/personas/` does.

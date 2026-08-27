@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/kerness", "crates/kerness-py"]
+members = ["crates/kerness", "bindings/python"]
 resolver = "2"
 
 [workspace.package]

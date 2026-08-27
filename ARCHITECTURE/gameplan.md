@@ -22,8 +22,8 @@ ship with the framework, and the three-step resolution of where they live.
 | `crates/kerness/src/gameplan.rs` | loading, splitting, and the built-in list |
 | `crates/kerness/src/assets.rs` | the assets root and Markdown-stem enumeration |
 | `crates/kerness/assets/gameplans/*.md` | the built-in gameplans |
-| `crates/kerness-py/src/types.rs:1673` | `PyGameplanConfig` |
-| `python/kerness/gameplan_loader.py` | re-export shim |
+| `bindings/python/src/types.rs:1673` | `PyGameplanConfig` |
+| `bindings/python/kerness/gameplan_loader.py` | re-export shim |
 
 ## Key Types and Entry Points
 
@@ -58,14 +58,14 @@ ship with the framework, and the three-step resolution of where they live.
 ## How to Test
 
 ```sh
-cargo test -p kerness gameplan                                # pass = 0 failed
-.venv/bin/python -m pytest tests/test_gameplan_loader.py -q   # pass = 0 failed
-.venv/bin/python -m pytest tests/test_packaging.py -q         # pass = 0 failed
+cargo test -p kerness gameplan                                              # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_gameplan_loader.py -q # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_packaging.py -q       # pass = 0 failed
 ```
 
-- `tests/test_packaging.py:30` asserts the crate's assets and the package's
+- `bindings/python/tests/test_packaging.py:30` asserts the crate's assets and the package's
   assets are byte-identical; nothing in the build enforces it.
-- `tests/test_gameplan_loader.py:32` — `test_every_discovered_gameplan_loads_under_its_own_name` —
+- `bindings/python/tests/test_gameplan_loader.py:32` — `test_every_discovered_gameplan_loads_under_its_own_name` —
   the discovery assertion: every file on disk is loaded, not merely listed.
 - `:28` `test_load_missing_gameplan`, `:119` `test_invalid_yaml_reports_the_file`,
   and `:141` `test_a_file_with_no_frontmatter_loads_on_harness_defaults` — a file
@@ -76,7 +76,7 @@ cargo test -p kerness gameplan                                # pass = 0 failed
 
 - The built-in gameplans stay framework-generic by project rule; a
   domain-specific gameplan belongs with the project that owns the domain, as
-  `examples/texas_holdem/gameplan/` demonstrates.
+  `bindings/python/examples/texas_holdem/gameplan/` demonstrates.
 - `load_gameplan` reads the file on every call. Sessions load once, so the
   caching that would help is only for a caller enumerating all built-ins.
 - A gameplan cannot include or extend another; the contract is one file.
