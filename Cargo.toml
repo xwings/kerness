@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/kerness"]
+resolver = "2"
+
+[workspace.package]
+version = "0.11.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/xwings/kerness"
+
+[workspace.dependencies]
+fancy-regex = "0.14"
+regex = "1.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml_ng = "0.10"
+shell-words = "1.1"
+# No gzip: Python's `urllib` never asked for a compressed body either, and the
+# feature drags in a `crc32fast` that needs a newer compiler than the one this
+# project builds with.
+ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
