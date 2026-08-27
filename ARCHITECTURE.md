@@ -142,7 +142,7 @@ Python package as well as the crate.
 | **M4** | Test suite and examples: 26 pytest modules over the Python surface, runnable example harnesses | done |
 | **M5** | Surface sweep: no unused dependency, no unreferenced `pub` item, clippy clean at `-D warnings`, every framework constant reachable from Python | done |
 | **M6** | This architecture doc set, and the public introduction: `README.md`, project marks, MIT licence | done |
-| **M7** | Release verification: full test matrix green, release wheel builds, self-check exits 0 | pending |
+| **M7** | Release verification: full test matrix green, wheel and sdist build, the sdist installs into a clean interpreter and its self-check exits 0 | done |
 
 ## Verification
 

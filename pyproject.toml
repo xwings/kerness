@@ -5,9 +5,10 @@ build-backend = "maturin"
 [project]
 name = "kerness"
 version = "0.1.0"
-description = "Framework for building multi-agent harnesses"
+description = "Kernel for harness — the framework multi-agent AI harnesses are built on"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",
@@ -27,6 +28,7 @@ module-name = "kerness._core"
 python-source = "python"
 features = ["pyo3/extension-module"]
 include = [
+    { path = "LICENSE", format = "sdist" },
     { path = "python/kerness/gameplans/*.md", format = "sdist" },
     { path = "python/kerness/personas/*.md", format = "sdist" },
     { path = "python/kerness/skills/*/SKILL.md", format = "sdist" },
