@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "kerness"
+version = "0.1.0"
+description = "Framework for building multi-agent harnesses"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.optional-dependencies]
+structured = ["pydantic>=2,<3"]
+dev = ["pytest>=7.0", "pydantic>=2,<3"]
+
+[project.urls]
+Repository = "https://github.com/xwings/kerness"
+
+[tool.maturin]
+manifest-path = "crates/kerness-py/Cargo.toml"
+module-name = "kerness._core"
+python-source = "python"
+features = ["pyo3/extension-module"]
+include = [
+    { path = "python/kerness/gameplans/*.md", format = "sdist" },
+    { path = "python/kerness/personas/*.md", format = "sdist" },
+    { path = "python/kerness/skills/*/SKILL.md", format = "sdist" },
+]

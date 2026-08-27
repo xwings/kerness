@@ -169,9 +169,13 @@ impl Default for SessionConfig {
 }
 
 /// A session's memory files, session-level and per agent.
-struct Memories {
-    session: Memory,
-    per_agent: HashMap<String, Memory>,
+///
+/// Public so a caller can hold the session's memory rather than a copy of what
+/// it said last: the file is written during the run, and a snapshot taken
+/// before it is stale by the time the run ends.
+pub struct Memories {
+    pub session: Memory,
+    pub per_agent: HashMap<String, Memory>,
 }
 
 impl Memories {
@@ -437,6 +441,12 @@ impl Session {
     /// The session-level memory file's content, as last read or written.
     pub fn memory(&self) -> String {
         lock(&self.shared.memories).session.read().to_string()
+    }
+
+    /// The session's memory files themselves, for a caller that needs to read
+    /// one after the run rather than at the moment it asked.
+    pub fn memories(&self) -> Arc<Mutex<Memories>> {
+        Arc::clone(&self.shared.memories)
     }
 
     /// The rounds limit in force, after the gameplan's default is applied.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/kerness"]
+members = ["crates/kerness", "crates/kerness-py"]
 resolver = "2"
 
 [workspace.package]

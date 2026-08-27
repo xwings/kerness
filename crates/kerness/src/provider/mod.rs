@@ -137,14 +137,7 @@ pub trait Provider: Send + Sync {
     /// body: the one-way degrade latch, then the declared dialect, then the
     /// capability answer from [`Provider::accepts_tools`].
     fn effective_dialect(&self) -> ToolDialect {
-        if self.base().native_tools_disabled.load(Ordering::Relaxed) {
-            return ToolDialect::Text;
-        }
-        let declared = self.tool_dialect();
-        if declared == ToolDialect::Text || !self.accepts_tools() {
-            return ToolDialect::Text;
-        }
-        declared
+        supplied_effective_dialect(self)
     }
 
     /// Latch this provider down to the text protocol if *error* means "no tool
@@ -154,22 +147,7 @@ pub trait Provider: Send + Sync {
     /// the rest of its life. Flipping back would put two dialects in one
     /// conversation.
     fn note_native_tools_rejected(&self, error: &Error) -> bool {
-        let Error::ProviderHttp {
-            status_code, body, ..
-        } = error
-        else {
-            return false;
-        };
-        if !matches!(status_code, 400 | 404 | 422) || !body.to_lowercase().contains("tool") {
-            return false;
-        }
-        logging::warning(&format!(
-            "Provider {} rejected native tool calling (HTTP {status_code}); \
-             falling back to the text protocol for the rest of this session.",
-            self.name()
-        ));
-        self.base().native_tools_disabled.store(true, Ordering::Relaxed);
-        true
+        supplied_note_native_tools_rejected(self, error)
     }
 
     /// Send a chat request, retrying on failure.
@@ -184,35 +162,7 @@ pub trait Provider: Send + Sync {
         purpose: &str,
         tools: Option<&[ToolSpec]>,
     ) -> Result<ProviderResponse> {
-        let base = self.base();
-        let attempt = || {
-            let response = self.chat_dispatch(model, messages, tools)?;
-            // A native tool-use response legitimately carries empty text, so
-            // emptiness is only an error when there is no tool call either.
-            if response.content.trim().is_empty() && response.tool_calls.is_empty() {
-                return Err(Error::ProviderEmpty(format!(
-                    "Empty response from {model} for {purpose}"
-                )));
-            }
-            Ok(response)
-        };
-        match retry(attempt, base.retries, base.backoff_sec, base.interval_sec) {
-            Ok(response) => Ok(response),
-            Err(error) if error.is_provider() => {
-                if tools.is_some_and(|tools| !tools.is_empty())
-                    && self.note_native_tools_rejected(&error)
-                {
-                    return self.chat_with_retries(model, messages, purpose, None);
-                }
-                Err(error)
-            }
-            Err(error) => {
-                logging::warning(&format!("Provider failed for {purpose}: {error}"));
-                Err(Error::provider(format!(
-                    "All retries exhausted for {purpose}: {error}"
-                )))
-            }
-        }
+        supplied_chat_with_retries(self, model, messages, purpose, tools)
     }
 
     /// Call [`Provider::chat`], passing *tools* only when they can be used.
@@ -222,13 +172,106 @@ pub trait Provider: Send + Sync {
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
     ) -> Result<ProviderResponse> {
-        if tools.is_some_and(|tools| !tools.is_empty())
-            && self.effective_dialect() != ToolDialect::Text
-        {
-            return self.chat(model, messages, tools);
-        }
-        self.chat(model, messages, None)
+        supplied_chat_dispatch(self, model, messages, tools)
     }
+}
+
+// The four supplied methods, written once as free functions so they can be run
+// against a provider without being the thing that provider's own method calls.
+// The Python bindings need exactly that: `Provider.effective_dialect` in Python
+// has to forward down here, and what it forwards to cannot be the trait method
+// it is standing in for.
+
+/// The body of [`Provider::effective_dialect`].
+pub fn supplied_effective_dialect<P: Provider + ?Sized>(provider: &P) -> ToolDialect {
+    if provider.base().native_tools_disabled.load(Ordering::Relaxed) {
+        return ToolDialect::Text;
+    }
+    let declared = provider.tool_dialect();
+    if declared == ToolDialect::Text || !provider.accepts_tools() {
+        return ToolDialect::Text;
+    }
+    declared
+}
+
+/// The body of [`Provider::note_native_tools_rejected`].
+pub fn supplied_note_native_tools_rejected<P: Provider + ?Sized>(
+    provider: &P,
+    error: &Error,
+) -> bool {
+    let Error::ProviderHttp {
+        status_code, body, ..
+    } = error
+    else {
+        return false;
+    };
+    if !matches!(status_code, 400 | 404 | 422) || !body.to_lowercase().contains("tool") {
+        return false;
+    }
+    logging::warning(&format!(
+        "Provider {} rejected native tool calling (HTTP {status_code}); \
+         falling back to the text protocol for the rest of this session.",
+        provider.name()
+    ));
+    provider
+        .base()
+        .native_tools_disabled
+        .store(true, Ordering::Relaxed);
+    true
+}
+
+/// The body of [`Provider::chat_with_retries`].
+pub fn supplied_chat_with_retries<P: Provider + ?Sized>(
+    provider: &P,
+    model: &str,
+    messages: &[Value],
+    purpose: &str,
+    tools: Option<&[ToolSpec]>,
+) -> Result<ProviderResponse> {
+    let base = provider.base();
+    let attempt = || {
+        let response = provider.chat_dispatch(model, messages, tools)?;
+        // A native tool-use response legitimately carries empty text, so
+        // emptiness is only an error when there is no tool call either.
+        if response.content.trim().is_empty() && response.tool_calls.is_empty() {
+            return Err(Error::ProviderEmpty(format!(
+                "Empty response from {model} for {purpose}"
+            )));
+        }
+        Ok(response)
+    };
+    match retry(attempt, base.retries, base.backoff_sec, base.interval_sec) {
+        Ok(response) => Ok(response),
+        Err(error) if error.is_provider() => {
+            if tools.is_some_and(|tools| !tools.is_empty())
+                && provider.note_native_tools_rejected(&error)
+            {
+                return provider.chat_with_retries(model, messages, purpose, None);
+            }
+            Err(error)
+        }
+        Err(error) => {
+            logging::warning(&format!("Provider failed for {purpose}: {error}"));
+            Err(Error::provider(format!(
+                "All retries exhausted for {purpose}: {error}"
+            )))
+        }
+    }
+}
+
+/// The body of [`Provider::chat_dispatch`].
+pub fn supplied_chat_dispatch<P: Provider + ?Sized>(
+    provider: &P,
+    model: &str,
+    messages: &[Value],
+    tools: Option<&[ToolSpec]>,
+) -> Result<ProviderResponse> {
+    if tools.is_some_and(|tools| !tools.is_empty())
+        && provider.effective_dialect() != ToolDialect::Text
+    {
+        return provider.chat(model, messages, tools);
+    }
+    provider.chat(model, messages, None)
 }
 
 /// The body every OpenAI-compatible endpoint takes, before the parts that

@@ -1,0 +1,17 @@
+[package]
+name = "kerness-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+kerness = { path = "../kerness" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+serde_json.workspace = true
