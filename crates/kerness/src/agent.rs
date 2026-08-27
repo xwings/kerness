@@ -164,7 +164,10 @@ impl Agent {
     /// the run, so this stays a plain lookup with no search path of its own.
     fn resolve_persona(&self) -> Result<String> {
         if self.persona.ends_with(".md") {
-            return Ok(format_persona_for_prompt(&load_persona(&self.persona, &[])?));
+            return Ok(format_persona_for_prompt(&load_persona(
+                &self.persona,
+                &[],
+            )?));
         }
         Ok(format!("Persona: {}", self.persona))
     }
@@ -249,7 +252,9 @@ mod tests {
     #[test]
     fn an_undecorated_agent_gets_the_prompt_it_was_given() {
         assert_eq!(
-            alice().build_system_prompt("You are helpful.", None, "").unwrap(),
+            alice()
+                .build_system_prompt("You are helpful.", None, "")
+                .unwrap(),
             "You are helpful."
         );
 
@@ -258,7 +263,9 @@ mod tests {
             ..alice()
         };
         assert_eq!(
-            custom.build_system_prompt("You are helpful.", None, "").unwrap(),
+            custom
+                .build_system_prompt("You are helpful.", None, "")
+                .unwrap(),
             "Custom prompt."
         );
     }

@@ -72,7 +72,8 @@ pub fn load_skill(name_or_path: &str) -> Result<SkillConfig> {
     let path = resolve_skill_path(name_or_path)?;
     let source = path.display().to_string();
 
-    let text = std::fs::read_to_string(&path).map_err(|err| Error::Io(format!("{source}: {err}")))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|err| Error::Io(format!("{source}: {err}")))?;
     let (meta, body) = parse_frontmatter(&text)?;
 
     let name = text_field(&meta, "name");
@@ -108,7 +109,10 @@ pub fn list_builtin_skills() -> Vec<String> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.join("SKILL.md").exists())
-        .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .filter_map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
         .collect();
     names.sort();
     names
@@ -116,7 +120,11 @@ pub fn list_builtin_skills() -> Vec<String> {
 
 /// `str(meta.get(key, "")).strip()`.
 fn text_field(meta: &Map<String, Value>, key: &str) -> String {
-    meta.get(key).map(pyfmt::str).unwrap_or_default().trim().to_string()
+    meta.get(key)
+        .map(pyfmt::str)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 /// Whether *path* lives inside the package's own skills directory.
@@ -190,9 +198,8 @@ fn resolve_skill_path(name_or_path: &str) -> Result<PathBuf> {
     }
 
     let directory = skills_dir().join(name_or_path);
-    resolve_skill_candidate(&directory).ok_or_else(|| {
-        Error::NotFound(format!("Skill file not found: {}", directory.display()))
-    })
+    resolve_skill_candidate(&directory)
+        .ok_or_else(|| Error::NotFound(format!("Skill file not found: {}", directory.display())))
 }
 
 /// A directory holding a `SKILL.md` means that file; a file means itself.
@@ -223,7 +230,10 @@ fn parse_frontmatter(text: &str) -> Result<(Map<String, Value>, String)> {
         return Ok((Map::new(), text.to_string()));
     };
     let end = offset + 1;
-    let body = parts[end + 1..].join("\n").trim_start_matches('\n').to_string();
+    let body = parts[end + 1..]
+        .join("\n")
+        .trim_start_matches('\n')
+        .to_string();
 
     let meta = yaml::parse(&parts[1..end].join("\n"))
         .map_err(|err| Error::Value(format!("Invalid YAML in skill frontmatter: {err}")))?;
@@ -288,7 +298,9 @@ mod tests {
             std::fs::create_dir_all(&base).expect("create skill dir");
             std::fs::write(
                 base.join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: A demo skill.\n{frontmatter}---\n\nBody.\n"),
+                format!(
+                    "---\nname: {name}\ndescription: A demo skill.\n{frontmatter}---\n\nBody.\n"
+                ),
             )
             .expect("write skill");
             load_skill(&base.join("SKILL.md").display().to_string())
@@ -307,7 +319,9 @@ mod tests {
         assert_eq!(skill.name, "summarize");
         assert!(!skill.description.is_empty());
         assert_eq!(
-            load_skill("summarize/SKILL.md").expect("built-in loads").name,
+            load_skill("summarize/SKILL.md")
+                .expect("built-in loads")
+                .name,
             skill.name
         );
     }
@@ -348,7 +362,9 @@ mod tests {
         let dir = TempDir::new("narrowing");
         assert_eq!(dir.skill("a", "").expect("loads").allowed_tools, None);
         assert_eq!(
-            dir.skill("b", "allowed-tools: []\n").expect("loads").allowed_tools,
+            dir.skill("b", "allowed-tools: []\n")
+                .expect("loads")
+                .allowed_tools,
             Some(Vec::new())
         );
     }
@@ -387,7 +403,9 @@ mod tests {
     #[test]
     fn a_non_list_and_malformed_yaml_are_both_reported() {
         let dir = TempDir::new("bad-tools");
-        let error = dir.skill("a", "allowed-tools: {a: b}\n").expect_err("not a list");
+        let error = dir
+            .skill("a", "allowed-tools: {a: b}\n")
+            .expect_err("not a list");
         assert!(matches!(error, Error::Value(_)), "{error:?}");
         assert!(
             error.to_string().contains("allowed-tools must be a list"),
@@ -395,7 +413,9 @@ mod tests {
         );
         assert!(error.to_string().ends_with("got {'a': 'b'}"), "{error}");
 
-        let error = dir.skill("b", "allowed-tools: [unclosed\n").expect_err("broken yaml");
+        let error = dir
+            .skill("b", "allowed-tools: [unclosed\n")
+            .expect_err("broken yaml");
         assert!(error.to_string().contains("Invalid YAML"), "{error}");
     }
 
@@ -409,7 +429,9 @@ mod tests {
 
         let error = load_skill(&path.display().to_string()).expect_err("no description");
         assert!(
-            error.to_string().starts_with("Skill file missing required frontmatter: "),
+            error
+                .to_string()
+                .starts_with("Skill file missing required frontmatter: "),
             "{error}"
         );
     }
@@ -429,9 +451,10 @@ mod tests {
             load_skill(&path.display().to_string())
         };
 
-        assert!(write("Demo").expect_err("not a slug").to_string().starts_with(
-            "Invalid skill name 'Demo' in "
-        ));
+        assert!(write("Demo")
+            .expect_err("not a slug")
+            .to_string()
+            .starts_with("Invalid skill name 'Demo' in "));
         assert_eq!(
             write("other").expect_err("wrong directory").to_string(),
             "Skill name 'other' must match parent directory 'demo'"
@@ -458,7 +481,12 @@ mod tests {
         let names: Vec<String> = skill
             .bundle_paths()
             .iter()
-            .map(|path| path.file_name().expect("named").to_string_lossy().into_owned())
+            .map(|path| {
+                path.file_name()
+                    .expect("named")
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         assert_eq!(names, ["references"]);
     }

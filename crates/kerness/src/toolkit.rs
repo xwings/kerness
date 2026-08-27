@@ -88,10 +88,7 @@ impl ToolDispatcher {
 
         let errors = validate_arguments(&spec.parameters, &call.arguments);
         if !errors.is_empty() {
-            return ToolResult::error(
-                &call.name,
-                format!("{}: {}", call.name, errors.join("; ")),
-            );
+            return ToolResult::error(&call.name, format!("{}: {}", call.name, errors.join("; ")));
         }
 
         let actor = if spec.takes_actor { actor } else { "" };
@@ -141,10 +138,8 @@ mod tests {
 
     #[test]
     fn a_successful_call_returns_the_handler_text() {
-        let result = dispatcher(vec![spec_named("ping")]).execute(
-            &ToolCall::new("ping", Arguments::new()),
-            "",
-        );
+        let result = dispatcher(vec![spec_named("ping")])
+            .execute(&ToolCall::new("ping", Arguments::new()), "");
         assert_eq!(result, ToolResult::ok("ping", "pong".into()));
     }
 
@@ -173,8 +168,8 @@ mod tests {
 
     #[test]
     fn every_failure_is_a_result_the_model_can_read() {
-        let unknown =
-            dispatcher(vec![spec_named("ping")]).execute(&ToolCall::new("teleport", Arguments::new()), "");
+        let unknown = dispatcher(vec![spec_named("ping")])
+            .execute(&ToolCall::new("teleport", Arguments::new()), "");
         assert!(unknown.is_error);
         assert!(unknown.content.contains("Unknown tool: teleport"));
 
@@ -208,7 +203,9 @@ mod tests {
         );
         let missing = dispatcher(vec![cmd]).execute(&ToolCall::new("cmd", Arguments::new()), "");
         assert!(missing.is_error);
-        assert!(missing.content.contains("missing required argument 'command'"));
+        assert!(missing
+            .content
+            .contains("missing required argument 'command'"));
     }
 
     #[test]

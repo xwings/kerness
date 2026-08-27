@@ -26,7 +26,8 @@ use crate::utils::{keyword_in_text, parse_orchestrator_call, parse_session_end};
 /// Emitted when the orchestrator cannot produce a routable reply. The literal
 /// is a message to a human, not a protocol keyword — termination itself comes
 /// from [`LoopSpec::terminate_on`].
-pub const FORCED_END_NOTE: &str = "Orchestrator output unparseable after retries. Forcing END_SESSION.";
+pub const FORCED_END_NOTE: &str =
+    "Orchestrator output unparseable after retries. Forcing END_SESSION.";
 
 /// What a participant is told when the active phase is a rethink phase.
 const RETHINK_INSTRUCTION: &str = "This is a rethink phase. Re-examine the position you took \
@@ -34,8 +35,9 @@ earlier against everything said since, and state plainly whether it changed and 
 your opening position unchanged is only acceptable if you say what you considered and why it did \
 not move you.";
 
-static JSON_FENCE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)```(?:json)?\s*\n(\{.*?\})\s*\n```").expect("static pattern"));
+static JSON_FENCE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)```(?:json)?\s*\n(\{.*?\})\s*\n```").expect("static pattern")
+});
 
 /// What the loop needs from the session, and nothing more.
 ///
@@ -953,11 +955,8 @@ mod tests {
         }
 
         fn deliver(&mut self, sender: &str, text: &str, _turn: i64, msg_type: &str) -> Result<()> {
-            self.delivered.push((
-                sender.to_string(),
-                text.to_string(),
-                msg_type.to_string(),
-            ));
+            self.delivered
+                .push((sender.to_string(), text.to_string(), msg_type.to_string()));
             Ok(())
         }
 
@@ -1078,8 +1077,7 @@ mod tests {
             .notes
             .contains(&"Session ended: ALL_DONE".to_string()));
 
-        let mut undeclared =
-            StubHost::new(&["END_SESSION", "@Alice, go.", "ALL_DONE", "Summary."]);
+        let mut undeclared = StubHost::new(&["END_SESSION", "@Alice, go.", "ALL_DONE", "Summary."]);
         let state = run(&mut undeclared, spec);
         assert!(undeclared
             .notes
@@ -1112,7 +1110,11 @@ mod tests {
             },
         );
 
-        assert!(host.directives[0].contains("ALL_DONE"), "{:?}", host.directives);
+        assert!(
+            host.directives[0].contains("ALL_DONE"),
+            "{:?}",
+            host.directives
+        );
     }
 
     // ---- Routing ----------------------------------------------------------
@@ -1139,12 +1141,16 @@ mod tests {
         let mut exhausted = StubHost::new(&["mumble", "mumble", "mumble", "Summary."]);
         let state = driver(LoopSpec::default())
             .with_retries(2)
-            .run(&mut exhausted).unwrap();
+            .run(&mut exhausted)
+            .unwrap();
         assert_eq!(state.end_reason, EndReason::Forced);
         assert!(exhausted.notes.contains(&FORCED_END_NOTE.to_string()));
 
         let mut none = StubHost::new(&["mumble", "Summary."]);
-        let state = driver(LoopSpec::default()).with_retries(0).run(&mut none).unwrap();
+        let state = driver(LoopSpec::default())
+            .with_retries(0)
+            .run(&mut none)
+            .unwrap();
         assert_eq!(state.end_reason, EndReason::Forced);
         assert!(none.directives.is_empty());
     }
@@ -1152,7 +1158,10 @@ mod tests {
     #[test]
     fn a_recovering_retry_continues_the_session() {
         let mut host = StubHost::new(&["mumble", "@Alice, go.", "END_SESSION", "Summary."]);
-        let state = driver(LoopSpec::default()).with_retries(2).run(&mut host).unwrap();
+        let state = driver(LoopSpec::default())
+            .with_retries(2)
+            .run(&mut host)
+            .unwrap();
 
         assert_ne!(state.end_reason, EndReason::Forced);
         assert_eq!(host.senders(), ["Mod", "Mod", "Alice", "Mod"]);
@@ -1180,7 +1189,8 @@ mod tests {
         let state = driver(LoopSpec::default())
             .with_max_turns(1)
             .with_retries(5)
-            .run(&mut host).unwrap();
+            .run(&mut host)
+            .unwrap();
 
         assert_eq!(state.end_reason, EndReason::MaxTurns);
         assert!(!host.notes.contains(&FORCED_END_NOTE.to_string()));
@@ -1191,7 +1201,10 @@ mod tests {
     #[test]
     fn max_turns_stops_a_loop_that_never_ends() {
         let mut host = StubHost::new(&["@Alice, go."; 20]);
-        let state = driver(LoopSpec::default()).with_max_turns(6).run(&mut host).unwrap();
+        let state = driver(LoopSpec::default())
+            .with_max_turns(6)
+            .run(&mut host)
+            .unwrap();
         assert!(state.turn_count <= 6, "{state:?}");
         assert_eq!(state.end_reason, EndReason::MaxTurns);
         assert!(
@@ -1212,11 +1225,15 @@ mod tests {
             ..LoopSpec::default()
         })
         .with_max_turns(2)
-        .run(&mut host).unwrap();
+        .run(&mut host)
+        .unwrap();
         assert!(state.turn_count <= 2, "{state:?}");
 
         let mut host = StubHost::new(&["@Alice, go."; 20]);
-        let state = driver(LoopSpec::default()).with_max_turns(3).run(&mut host).unwrap();
+        let state = driver(LoopSpec::default())
+            .with_max_turns(3)
+            .run(&mut host)
+            .unwrap();
         assert_eq!(state.turn_count, 3);
     }
 
@@ -1226,7 +1243,8 @@ mod tests {
         let state = driver(LoopSpec::default())
             .with_max_turns(2)
             .with_retries(5)
-            .run(&mut host).unwrap();
+            .run(&mut host)
+            .unwrap();
         assert_eq!(state.turn_count, 2);
     }
 
@@ -1253,7 +1271,8 @@ mod tests {
         let mut host = StubHost::new(&["END_SESSION", "Done."]);
         OrchestratorLoop::new(LoopSpec::default(), "Mod", vec!["Alice".to_string()])
             .with_result_fields(vec![field("verdict", "str")])
-            .run(&mut host).unwrap();
+            .run(&mut host)
+            .unwrap();
 
         assert!(host.closing_prompts[0].contains("\"verdict\""));
     }
@@ -1366,7 +1385,8 @@ mod tests {
         ]);
         let state = OrchestratorLoop::new(LoopSpec::default(), "Mod", vec!["Alice".to_string()])
             .with_result_fields(vec![field("consensus", "bool")])
-            .run(&mut host).unwrap();
+            .run(&mut host)
+            .unwrap();
 
         assert_eq!(state.final_summary, "They agreed.");
         assert_eq!(Value::Object(state.fields), json!({"consensus": true}));
@@ -1380,7 +1400,8 @@ mod tests {
         let mut host = StubHost::new(&["unused"]);
         let state = OrchestratorLoop::new(LoopSpec::default(), "", vec!["Alice".to_string()])
             .with_max_turns(0)
-            .run(&mut host).unwrap();
+            .run(&mut host)
+            .unwrap();
 
         assert_eq!(state.turn_count, 0);
         assert!(host.summary.is_none());
@@ -1398,17 +1419,25 @@ mod tests {
         assert_eq!(every.routed.len(), 2);
         for (_, instruction) in &every.routed {
             assert!(instruction.contains("[Phase: think]"), "{instruction}");
-            assert!(instruction.contains("State your own view."), "{instruction}");
+            assert!(
+                instruction.contains("State your own view."),
+                "{instruction}"
+            );
         }
 
-        let mut asked =
-            StubHost::new(&["@Alice, answer the cost question.", "END_SESSION", "S."]);
+        let mut asked = StubHost::new(&["@Alice, answer the cost question.", "END_SESSION", "S."]);
         run(&mut asked, phased(vec![think()]));
 
         let (name, instruction) = &asked.routed[0];
         assert_eq!(name, "Alice");
-        assert!(instruction.contains("answer the cost question."), "{instruction}");
-        assert!(instruction.contains("State your own view."), "{instruction}");
+        assert!(
+            instruction.contains("answer the cost question."),
+            "{instruction}"
+        );
+        assert!(
+            instruction.contains("State your own view."),
+            "{instruction}"
+        );
     }
 
     #[test]
@@ -1436,7 +1465,11 @@ mod tests {
         let mut host = StubHost::new(&replies).closing("Summary.");
         run(&mut host, phased(vec![rethink()]));
 
-        assert!(host.routed[0].1.contains("rethink phase"), "{:?}", host.routed[0]);
+        assert!(
+            host.routed[0].1.contains("rethink phase"),
+            "{:?}",
+            host.routed[0]
+        );
         assert!(host.routed[0].1.contains("whether it changed"));
     }
 
@@ -1473,8 +1506,7 @@ mod tests {
             opening.directives[0]
         );
 
-        let mut turnover =
-            StubHost::new(&["@Alice, go.", "@Bob, go.", "END_SESSION", "Summary."]);
+        let mut turnover = StubHost::new(&["@Alice, go.", "@Bob, go.", "END_SESSION", "Summary."]);
         run(&mut turnover, phased(vec![think(), argue()]));
 
         assert!(turnover.directives.len() >= 2, "{:?}", turnover.directives);
@@ -1521,19 +1553,21 @@ mod tests {
 
     #[test]
     fn the_keyword_advances_the_phase_whether_or_not_it_routes() {
-        let mut alone =
-            StubHost::new(&["NEXT_PHASE", "@Alice, go.", "END_SESSION", "Summary."]);
+        let mut alone = StubHost::new(&["NEXT_PHASE", "@Alice, go.", "END_SESSION", "Summary."]);
         run(&mut alone, phased(vec![think(), argue()]));
 
-        assert!(alone.routed[0].1.contains("[Phase: argue]"), "{:?}", alone.routed);
+        assert!(
+            alone.routed[0].1.contains("[Phase: argue]"),
+            "{:?}",
+            alone.routed
+        );
         assert!(!alone.notes.contains(&FORCED_END_NOTE.to_string()));
         assert!(!alone
             .directives
             .iter()
             .any(|d| d.contains("didn't contain an @Name")));
 
-        let mut combined =
-            StubHost::new(&["NEXT_PHASE. @Alice, go.", "END_SESSION", "Summary."]);
+        let mut combined = StubHost::new(&["NEXT_PHASE. @Alice, go.", "END_SESSION", "Summary."]);
         run(&mut combined, phased(vec![think(), argue()]));
 
         assert!(combined.routed[0].1.contains("[Phase: argue]"));
@@ -1559,7 +1593,11 @@ mod tests {
             },
         );
 
-        assert!(host.routed[0].1.contains("[Phase: think]"), "{:?}", host.routed);
+        assert!(
+            host.routed[0].1.contains("[Phase: think]"),
+            "{:?}",
+            host.routed
+        );
     }
 
     // ---- max_rounds is real -----------------------------------------------
@@ -1662,7 +1700,10 @@ mod tests {
 
         assert_eq!(state.final_summary, FINAL);
         assert_eq!(host.summary.as_deref(), Some(FINAL));
-        assert!(host.delivered.iter().all(|(_, text, _)| !text.contains(DRAFT)));
+        assert!(host
+            .delivered
+            .iter()
+            .all(|(_, text, _)| !text.contains(DRAFT)));
     }
 
     #[test]
@@ -1673,7 +1714,8 @@ mod tests {
         ]);
         let state = driver(LoopSpec::default())
             .with_result_fields(vec![field("winner", "str")])
-            .run(&mut host).unwrap();
+            .run(&mut host)
+            .unwrap();
 
         assert!(host.closing_prompts[1].contains("JSON"));
         assert_eq!(Value::Object(state.fields), json!({"winner": "nobody"}));
@@ -1705,9 +1747,7 @@ mod tests {
         assert!(prompt.contains("change their mind"), "{prompt}");
         assert!(!prompt.contains("JSON"), "{prompt}");
 
-        assert!(
-            verdict_rethink_prompt("Draft.", &[field("verdict", "str")]).contains("JSON")
-        );
+        assert!(verdict_rethink_prompt("Draft.", &[field("verdict", "str")]).contains("JSON"));
     }
 
     // ---- Resuming ---------------------------------------------------------
@@ -1720,9 +1760,11 @@ mod tests {
         let saved = driver.snapshot();
 
         let mut resumed = StubHost::new(&["END_SESSION", "Summary."]);
-        let state = OrchestratorLoop::new(phased(vec![think(), argue(), rethink()]), "Mod", names())
-            .with_resume_state(saved.clone())
-            .run(&mut resumed).unwrap();
+        let state =
+            OrchestratorLoop::new(phased(vec![think(), argue(), rethink()]), "Mod", names())
+                .with_resume_state(saved.clone())
+                .run(&mut resumed)
+                .unwrap();
 
         assert_eq!(
             state.turn_count,
@@ -1751,7 +1793,8 @@ mod tests {
         });
         let state = OrchestratorLoop::new(phased(vec![think(), argue()]), "Mod", names())
             .with_resume_state(saved.as_object().unwrap().clone())
-            .run(&mut host).unwrap();
+            .run(&mut host)
+            .unwrap();
 
         assert_eq!(state.phase_reached, "argue");
         assert_eq!(state.rounds_run, 2);

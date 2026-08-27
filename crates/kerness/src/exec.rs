@@ -204,7 +204,10 @@ mod tests {
     fn unbalanced_quoting_is_refused_before_the_policy_check() {
         let access = allowing(|policy| policy.allowed_command_patterns = vec!["*".into()]);
         let error = run_command(&access, "echo 'unclosed", None, None, "").expect_err("bad syntax");
-        assert!(error.to_string().contains("Invalid command syntax"), "{error}");
+        assert!(
+            error.to_string().contains("Invalid command syntax"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -275,7 +278,11 @@ mod tests {
         std::fs::write(&file, "x").expect("write");
         let access = allowing(|policy| policy.allowed_dirs = vec![dir.text()]);
 
-        let error = list_dir(&access, &file.display().to_string(), "").expect_err("not a directory");
-        assert!(error.to_string().starts_with("Not a directory: "), "{error}");
+        let error =
+            list_dir(&access, &file.display().to_string(), "").expect_err("not a directory");
+        assert!(
+            error.to_string().starts_with("Not a directory: "),
+            "{error}"
+        );
     }
 }

@@ -54,8 +54,7 @@ use crate::utils::parse_memory_markers;
 pub const DEFAULT_MAX_CONTEXT_TOKENS: usize = 256_000;
 
 /// The default participant system prompt.
-pub const DEFAULT_SYSTEM_PROMPT: &str =
-    "You are a participant in a structured debate. Be concise.";
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a participant in a structured debate. Be concise.";
 
 /// Result of a completed session.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -227,7 +226,9 @@ struct Shared {
 /// alternative — propagating a lock error out of every accessor — would put an
 /// impossible failure in every signature.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Shared {
@@ -380,7 +381,12 @@ impl Session {
         };
 
         let shared = Arc::new(Shared {
-            tools: Mutex::new(default_tools(&access, &memories, &channel, config.memory_write)),
+            tools: Mutex::new(default_tools(
+                &access,
+                &memories,
+                &channel,
+                config.memory_write,
+            )),
             channel,
             provider: config.provider,
             show_reasoning: config.show_reasoning,
@@ -651,7 +657,12 @@ impl Session {
             }
         }
 
-        self.identity = identity_for(&self.gameplan.name, &self.topic, &participants, &orchestrator);
+        self.identity = identity_for(
+            &self.gameplan.name,
+            &self.topic,
+            &participants,
+            &orchestrator,
+        );
 
         // Continue a previous run, or seed the conversation with the topic.
         self.conversation = Conversation::new();
@@ -721,7 +732,10 @@ impl Session {
         let history = self.history_for_turn(agent, base_prompt)?;
 
         let provider = self.shared.provider_for(agent).ok_or_else(|| {
-            Error::session(format!("No provider configured for agent '{}'.", agent.name))
+            Error::session(format!(
+                "No provider configured for agent '{}'.",
+                agent.name
+            ))
         })?;
         let assembling = Arc::clone(&self.shared);
         let advertising = Arc::clone(&self.shared);
@@ -749,7 +763,10 @@ impl Session {
         if mirror_exchanges {
             runner = runner.with_record(move |message: &Value| {
                 conversation.raw(
-                    message.get("role").and_then(Value::as_str).unwrap_or_default(),
+                    message
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
                     message
                         .get("content")
                         .and_then(Value::as_str)
@@ -913,12 +930,12 @@ impl Session {
             let names = self.gameplan.harness.resolve_skills(&session_names);
             return names
                 .iter()
-                .map(|name| {
-                    match self.skills.iter().find(|skill| &skill.name == name) {
+                .map(
+                    |name| match self.skills.iter().find(|skill| &skill.name == name) {
                         Some(skill) => Ok(skill.clone()),
                         None => load_skill(name),
-                    }
-                })
+                    },
+                )
                 .collect();
         };
         let mut resolved: Vec<SkillConfig> = Vec::new();
@@ -1098,7 +1115,10 @@ impl Session {
     /// under TEXT, where the tool definitions are already in the system message
     /// — counting them here as well would charge the caller for them twice.
     fn prompt_overhead(&self, agent: &Agent, base_prompt: &str) -> Result<usize> {
-        let messages = self.shared.prompts().messages_for(agent, &[], base_prompt)?;
+        let messages = self
+            .shared
+            .prompts()
+            .messages_for(agent, &[], base_prompt)?;
         let mut total: usize = messages
             .iter()
             .map(|message| {
@@ -1665,16 +1685,24 @@ mod tests {
                 "Both sides presented. Alice favors pineapple, Bob opposes.",
             ]));
             let channel = Arc::new(CaptureChannel::default());
-            debate(&temp, provider, channel, "Is pineapple acceptable on pizza?")
-                .run()
-                .expect("a run")
+            debate(
+                &temp,
+                provider,
+                channel,
+                "Is pineapple acceptable on pizza?",
+            )
+            .run()
+            .expect("a run")
         };
 
         assert!(!ended.consensus_reached);
         assert!(ended.turns_completed >= 4);
         assert_eq!(ended.topic, "Is pineapple acceptable on pizza?");
         assert!(!ended.final_summary.is_empty());
-        assert!(ended.history.iter().any(|message| message.msg_type == "turn"));
+        assert!(ended
+            .history
+            .iter()
+            .any(|message| message.msg_type == "turn"));
         assert_eq!(ended.end_reason, "keyword");
 
         let agreed = {
@@ -1687,9 +1715,14 @@ mod tests {
                 "Consensus: pineapple is acceptable on pizza.",
             ]));
             let channel = Arc::new(CaptureChannel::default());
-            debate(&temp, provider, channel, "Is pineapple acceptable on pizza?")
-                .run()
-                .expect("a run")
+            debate(
+                &temp,
+                provider,
+                channel,
+                "Is pineapple acceptable on pizza?",
+            )
+            .run()
+            .expect("a run")
         };
 
         assert!(agreed.consensus_reached);
@@ -1706,7 +1739,12 @@ mod tests {
             "The session ended without resolution.",
         ]));
         let channel = Arc::new(CaptureChannel::default());
-        let mut session = debate(&temp, provider, Arc::clone(&channel) as Arc<dyn Channel>, "T");
+        let mut session = debate(
+            &temp,
+            provider,
+            Arc::clone(&channel) as Arc<dyn Channel>,
+            "T",
+        );
         session.orchestrator_retries = Some(2);
 
         let result = session.run().expect("a run");
@@ -1853,8 +1891,7 @@ mod tests {
             ..SessionConfig::default()
         })
         .expect("loads");
-        let handler: Arc<dyn ToolHandler> =
-            Arc::new(|_: &Arguments, _: &str| Ok("ok".to_string()));
+        let handler: Arc<dyn ToolHandler> = Arc::new(|_: &Arguments, _: &str| Ok("ok".to_string()));
         let schema = json!({"type": "object", "properties": {}});
 
         // The runtime builds `Skill` per agent; shadowing it would disable
@@ -2145,8 +2182,9 @@ mod tests {
         session.tool_results_in_history = true;
         session.run().expect("text plus the switch runs");
 
-        let provider =
-            Arc::new(SequenceProvider::new(&["END_SESSION", "Done."]).with_dialect(ToolDialect::Openai));
+        let provider = Arc::new(
+            SequenceProvider::new(&["END_SESSION", "Done."]).with_dialect(ToolDialect::Openai),
+        );
         let channel = Arc::new(CaptureChannel::default());
         debate(&temp, provider, channel, "T")
             .run()
@@ -2489,9 +2527,14 @@ mod tests {
             "Done.",
         ]));
         let channel = Arc::new(CaptureChannel::default());
-        debate(&temp, provider, Arc::clone(&channel) as Arc<dyn Channel>, "T")
-            .run()
-            .expect("a run");
+        debate(
+            &temp,
+            provider,
+            Arc::clone(&channel) as Arc<dyn Channel>,
+            "T",
+        )
+        .run()
+        .expect("a run");
 
         assert!(!channel.contains("Compacted conversation:"));
     }

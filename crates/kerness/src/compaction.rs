@@ -131,7 +131,11 @@ where
 
     let mut compacted = Vec::with_capacity(2 + rest.len() - keep_from);
     compacted.push(anchor.clone());
-    compacted.push(Turn::new("user", "", format!("{SUMMARY_PREFIX}\n{summary}")));
+    compacted.push(Turn::new(
+        "user",
+        "",
+        format!("{SUMMARY_PREFIX}\n{summary}"),
+    ));
     compacted.extend_from_slice(&rest[keep_from..]);
     Some(compacted)
 }

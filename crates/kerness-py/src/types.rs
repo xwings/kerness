@@ -55,8 +55,11 @@ pub fn dialect_from_py(object: &Bound<'_, PyAny>) -> PyResult<ToolDialect> {
         Ok(value) => value.str()?.to_string_lossy().into_owned(),
         Err(_) => object.str()?.to_string_lossy().into_owned(),
     };
-    ToolDialect::parse(&text)
-        .ok_or_else(|| to_py(kerness::Error::Value(format!("Unknown tool dialect {text}"))))
+    ToolDialect::parse(&text).ok_or_else(|| {
+        to_py(kerness::Error::Value(format!(
+            "Unknown tool dialect {text}"
+        )))
+    })
 }
 
 // ------------------------------------------------------------------- ToolCall
@@ -449,9 +452,7 @@ impl PyProviderResponse {
 
     #[setter]
     fn set_structured(&mut self, value: Option<Bound<'_, PyAny>>) {
-        self.structured = value
-            .filter(|object| !object.is_none())
-            .map(Bound::unbind);
+        self.structured = value.filter(|object| !object.is_none()).map(Bound::unbind);
         self.inner.structured = None;
     }
 
@@ -907,7 +908,9 @@ impl Store {
 
 /// Take a session lock, treating poisoning as the panic it reports.
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A file-backed note the session can read and, when allowed, append to.
@@ -1251,7 +1254,10 @@ pub struct PyAgentsSpec {
 impl PyAgentsSpec {
     #[new]
     #[pyo3(signature = (orchestrator=None, participants=None))]
-    fn new(orchestrator: Option<PyOrchestratorSpec>, participants: Option<PyParticipantSpec>) -> Self {
+    fn new(
+        orchestrator: Option<PyOrchestratorSpec>,
+        participants: Option<PyParticipantSpec>,
+    ) -> Self {
         PyAgentsSpec {
             orchestrator: orchestrator.unwrap_or(PyOrchestratorSpec {
                 required: false,
@@ -1363,8 +1369,7 @@ impl PyLoopSpec {
             inner: LoopSpec {
                 max_turns,
                 max_rounds,
-                terminate_on: terminate_on
-                    .unwrap_or_else(|| vec!["END_SESSION".to_string()]),
+                terminate_on: terminate_on.unwrap_or_else(|| vec!["END_SESSION".to_string()]),
                 phases: phases
                     .unwrap_or_default()
                     .iter()
@@ -1648,11 +1653,10 @@ fn optional_names<'py>(py: Python<'py>, names: Option<&[String]>) -> PyResult<Bo
 
 fn agents_spec(spec: &AgentsSpec) -> PyAgentsSpec {
     let AgentsSpec {
-        orchestrator:
-            OrchestratorSpec {
-                required,
-                instruction,
-            },
+        orchestrator: OrchestratorSpec {
+            required,
+            instruction,
+        },
         participants: ParticipantSpec { min, max },
     } = spec;
     PyAgentsSpec {

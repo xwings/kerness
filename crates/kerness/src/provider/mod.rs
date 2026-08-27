@@ -184,7 +184,11 @@ pub trait Provider: Send + Sync {
 
 /// The body of [`Provider::effective_dialect`].
 pub fn supplied_effective_dialect<P: Provider + ?Sized>(provider: &P) -> ToolDialect {
-    if provider.base().native_tools_disabled.load(Ordering::Relaxed) {
+    if provider
+        .base()
+        .native_tools_disabled
+        .load(Ordering::Relaxed)
+    {
         return ToolDialect::Text;
     }
     let declared = provider.tool_dialect();
@@ -756,7 +760,9 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.ends_with("Response shape: {'keys': ['choices', 'model', 'usage'], 'choice_count': 1}"),
+            message.ends_with(
+                "Response shape: {'keys': ['choices', 'model', 'usage'], 'choice_count': 1}"
+            ),
             "{message}"
         );
     }
@@ -991,7 +997,12 @@ mod tests {
             fn accepts_tools(&self) -> bool {
                 false
             }
-            fn chat(&self, model: &str, _: &[Value], _: Option<&[ToolSpec]>) -> Result<ProviderResponse> {
+            fn chat(
+                &self,
+                model: &str,
+                _: &[Value],
+                _: Option<&[ToolSpec]>,
+            ) -> Result<ProviderResponse> {
                 Ok(ProviderResponse {
                     model: model.to_string(),
                     ..ProviderResponse::text("hi")
@@ -1093,11 +1104,10 @@ mod tests {
         assert_eq!(response.content, "");
         assert_eq!(
             response.tool_calls,
-            vec![ToolCall::new(
-                "cmd",
-                json!({"command": "ls"}).as_object().unwrap().clone()
-            )
-            .with_id("c1")]
+            vec![
+                ToolCall::new("cmd", json!({"command": "ls"}).as_object().unwrap().clone())
+                    .with_id("c1")
+            ]
         );
         assert_eq!(response.stop_reason, "tool_calls");
     }
@@ -1114,11 +1124,10 @@ mod tests {
         assert_eq!(response.content, "");
         assert_eq!(
             response.tool_calls,
-            vec![ToolCall::new(
-                "cmd",
-                json!({"command": "ls"}).as_object().unwrap().clone()
-            )
-            .with_id("tu_1")]
+            vec![
+                ToolCall::new("cmd", json!({"command": "ls"}).as_object().unwrap().clone())
+                    .with_id("tu_1")
+            ]
         );
         assert_eq!(response.stop_reason, "tool_use");
         drop(guard);
@@ -1127,7 +1136,10 @@ mod tests {
             "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}],
             "model": "m",
         }))]);
-        assert_eq!(claude("k").chat("m", &[], None).unwrap().content, "one\ntwo");
+        assert_eq!(
+            claude("k").chat("m", &[], None).unwrap().content,
+            "one\ntwo"
+        );
     }
 
     #[test]

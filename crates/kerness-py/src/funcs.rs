@@ -151,10 +151,12 @@ pub fn tool_schemas<'py>(
 /// The tool calls an OpenAI-shaped assistant message carries.
 #[pyfunction]
 pub fn parse_openai_tool_calls(message: &Bound<'_, PyAny>) -> PyResult<Vec<PyToolCall>> {
-    Ok(toolschema::parse_openai_tool_calls(&value_from_py(message)?)
-        .into_iter()
-        .map(|inner| PyToolCall { inner })
-        .collect())
+    Ok(
+        toolschema::parse_openai_tool_calls(&value_from_py(message)?)
+            .into_iter()
+            .map(|inner| PyToolCall { inner })
+            .collect(),
+    )
 }
 
 /// The tool calls an Anthropic-shaped response carries.
@@ -187,11 +189,8 @@ pub fn render_tool_result<'py>(
     call: PyRef<'_, PyToolCall>,
     result: PyRef<'_, PyToolResult>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let rendered = toolschema::render_tool_result(
-        dialect_from_py(dialect)?,
-        &call.inner,
-        &result.snapshot(),
-    );
+    let rendered =
+        toolschema::render_tool_result(dialect_from_py(dialect)?, &call.inner, &result.snapshot());
     value_to_py(py, &rendered)
 }
 

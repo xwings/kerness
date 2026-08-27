@@ -358,7 +358,9 @@ mod tests {
         let dir = TempDir::new("absent");
         let path = dir.join("absent.json");
 
-        assert!(load_snapshot(&path).expect("no file is not a failure").is_none());
+        assert!(load_snapshot(&path)
+            .expect("no file is not a failure")
+            .is_none());
         assert!(!path.exists());
     }
 
@@ -406,7 +408,13 @@ mod tests {
         save_snapshot(&dir.join("run.json"), &SessionSnapshot::new(identity())).expect("save");
         let mut left: Vec<String> = fs::read_dir(&dir.0)
             .expect("read dir")
-            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         left.sort();
         assert_eq!(left, ["nested", "run.json"]);

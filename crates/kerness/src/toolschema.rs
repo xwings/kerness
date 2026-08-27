@@ -303,7 +303,8 @@ mod tests {
     fn each_dialect_puts_the_schema_where_its_api_expects_it() {
         let tools = [spec()];
         assert_eq!(
-            tool_schemas(ToolDialect::Openai, &tools).expect("schemas")[0]["function"]["parameters"],
+            tool_schemas(ToolDialect::Openai, &tools).expect("schemas")[0]["function"]
+                ["parameters"],
             spec().parameters
         );
         assert_eq!(
@@ -362,7 +363,10 @@ mod tests {
             content: "checking".into(),
             tool_calls: vec![ToolCall::new(
                 "cmd",
-                json!({"command": "ls"}).as_object().cloned().expect("object"),
+                json!({"command": "ls"})
+                    .as_object()
+                    .cloned()
+                    .expect("object"),
             )
             .with_id("call_1")],
             ..ProviderResponse::default()

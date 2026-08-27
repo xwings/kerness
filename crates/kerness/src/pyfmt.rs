@@ -206,10 +206,7 @@ mod tests {
         // ensure_ascii=True: every non-ASCII character leaves as a \uXXXX
         // escape, surrogate pair included.
         let escape = char::from(92);
-        assert_eq!(
-            json_dumps(&json!("café")),
-            format!("\"caf{escape}u00e9\"")
-        );
+        assert_eq!(json_dumps(&json!("café")), format!("\"caf{escape}u00e9\""));
         assert_eq!(
             json_dumps(&json!("𝄞")),
             format!("\"{escape}ud834{escape}udd1e\"")

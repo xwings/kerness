@@ -52,7 +52,10 @@ pub fn list_markdown_stems(directory: &Path) -> Vec<String> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
-        .filter_map(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .filter_map(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
         .collect();
     stems.sort();
     stems
@@ -65,7 +68,10 @@ mod tests {
     #[test]
     fn the_repository_copy_is_found_without_any_wiring() {
         assert!(
-            root().join("personas").join("pragmatic_engineer.md").exists(),
+            root()
+                .join("personas")
+                .join("pragmatic_engineer.md")
+                .exists(),
             "cargo test resolves assets from the manifest directory"
         );
     }

@@ -47,10 +47,12 @@ impl HttpTransport for UreqTransport {
             request = request.set(name, value);
         }
         match request.send_json(payload) {
-            Ok(response) => response.into_json::<Value>().map_err(|err| Error::ProviderNetwork {
-                url: url.to_string(),
-                cause: err.to_string(),
-            }),
+            Ok(response) => response
+                .into_json::<Value>()
+                .map_err(|err| Error::ProviderNetwork {
+                    url: url.to_string(),
+                    cause: err.to_string(),
+                }),
             Err(ureq::Error::Status(status, response)) => Err(Error::ProviderHttp {
                 status_code: status,
                 url: url.to_string(),

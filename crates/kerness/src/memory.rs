@@ -167,7 +167,10 @@ mod tests {
         memory.append_entry("   \n  ").expect("append");
 
         assert_eq!(memory.read(), "");
-        assert!(!path.exists(), "nothing was written, so nothing was created");
+        assert!(
+            !path.exists(),
+            "nothing was written, so nothing was created"
+        );
     }
 
     #[test]
@@ -184,7 +187,9 @@ mod tests {
     fn a_reload_sees_what_was_written() {
         let dir = TempDir::new("roundtrip");
         let path = dir.join("memory.md");
-        Memory::new(&path).append_entry("remembered").expect("append");
+        Memory::new(&path)
+            .append_entry("remembered")
+            .expect("append");
 
         let mut reopened = Memory::new(&path);
         reopened.load().expect("load");

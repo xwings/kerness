@@ -155,7 +155,10 @@ impl AccessManager {
 
         if matches_prefix(cmd, &self.auto_prefixes)
             || self.allowed_commands.iter().any(|allowed| allowed == cmd)
-            || self.allowed_programs.iter().any(|allowed| allowed == program)
+            || self
+                .allowed_programs
+                .iter()
+                .any(|allowed| allowed == program)
             || matches_prefix(cmd, &self.allowed_prefixes)
             || matches_regex(cmd, &self.allowed_command_regex)
         {
@@ -407,7 +410,6 @@ mod tests {
             std::fs::write(&path, "x").expect("write file");
             path
         }
-
     }
 
     impl Drop for TempDir {
@@ -467,7 +469,9 @@ mod tests {
         assert!(manager.check_command("git status", "hg", "").is_err());
 
         let manager = denying(|policy| policy.allowed_prefixes = vec!["git log".into()]);
-        assert!(manager.check_command("git log --oneline", "git", "").is_ok());
+        assert!(manager
+            .check_command("git log --oneline", "git", "")
+            .is_ok());
         assert!(manager.check_command("git push", "git", "").is_err());
 
         // Surrounding space is stripped before any of it happens.
@@ -516,7 +520,9 @@ mod tests {
         let manager = denying(|policy| policy.allowed_files = vec![s(&allowed)]);
 
         assert_eq!(
-            manager.check_path("read", &s(&allowed), "").expect("allowed"),
+            manager
+                .check_path("read", &s(&allowed), "")
+                .expect("allowed"),
             allowed
         );
         assert!(manager.check_path("read", &s(&other), "").is_err());
@@ -531,7 +537,10 @@ mod tests {
         std::fs::write(&deep, "x").expect("write deep file");
         let manager = denying(|policy| policy.allowed_dirs = vec![s(&dir.0)]);
 
-        assert_eq!(manager.check_path("read", &s(&deep), "").expect("under"), deep);
+        assert_eq!(
+            manager.check_path("read", &s(&deep), "").expect("under"),
+            deep
+        );
         assert_eq!(
             manager.check_path("list", &s(&dir.0), "").expect("itself"),
             dir.0
@@ -574,10 +583,14 @@ mod tests {
         let (manager, seen) = recording(true);
 
         assert_eq!(
-            manager.check_path("read", &s(&target), "").expect("approved"),
+            manager
+                .check_path("read", &s(&target), "")
+                .expect("approved"),
             target
         );
-        manager.check_path("read", &s(&target), "").expect("approved again");
+        manager
+            .check_path("read", &s(&target), "")
+            .expect("approved again");
         assert_eq!(seen.lock().expect("uncontended").len(), 2);
     }
 
@@ -585,7 +598,10 @@ mod tests {
     fn a_home_relative_allowlist_is_expanded() {
         let manager = denying(|policy| policy.allowed_dirs = vec!["~".into()]);
         let home = std::env::var("HOME").expect("a home directory");
-        assert!(manager.check_path("list", &home, "").expect("allowed").is_absolute());
+        assert!(manager
+            .check_path("list", &home, "")
+            .expect("allowed")
+            .is_absolute());
     }
 
     #[test]

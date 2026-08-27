@@ -209,7 +209,10 @@ mod tests {
     #[test]
     fn an_agent_turn_regains_its_speaker_prefix() {
         let turn = Turn::new("assistant", "Alice", "hello");
-        assert_eq!(turn.render(), ChatMessage::new("assistant", "[Alice] hello"));
+        assert_eq!(
+            turn.render(),
+            ChatMessage::new("assistant", "[Alice] hello")
+        );
     }
 
     #[test]
@@ -226,7 +229,11 @@ mod tests {
         conversation.note("Resumed from ./run.json");
 
         assert_eq!(conversation.len(), 2, "the note is not a turn");
-        assert_eq!(conversation.transcript().len(), 2, "the directive is not said");
+        assert_eq!(
+            conversation.transcript().len(),
+            2,
+            "the directive is not said"
+        );
         assert_eq!(conversation.transcript()[0].sender, "Alice");
         assert_eq!(conversation.transcript()[1].msg_type, "system");
     }

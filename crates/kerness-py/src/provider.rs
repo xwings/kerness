@@ -582,10 +582,7 @@ impl HttpTransport for PyTransport {
             let response = py
                 .import("kerness.provider")?
                 .getattr("http_post_json")?
-                .call(
-                    (url, value_to_py(py, payload)?, header_dict),
-                    Some(&kwargs),
-                )?;
+                .call((url, value_to_py(py, payload)?, header_dict), Some(&kwargs))?;
             value_from_py(&response)
         })
         .catch()

@@ -49,10 +49,7 @@ impl PySkillActivation {
     fn new(skills: &Bound<'_, PyDict>, grant_paths: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let mut configs: BTreeMap<String, SkillConfig> = BTreeMap::new();
         for (name, config) in skills.iter() {
-            configs.insert(
-                name.extract()?,
-                config.extract::<PySkillConfig>()?.inner,
-            );
+            configs.insert(name.extract()?, config.extract::<PySkillConfig>()?.inner);
         }
         Ok(PySkillActivation {
             inner: Arc::new(SkillActivation::new(configs, bind_grant(grant_paths))),

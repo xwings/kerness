@@ -481,7 +481,10 @@ impl PyAgentRunner {
             runner = runner.with_tools(|| {
                 park(
                     &parked,
-                    tools_for.bind(py).call0().and_then(|found| specs_from(&found)),
+                    tools_for
+                        .bind(py)
+                        .call0()
+                        .and_then(|found| specs_from(&found)),
                 )
             });
         }
@@ -590,7 +593,10 @@ impl LoopHost for PyHost<'_> {
     }
 
     fn directive(&mut self, text: &str) -> kerness::Result<()> {
-        self.host.call_method1("directive", (text,)).map(drop).catch()
+        self.host
+            .call_method1("directive", (text,))
+            .map(drop)
+            .catch()
     }
 
     fn closing_turn(&mut self, prompt: &str) -> kerness::Result<String> {
@@ -647,11 +653,8 @@ impl PyOrchestratorLoop {
         retries: Option<i64>,
         resume_state: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let mut inner = OrchestratorLoop::new(
-            spec.inner.clone(),
-            orchestrator_name,
-            participant_names,
-        );
+        let mut inner =
+            OrchestratorLoop::new(spec.inner.clone(), orchestrator_name, participant_names);
         if let Some(fields) = result_fields {
             inner = inner.with_result_fields(fields.iter().map(PyResultField::snapshot).collect());
         }

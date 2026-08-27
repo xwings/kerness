@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kerness::agent::Role;
-use kerness::session::{Session, SessionConfig, SessionResult};
 use kerness::pyfmt::repr_str;
+use kerness::session::{Session, SessionConfig, SessionResult};
 use kerness::tooling::{Arguments, ToolHandler};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;

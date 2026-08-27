@@ -286,7 +286,10 @@ mod tests {
     use serde_json::json;
 
     fn args(value: Value) -> Map<String, Value> {
-        value.as_object().cloned().expect("test arguments are objects")
+        value
+            .as_object()
+            .cloned()
+            .expect("test arguments are objects")
     }
 
     #[test]
@@ -350,7 +353,10 @@ mod tests {
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(schema["required"], json!(["a", "b"]));
         assert!(schema["properties"]["a"].get("default").is_none());
-        assert_eq!(schema["properties"]["b"]["additionalProperties"], json!(false));
+        assert_eq!(
+            schema["properties"]["b"]["additionalProperties"],
+            json!(false)
+        );
         assert_eq!(schema["properties"]["b"]["required"], json!(["c"]));
     }
 

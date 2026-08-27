@@ -160,7 +160,10 @@ impl<'a> AgentRunner<'a> {
                 // The native dialects end on their own result message; text
                 // renders results as assistant turns, so it needs a user turn
                 // to hand the floor back.
-                self.append(&mut scratch, json!({"role": "user", "content": FOLLOWUP_PROMPT}));
+                self.append(
+                    &mut scratch,
+                    json!({"role": "user", "content": FOLLOWUP_PROMPT}),
+                );
             }
 
             iterations += 1;
@@ -510,7 +513,11 @@ mod tests {
 
         assert_eq!(
             contents(&recorded.lock().expect("lock")),
-            [call_block("ping"), "[Tool:ping] pong".to_string(), FOLLOWUP_PROMPT.to_string()]
+            [
+                call_block("ping"),
+                "[Tool:ping] pong".to_string(),
+                FOLLOWUP_PROMPT.to_string()
+            ]
         );
     }
 
@@ -558,8 +565,8 @@ mod tests {
             ],
         );
         let (agent, dispatcher) = fixture(ping());
-        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE")
-            .with_tools(ping);
+        let mut runner =
+            AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE").with_tools(ping);
 
         assert_eq!(runner.run(&[], "turn", None).expect("a turn"), "Got pong.");
 
@@ -611,8 +618,8 @@ mod tests {
             ],
         );
         let (agent, dispatcher) = fixture(ping());
-        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE")
-            .with_tools(ping);
+        let mut runner =
+            AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE").with_tools(ping);
         runner.run(&[], "turn", None).expect("a turn");
 
         let messages = provider.call(1).messages;
@@ -632,8 +639,8 @@ mod tests {
             ],
         );
         let (agent, dispatcher) = fixture(ping());
-        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE")
-            .with_tools(ping);
+        let mut runner =
+            AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE").with_tools(ping);
 
         assert_eq!(runner.run(&[], "turn", None).expect("a turn"), "done");
     }

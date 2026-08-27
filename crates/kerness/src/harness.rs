@@ -361,7 +361,10 @@ pub fn validate_harness(
     }
 
     if !problems.is_empty() {
-        let listed: Vec<String> = problems.iter().map(|problem| format!("  - {problem}")).collect();
+        let listed: Vec<String> = problems
+            .iter()
+            .map(|problem| format!("  - {problem}"))
+            .collect();
         return Err(Error::Session(format!(
             "Session does not satisfy the harness:\n{}",
             listed.join("\n")
@@ -813,7 +816,10 @@ mod tests {
     fn participant_bounds_default_open_and_parse_when_given() {
         // An absent `max` is unbounded, not zero — the difference between a
         // harness that seats anyone and one that seats nobody.
-        assert_eq!(ok(json!({})).agents.participants, ParticipantSpec::default());
+        assert_eq!(
+            ok(json!({})).agents.participants,
+            ParticipantSpec::default()
+        );
         assert_eq!(
             ok(json!({"agents": {"participants": {"min": 2, "max": 5}}}))
                 .agents
@@ -842,13 +848,19 @@ mod tests {
         assert!(loop_spec.phases.is_empty());
         assert!(loop_spec.verdict_rethink);
 
-        assert!(!ok(json!({"loop": {"verdict_rethink": false}})).loop_spec.verdict_rethink);
+        assert!(
+            !ok(json!({"loop": {"verdict_rethink": false}}))
+                .loop_spec
+                .verdict_rethink
+        );
     }
 
     #[test]
     fn a_single_terminator_is_wrapped_and_none_at_all_is_refused() {
         assert_eq!(
-            ok(json!({"loop": {"terminate_on": "DONE"}})).loop_spec.terminate_on,
+            ok(json!({"loop": {"terminate_on": "DONE"}}))
+                .loop_spec
+                .terminate_on,
             names(&["DONE"])
         );
         assert!(message(json!({"loop": {"terminate_on": []}})).contains("cannot end"));
@@ -858,7 +870,10 @@ mod tests {
     #[test]
     fn the_consensus_keyword_is_recognised_only_when_declared() {
         let spec = ok(json!({"loop": {"terminate_on": ["END_SESSION", "CONSENSUS_REACHED"]}}));
-        assert_eq!(spec.loop_spec.consensus_keyword(), Some("CONSENSUS_REACHED"));
+        assert_eq!(
+            spec.loop_spec.consensus_keyword(),
+            Some("CONSENSUS_REACHED")
+        );
         assert_eq!(
             ok(json!({"loop": {"terminate_on": ["END_SESSION"]}}))
                 .loop_spec
@@ -874,7 +889,9 @@ mod tests {
         // because non-empty strings are truthy.
         assert!(message(json!({"loop": {"max_rounds": "many"}})).contains("must be an integer"));
         assert!(message(json!({"loop": {"max_rounds": true}})).contains("must be an integer"));
-        assert!(message(json!({"loop": {"verdict_rethink": "false"}})).contains("must be a boolean"));
+        assert!(
+            message(json!({"loop": {"verdict_rethink": "false"}})).contains("must be a boolean")
+        );
     }
 
     #[test]
@@ -903,7 +920,10 @@ mod tests {
             (json!([{"name": "a"}, {"name": "a"}]), "Duplicate phase"),
             (json!([{"name": "Think Hard"}]), "lowercase slug"),
             (json!({"name": "think"}), "must be a list"),
-            (json!([{"name": "think", "rethink": "false"}]), "must be a boolean"),
+            (
+                json!([{"name": "think", "rethink": "false"}]),
+                "must be a boolean",
+            ),
         ] {
             let reported = message(json!({"loop": {"phases": phases}}));
             assert!(reported.contains(expected), "{reported}");
@@ -915,7 +935,9 @@ mod tests {
         // Absent means all, empty means none, named means those — in
         // registration order, not in the order the harness happened to list.
         assert_eq!(
-            ok(json!({})).resolve_tools(&names(&["cmd", "read_file"])).expect("all"),
+            ok(json!({}))
+                .resolve_tools(&names(&["cmd", "read_file"]))
+                .expect("all"),
             names(&["cmd", "read_file"])
         );
         assert!(ok(json!({"tools": []}))
@@ -934,7 +956,9 @@ mod tests {
     #[test]
     fn an_unknown_tool_is_an_error_not_a_silent_drop() {
         let spec = ok(json!({"name": "x", "tools": ["teleport"]}));
-        let error = spec.resolve_tools(&names(&["cmd"])).expect_err("unregistered");
+        let error = spec
+            .resolve_tools(&names(&["cmd"]))
+            .expect_err("unregistered");
         assert!(error.to_string().contains("teleport"), "{error}");
     }
 

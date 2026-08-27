@@ -70,7 +70,10 @@ pub fn format_persona_for_prompt(config: &PersonaConfig) -> String {
         lines.push(format!("Background: {}", config.background));
     }
     if !config.communication_style.is_empty() {
-        lines.push(format!("Communication style: {}", config.communication_style));
+        lines.push(format!(
+            "Communication style: {}",
+            config.communication_style
+        ));
     }
     lines.join("\n")
 }
@@ -207,7 +210,10 @@ mod tests {
             communication_style: "Terse.".into(),
             ..PersonaConfig::default()
         };
-        assert_eq!(format_persona_for_prompt(&config), "Communication style: Terse.");
+        assert_eq!(
+            format_persona_for_prompt(&config),
+            "Communication style: Terse."
+        );
     }
 
     #[test]
@@ -228,8 +234,8 @@ mod tests {
     #[test]
     fn the_not_found_error_names_every_directory_tried() {
         let dir = TempDir::new("missing");
-        let error =
-            resolve_persona_path("nowhere.md", std::slice::from_ref(&dir.0)).expect_err("no such file");
+        let error = resolve_persona_path("nowhere.md", std::slice::from_ref(&dir.0))
+            .expect_err("no such file");
         let message = error.to_string();
 
         assert!(message.starts_with("Persona file not found: nowhere.md. Tried: "));

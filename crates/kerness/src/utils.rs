@@ -153,7 +153,11 @@ fn split_lines_keepends(text: &str) -> Vec<&str> {
                 start = i;
             }
             b'\r' => {
-                let end = if bytes.get(i + 1) == Some(&b'\n') { i + 2 } else { i + 1 };
+                let end = if bytes.get(i + 1) == Some(&b'\n') {
+                    i + 2
+                } else {
+                    i + 1
+                };
                 lines.push(&text[start..end]);
                 i = end;
                 start = i;

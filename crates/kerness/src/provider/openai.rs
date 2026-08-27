@@ -3,8 +3,8 @@
 use serde_json::{json, Map, Value};
 
 use super::{
-    answering_model, attach_tool_schemas, bearer_headers, chat_completions_payload, openai_response,
-    reported_usage, Provider, ProviderBase, ProviderResponse,
+    answering_model, attach_tool_schemas, bearer_headers, chat_completions_payload,
+    openai_response, reported_usage, Provider, ProviderBase, ProviderResponse,
 };
 use crate::error::{Error, Result};
 use crate::http;

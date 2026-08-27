@@ -199,7 +199,9 @@ pub fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
 
     let mut results = Vec::with_capacity(calls.len());
     for call in calls {
-        let Some(call) = call.as_object() else { continue };
+        let Some(call) = call.as_object() else {
+            continue;
+        };
         let function = match call.get("function") {
             Some(Value::Object(function)) => Some(function),
             _ => None,
@@ -401,7 +403,10 @@ mod tests {
     fn malformed_batches_come_back_as_readable_errors() {
         let unclosed = parse_tool_calls("```tool_calls\n{\"tool_calls\": []}");
         assert_eq!(unclosed[0].name, INVALID_CALL);
-        assert_eq!(unclosed[0].arguments["error"], json!("unclosed tool_calls fence"));
+        assert_eq!(
+            unclosed[0].arguments["error"],
+            json!("unclosed tool_calls fence")
+        );
 
         let empty = parse_tool_calls("```tool_calls\n{\"tool_calls\": []}\n```");
         assert_eq!(empty[0].arguments["error"], json!("empty tool_calls"));

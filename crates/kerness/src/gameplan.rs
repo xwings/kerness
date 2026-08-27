@@ -38,7 +38,12 @@ impl GameplanConfig {
         if self.path.is_empty() {
             return None;
         }
-        Some(Path::new(&self.path).parent().unwrap_or(Path::new("")).to_path_buf())
+        Some(
+            Path::new(&self.path)
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_path_buf(),
+        )
     }
 
     /// Shorthand for the harness role contract.
@@ -66,7 +71,10 @@ pub fn load_gameplan(name_or_path: &str) -> Result<GameplanConfig> {
     let path = resolve_gameplan_path(name_or_path)?;
 
     let text = std::fs::read_to_string(&path).map_err(|err| {
-        Error::GameplanLoad(format!("Cannot read gameplan file {}: {err}", path.display()))
+        Error::GameplanLoad(format!(
+            "Cannot read gameplan file {}: {err}",
+            path.display()
+        ))
     })?;
 
     let source = path.display().to_string();
@@ -118,11 +126,15 @@ fn split_frontmatter<'a>(text: &'a str, source: &str) -> Result<(Value, Option<&
     let Some(captures) = FRONTMATTER_RE.captures(text) else {
         return Ok((Value::Object(Default::default()), None));
     };
-    let raw = captures.get(1).expect("group 1 always participates").as_str();
+    let raw = captures
+        .get(1)
+        .expect("group 1 always participates")
+        .as_str();
     let body = &text[captures.get(0).expect("the whole match").end()..];
 
-    let data = yaml::parse(raw)
-        .map_err(|err| Error::GameplanLoad(format!("Invalid YAML frontmatter in {source}: {err}")))?;
+    let data = yaml::parse(raw).map_err(|err| {
+        Error::GameplanLoad(format!("Invalid YAML frontmatter in {source}: {err}"))
+    })?;
 
     let data = if data.is_null() {
         Value::Object(Default::default())
@@ -253,7 +265,10 @@ mod tests {
 
         assert_eq!(harness.agents.participants.min, 2);
         assert_eq!(harness.agents.participants.max, Some(6));
-        assert_eq!(harness.loop_spec.terminate_on, ["END_SESSION", "CONSENSUS_REACHED"]);
+        assert_eq!(
+            harness.loop_spec.terminate_on,
+            ["END_SESSION", "CONSENSUS_REACHED"]
+        );
         assert_eq!(
             harness.loop_spec.consensus_keyword(),
             Some("CONSENSUS_REACHED")
@@ -292,7 +307,11 @@ mod tests {
             assert!(!phases[0].rethink);
 
             let rethinks: Vec<&_> = phases.iter().filter(|phase| phase.rethink).collect();
-            assert_eq!(rethinks.len(), 1, "{name} must have exactly one rethink phase");
+            assert_eq!(
+                rethinks.len(),
+                1,
+                "{name} must have exactly one rethink phase"
+            );
             assert_eq!(
                 rethinks[0],
                 phases.last().expect("non-empty"),
@@ -327,7 +346,10 @@ mod tests {
     fn an_undeclared_name_falls_back_to_the_filename() {
         // A filename with underscores must not fail slug validation, because
         // the user did not choose it as an identifier.
-        let file = TempFile::new("no_name_here", "---\nloop:\n  max_rounds: 2\n---\n\n# Relative\n");
+        let file = TempFile::new(
+            "no_name_here",
+            "---\nloop:\n  max_rounds: 2\n---\n\n# Relative\n",
+        );
         let config = load_gameplan(&file.name()).expect("custom loads");
         assert_eq!(config.name, "kerness-gameplan-no_name_here");
     }

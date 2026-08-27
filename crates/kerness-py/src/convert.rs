@@ -34,7 +34,11 @@ fn number_to_py<'py>(py: Python<'py>, number: &Number) -> PyResult<Bound<'py, Py
     if let Some(int) = number.as_u64() {
         return Ok(int.into_pyobject(py)?.into_any());
     }
-    Ok(number.as_f64().unwrap_or_default().into_pyobject(py)?.into_any())
+    Ok(number
+        .as_f64()
+        .unwrap_or_default()
+        .into_pyobject(py)?
+        .into_any())
 }
 
 /// Render a JSON object as a `dict`.

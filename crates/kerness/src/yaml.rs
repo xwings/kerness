@@ -208,11 +208,7 @@ fn key_text(key: &Value) -> String {
 ///
 /// A quoted, literal, or folded scalar is always a string. A plain one is
 /// resolved. An explicit `!!tag` overrides both.
-fn resolve_scalar(
-    text: &str,
-    style: TScalarStyle,
-    tag: Option<&Tag>,
-) -> Result<Value, String> {
+fn resolve_scalar(text: &str, style: TScalarStyle, tag: Option<&Tag>) -> Result<Value, String> {
     if let Some(tag) = tag {
         if tag.handle != CORE_TAG {
             return Err(format!(

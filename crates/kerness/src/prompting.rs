@@ -13,8 +13,7 @@ use crate::error::Result;
 use crate::tooling::{format_tools_prompt, ToolSpec};
 use crate::toolschema::ToolDialect;
 
-pub const MEMORY_HEADER: &str =
-    "\n\n## Memory\nThe following is shared memory for this session.";
+pub const MEMORY_HEADER: &str = "\n\n## Memory\nThe following is shared memory for this session.";
 
 /// Appended to the header only when the session actually writes memory. A
 /// read-only session that still invited `@MEMORY:` lines would be asking for
@@ -125,8 +124,7 @@ impl<'a> PromptAssembler<'a> {
     /// Order is base, skills, tools, memory.
     pub fn orchestrator_system(&self, agent: &Agent, base_prompt: &str) -> Result<String> {
         let skills = (self.skills_for)(agent);
-        let mut prompt =
-            agent.decorate_system_prompt(base_prompt, self.show_reasoning, &skills)?;
+        let mut prompt = agent.decorate_system_prompt(base_prompt, self.show_reasoning, &skills)?;
         let tools = self.tools_block(agent);
         if !tools.is_empty() {
             prompt = format!("{prompt}\n\n{tools}");
@@ -282,7 +280,9 @@ mod tests {
             language: "French".to_string(),
             ..Agent::new("Bob", "m")
         };
-        let messages = assembler().participant_messages(&agent, &[], "BASE").unwrap();
+        let messages = assembler()
+            .participant_messages(&agent, &[], "BASE")
+            .unwrap();
         let system = messages[0]["content"].as_str().unwrap();
 
         assert!(system.contains("Persona: Engineer"), "{system}");
@@ -347,13 +347,17 @@ mod tests {
         let assembler = assembler();
 
         assert_eq!(
-            assembler.messages_for(&orchestrator(), &[], "BASE").unwrap()[0]["content"],
+            assembler
+                .messages_for(&orchestrator(), &[], "BASE")
+                .unwrap()[0]["content"],
             json!("BASE")
         );
-        assert!(assembler.messages_for(&participant, &[], "BASE").unwrap()[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Persona: Engineer"));
+        assert!(
+            assembler.messages_for(&participant, &[], "BASE").unwrap()[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Persona: Engineer")
+        );
     }
 
     #[test]

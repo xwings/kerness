@@ -109,7 +109,11 @@ impl SkillActivation {
     /// the empty set — a skill declaring `allowed-tools: []` genuinely permits
     /// nothing.
     pub fn gate(&self) -> Option<BTreeSet<String>> {
-        self.state.lock().expect("activation lock poisoned").gate.clone()
+        self.state
+            .lock()
+            .expect("activation lock poisoned")
+            .gate
+            .clone()
     }
 
     /// Activate a skill and return what the agent should read: the body, plus a
@@ -346,7 +350,9 @@ mod tests {
             "Unknown skill 'nope'. Available to you: a, b"
         );
 
-        let error = activation(Vec::new()).load("a").expect_err("no skills at all");
+        let error = activation(Vec::new())
+            .load("a")
+            .expect_err("no skills at all");
         assert!(error.to_string().contains("(none)"), "{error}");
     }
 
@@ -423,7 +429,10 @@ mod tests {
         let act = registry.activation_for("Alice");
         let spec = registry.build_tool(&act).expect("two skills");
 
-        assert_eq!(spec.parameters["properties"]["name"]["enum"], json!(["a", "b"]));
+        assert_eq!(
+            spec.parameters["properties"]["name"]["enum"],
+            json!(["a", "b"])
+        );
 
         let mut arguments = Arguments::new();
         arguments.insert("name".into(), json!("a"));
@@ -443,8 +452,10 @@ mod tests {
 
     #[test]
     fn the_registry_resolves_per_agent() {
-        let registry =
-            SkillRegistry::new(Arc::new(|name: &str| vec![skill(&name.to_lowercase())]), None);
+        let registry = SkillRegistry::new(
+            Arc::new(|name: &str| vec![skill(&name.to_lowercase())]),
+            None,
+        );
         assert_eq!(registry.activation_for("Alice").names(), ["alice"]);
         assert_eq!(registry.activation_for("Bob").names(), ["bob"]);
     }

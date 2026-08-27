@@ -55,7 +55,10 @@ impl ConsoleChannel {
 
 impl Channel for ConsoleChannel {
     fn send(&self, sender: &str, message: &str) -> Result<()> {
-        println!("{} {message}", self.prefix_format.replace("{sender}", sender));
+        println!(
+            "{} {message}",
+            self.prefix_format.replace("{sender}", sender)
+        );
         Ok(())
     }
 
