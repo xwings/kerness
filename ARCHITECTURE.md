@@ -55,7 +55,8 @@ crates/
   kerness/                  the framework — pure Rust, links no Python
     src/                    24 modules (see the Index)
     assets/                 built-in gameplans, personas, skills
-    examples/               debate.rs — the framework driven from Rust alone
+    tests/                  88 integration tests over the crate's public surface
+    examples/               8 harnesses driven from Rust alone
   kerness-py/               the Python extension — thin, decides nothing
     src/                    11 modules, one per boundary concern
 python/
@@ -68,6 +69,7 @@ python/
     gameplans/ personas/ skills/   the same assets, installed
 tests/                      26 pytest modules over the Python surface
 examples/                   runnable harnesses, exercised by tests/test_examples.py
+.github/workflows/          CI on every push; release builds wheels and an sdist
 assets/                     project marks: logo.svg, logo-mark.svg
 README.md                   the public introduction
 LICENSE                     MIT
@@ -143,6 +145,7 @@ Python package as well as the crate.
 | **M5** | Surface sweep: no unused dependency, no unreferenced `pub` item, clippy clean at `-D warnings`, every framework constant reachable from Python | done |
 | **M6** | This architecture doc set, and the public introduction: `README.md`, project marks, MIT licence | done |
 | **M7** | Release verification: full test matrix green, wheel and sdist build, the sdist installs into a clean interpreter and its self-check exits 0 | done |
+| **M8** | The Rust surface proving itself: 88 integration tests over the public API, an example per capability including one that needs no key, and CI running both suites on every push | done |
 
 ## Verification
 
@@ -150,12 +153,20 @@ The commands that gate a change. Each module file names the subset that proves
 its own status.
 
 ```sh
-cargo test --workspace -q                          # pass = 0 failed
+cargo fmt --all -- --check                         # pass = exit 0
+cargo test --workspace -q                          # pass = 305 unit + 88 integration, 0 failed
 cargo clippy --workspace --all-targets -- -D warnings   # pass = exit 0
+cargo build -p kerness --examples                  # pass = all 8 compile
+cargo run -p kerness --example offline_debate      # pass = completes with no key, no network
 .venv/bin/maturin develop                          # pass = "Installed kerness-0.1.0"
 .venv/bin/python -m pytest tests/ -q               # pass = 394 passed
 .venv/bin/python -m kerness.selfcheck              # pass = "OK: all core checks passed", exit 0
 ```
+
+`.github/workflows/ci.yml` runs all of the above on every push, plus
+`cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D warnings`,
+`cargo check --workspace --all-targets --locked` on the MSRV toolchain, and
+`ruff check`. See [testing.md](ARCHITECTURE/testing.md).
 
 `maturin` and `python` are not on `PATH` in this workspace; invoke them from
 `.venv/bin/`.
@@ -277,6 +288,7 @@ before implementation rather than after mistakes.
 - [session.md](ARCHITECTURE/session.md) — the top-level object that assembles and runs everything.
 - [sessionfile.md](ARCHITECTURE/sessionfile.md) — saving and resuming a run.
 - [skills.md](ARCHITECTURE/skills.md) — loading skill bundles and the `Skill` tool.
+- [testing.md](ARCHITECTURE/testing.md) — the three suites, the examples, and what CI runs.
 - [toolkit.md](ARCHITECTURE/toolkit.md) — tool specs, parsing calls out of text, dispatching them.
 - [toolschema.md](ARCHITECTURE/toolschema.md) — native tool dialects and their wire shapes.
 - [utils.md](ARCHITECTURE/utils.md) — text scanning, retry, and Python-compatible formatting.

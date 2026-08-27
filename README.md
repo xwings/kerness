@@ -4,12 +4,14 @@
 
 <p align="center">
   <strong>Kerness — Kernel for Harness.</strong><br>
-  The framework an AI harness sits on, assembled from plug-and-play components.
+  The framework an AI harness sits on, assembled from plug-and-play components.<br>
+  A Rust crate, with Python bindings over the same kernel.
 </p>
 
 <p align="center">
+  <a href="https://github.com/xwings/kerness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xwings/kerness/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F59E0B"></a>
-  <img alt="Rust 1.80+" src="https://img.shields.io/badge/rust-1.80%2B-B7410E">
+  <img alt="Rust 1.88+" src="https://img.shields.io/badge/rust-1.88%2B-B7410E">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB">
 </p>
 
@@ -36,7 +38,22 @@ exposes them as components you plug together. What is left for you is the part
 that is genuinely yours: a Markdown file declaring how your harness behaves, and
 whatever tools you want to hand the agents.
 
-The name is the design: a **kern**el for a har**ness**.
+The name is the design: a **ker**nel for a har**ness**.
+
+### Two artifacts, one kernel
+
+Kerness is a **Rust crate**. `crates/kerness/` links no Python, spawns no
+threads, and runs a whole session on the calling thread — a stack trace from
+inside a tool handler reaches back to `Session::run`.
+
+`crates/kerness-py/` is a **binding**: a thin PyO3 layer that decides nothing.
+It forwards into the same kernel, so a session driven from Python takes the same
+code path as one driven from `main()`. What Python adds is what Python callers
+expect — a `Provider` you subclass, a lambda as a tool handler, a `pydantic`
+model for structured output.
+
+Neither surface is a wrapper around the other's use case, and neither is the
+"real" one. Pick the language; the framework is the same.
 
 ### The split
 
@@ -62,18 +79,23 @@ swap in your own — the rest of the kernel does not notice.
 
 | Component | Ships with | Swap it by |
 | --- | --- | --- |
-| **Provider** | `OpenAIProvider`, `ClaudeProvider`, `OpenRouterProvider`, `CustomProvider`, plus OAuth variants | subclassing `Provider` and overriding `chat` |
-| **Channel** | `ConsoleChannel`, `FileChannel`, `LogChannel`, `MultiChannel` | subclassing `Channel` — one method, `send` |
-| **Tools** | `run_command`, `read_file`, `list_dir`, `write_memory` | `session.add_tool(name, description, parameters, handler)` |
+| **Provider** | `OpenAiProvider`, `ClaudeProvider`, `OpenRouterProvider`, `CustomProvider`; OAuth credentials where the vendor offers them | implementing the `Provider` trait — one required method, `chat` |
+| **Channel** | `ConsoleChannel`, `FileChannel`, `LogChannel`, `MultiChannel` | implementing `Channel` — one required method, `send` |
+| **Tools** | `cmd`, `read_file`, `list_dir`, `write_memory` | `session.add_tool(name, description, parameters, handler)` |
 | **Skills** | `challenge`, `fact-check`, `summarize`, `agent-browser` | dropping a `SKILL.md` directory on disk |
 | **Personas** | `pragmatic_engineer`, `devils_advocate` | a `.md` file, or inline prose |
 | **Gameplans** | `debate`, `discussion`, `research` | a new Markdown file — see below |
-| **Access** | closed by default; allow-lists for programs, patterns, directories | `AccessPolicy(...)`, plus an approval callback |
-| **Memory** | a plain `.md` file, read-only unless asked | point `memory=` anywhere; per-agent scopes supported |
-| **Session file** | JSON snapshot after every turn | `session_file=` — absent means persist nothing |
+| **Access** | closed by default; allow-lists for programs, patterns, directories | an `AccessPolicy`, plus an approval callback |
+| **Memory** | a plain `.md` file, read-only unless asked | point `memory` anywhere; per-agent scopes supported |
+| **Session file** | JSON snapshot after every turn | `session_file` — absent means persist nothing |
+
+The names are the Rust ones. Python spells the two acronym providers the way
+Python callers expect — `OpenAIProvider`, plus `OpenAIOAuthProvider` and
+`ClaudeOAuthProvider` — and a trait to implement becomes a class to subclass;
+everything else carries the same name in both.
 
 A `CustomProvider` pointed at any OpenAI-compatible endpoint covers most local
-inference servers without writing a class at all.
+inference servers without implementing anything at all.
 
 Providers may speak native tool calling or fall back to text fences. The dialect
 is resolved **per agent**, so one session can mix an Anthropic model, an OpenAI
@@ -119,32 +141,111 @@ productive, not to resolve it prematurely.
 ```
 
 Everything in that contract is enforced, not advisory: a session with one
-participant is refused before the first API call, an unknown key is an error
-rather than a silent no-op, and every problem in the file is reported at once
-instead of one per run. The declared `result:` fields come back as typed values
-on the session result.
+participant is refused before the first API call, a `tools:` entry naming a tool
+nobody registered is an error rather than a silent drop, and every problem is
+reported at once instead of one per run. The declared `result:` fields come back
+as typed values on the session result.
 
 A new harness is a new Markdown file. It is not a new runtime, not a subclass,
 and not a fork.
 
 ## Install
 
+**Rust** — MSRV 1.88, no build script, no system libraries:
+
+```toml
+[dependencies]
+kerness = { git = "https://github.com/xwings/kerness" }
+```
+
+**Python** — `abi3` wheels from CPython 3.10 up, so one build covers every
+supported interpreter:
+
 ```sh
 pip install kerness                  # runtime
 pip install 'kerness[structured]'    # plus pydantic, for OpenAIProvider(output_type=...)
 ```
 
-From a checkout:
+From a checkout, either side:
 
 ```sh
-maturin develop --release
-python -m kerness.selfcheck          # pass = "OK: all core checks passed"
+cargo test --workspace               # the kernel
+maturin develop && python -m kerness.selfcheck   # the binding; pass = "OK: all core checks passed"
 ```
 
-Wheels are `abi3` from CPython 3.10 up, so one build covers every supported
-interpreter.
+## A run, in Rust
 
-## A run, in Python
+```rust
+use std::sync::Arc;
+use kerness::{Agent, ConsoleChannel, Role, Session, SessionConfig};
+use kerness::provider::{OpenAiConfig, OpenAiProvider};
+
+let provider = Arc::new(OpenAiProvider::new(OpenAiConfig {
+    api_key: std::env::var("OPENAI_API_KEY")?,
+    ..Default::default()
+})?);
+
+let mut session = Session::new(SessionConfig {
+    gameplan: "debate".to_string(),
+    topic: "Should the cache be write-through?".to_string(),
+    provider: Some(provider),
+    channel: Some(Arc::new(ConsoleChannel::default())),
+    session_file: Some("run.json".to_string()),   // resumable; None persists nothing
+    ..Default::default()
+})?;
+
+session.add_participant(Agent { persona: "pragmatic_engineer.md".into(), ..Agent::new("Alice", "gpt-4o") });
+session.add_participant(Agent { persona: "devils_advocate.md".into(), ..Agent::new("Bob", "gpt-4o") });
+session.add_orchestrator(Agent { role: Role::Orchestrator, ..Agent::new("Mod", "gpt-4o") })?;
+
+let result = session.run()?;
+println!("{}", result.summary());          // the gameplan's declared `summary` field
+println!("{} {} {}", result.consensus_reached, result.rounds_run, result.end_reason);
+```
+
+Handing the agents a tool of your own is one call. The handler is a closure:
+
+```rust
+use kerness::tooling::Arguments;
+use serde_json::{json, Value};
+
+session.add_tool(
+    "lookup_price",
+    "Look up the current price of a ticker.",
+    json!({"type": "object",
+           "properties": {"ticker": {"type": "string"}},
+           "required": ["ticker"]}),
+    Arc::new(|args: &Arguments, _actor: &str| {
+        let ticker = args.get("ticker").and_then(Value::as_str).unwrap_or_default();
+        Ok(format!("{ticker} is at 41.20"))
+    }),
+)?;
+```
+
+The kernel handles schema translation into whichever dialect the agent's
+provider speaks, parsing the call back out, feeding the result in, and stopping
+a model that loops on malformed calls.
+
+Full file: [`crates/kerness/examples/debate.rs`](crates/kerness/examples/debate.rs) —
+`cargo run -p kerness --example debate`.
+
+To watch a session run without an API key, use
+[`offline_debate`](crates/kerness/examples/offline_debate.rs), which drives the
+same `debate` gameplan against a scripted provider:
+
+```sh
+cargo run -p kerness --example offline_debate    # no key, no network
+```
+
+Seven more examples sit beside it — per-agent providers, memory, structured
+output, a custom tool, a custom channel, and the access boundary widened for one
+program.
+
+## The same run, in Python
+
+The binding mirrors the crate, in the shapes Python callers expect: a keyword
+constructor instead of a config struct, a plain callable instead of a closure in
+an `Arc`.
 
 ```python
 from kerness import ConsoleChannel, OpenAIProvider, Session
@@ -165,8 +266,6 @@ print(result.summary)        # the gameplan's declared `summary` field
 print(result.consensus_reached, result.rounds_run, result.end_reason)
 ```
 
-Handing the agents a tool of your own is one call:
-
 ```python
 session.add_tool(
     "lookup_price",
@@ -178,53 +277,33 @@ session.add_tool(
 )
 ```
 
-The handler is a plain callable. The kernel handles schema translation into
-whichever dialect the agent's provider speaks, parsing the call back out,
-feeding the result in, and stopping a model that loops on malformed calls.
+## What the kernel does while it runs
+
+Neither of the above is a different runtime, so the following holds for both.
 
 Skills use progressive disclosure: prompts carry only names and descriptions,
 and the full instructions load on demand through a turn-local `Skill` tool. A
 skill may also narrow the tools available for that turn, and — when the policy
 trusts bundles — grant read access to its own directory.
 
-There is no daemon and no server. A run given a `session_file` writes its state
-to disk after every turn and continues from that file the next time the same
-script runs. Resume checks identity first: a snapshot from a different gameplan
+There is no daemon and no server. A run given a session file writes its state to
+disk after every turn and continues from that file the next time the same
+program runs. Resume checks identity first: a snapshot from a different gameplan
 or a different agent roster is refused, not half-applied.
-
-## A run, in Rust
-
-The core crate links no Python at all. The same session, with no interpreter in
-the process:
-
-```rust
-let mut session = Session::new(SessionConfig {
-    gameplan: "debate".to_string(),
-    topic: "Should the cache be write-through?".to_string(),
-    provider: Some(provider),
-    channel: Some(Arc::new(ConsoleChannel::default())),
-    ..Default::default()
-})?;
-
-session.add_participant(Agent::new("Alice", "gpt-4o"));
-session.add_participant(Agent::new("Bob", "gpt-4o"));
-session.add_orchestrator(Agent { role: Role::Orchestrator, ..Agent::new("Mod", "gpt-4o") })?;
-
-let result = session.run()?;
-```
-
-Full file: [`crates/kerness/examples/debate.rs`](crates/kerness/examples/debate.rs) —
-`cargo run -p kerness --example debate`.
 
 ## Layout
 
 ```text
-crates/kerness/      # the kernel, pure Rust — no PyO3, no Python
-crates/kerness-py/   # the PyO3 extension module, kerness._core
-python/kerness/      # the Python package: shims, deliberate Python, assets
-tests/               # pytest suite
-examples/            # runnable integrations
-ARCHITECTURE/        # one document per subsystem
+crates/kerness/           # the kernel, pure Rust — no PyO3, no Python
+  src/                    #   24 modules, 305 unit tests inline
+  tests/                  #   88 integration tests, over the public API only
+  examples/               #   8 runnable Rust harnesses, one needing no key
+  assets/                 #   bundled gameplans, personas, skills
+crates/kerness-py/        # the PyO3 extension module, kerness._core
+python/kerness/           # the Python package: shims, deliberate Python, assets
+tests/                    # pytest suite, over the binding
+examples/                 # runnable Python harnesses
+ARCHITECTURE/             # one document per subsystem
 ```
 
 The bundled `debate`, `discussion`, and `research` gameplans are worked examples
@@ -232,13 +311,25 @@ of the contract, not the product.
 
 ## Testing
 
+Each suite proves its own layer. The Rust integration tests compile against the
+crate's public API exactly as a dependent does, so a break in that surface fails
+a test here rather than a downstream build; the pytest suite proves the binding
+carries the kernel's behaviour across the FFI boundary intact.
+
 ```sh
-cargo test --workspace                     # 305 tests
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                     # 305 unit + 88 integration
+cargo build -p kerness --examples          # every example still compiles
+cargo run -p kerness --example offline_debate   # a whole session, no key
+
 maturin develop
 python -m pytest tests/ -q                 # 394 tests
 python -m kerness.selfcheck                # exit 0
 ```
+
+CI runs all of it on every push, on Rust stable and the 1.88 MSRV floor, and on
+Python 3.10 and 3.13.
 
 ## Documentation
 
