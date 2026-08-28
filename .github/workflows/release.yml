@@ -96,7 +96,7 @@ jobs:
       # Deliberately no checkout. The interpreter must find the gameplans, the
       # personas and the skills inside the installed package, and a working
       # tree sitting next to it would hide the case where it cannot.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
 
