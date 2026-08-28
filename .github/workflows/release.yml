@@ -11,9 +11,9 @@
 #     permissions:
 #       id-token: write        # PyPI Trusted Publishing — no token in secrets
 #     steps:
-#       - uses: actions/download-artifact@v4
+#       - uses: actions/download-artifact@v8
 #         with: {pattern: 'wheels-*', path: dist, merge-multiple: true}
-#       - uses: actions/download-artifact@v4
+#       - uses: actions/download-artifact@v8
 #         with: {name: sdist, path: dist}
 #       - uses: PyO3/maturin-action@v1
 #         with: {command: upload, args: '--non-interactive dist/*'}
@@ -102,7 +102,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sdist
           path: dist
@@ -121,13 +121,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: wheels-*
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sdist
           path: dist
