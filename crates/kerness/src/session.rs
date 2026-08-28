@@ -880,6 +880,29 @@ impl Session {
             String::new()
         };
 
+        // Flow control is the orchestrator's where there are no phases. Where
+        // there are, the loop owns it: phases advance when every participant
+        // has spoken, and the briefing names who is still owed a turn. Telling
+        // a phased orchestrator it decides "when to move phases" and may
+        // "summarize at any point" contradicts the phase block directly above
+        // it, and the contradiction resolves the expensive way — the
+        // orchestrator stops calling the roster and starts writing the missing
+        // participants' contributions itself, which reads exactly like a real
+        // round and is not one.
+        let flow_rules = if spec.phases.is_empty() {
+            "- You control the flow: decide who speaks, when to move phases, \
+             when to summarize, when to check consensus\n\
+             - You can summarize, comment, redirect, or challenge participants \
+             at any point\n"
+        } else {
+            "- You decide who speaks next; the phases advance on their own\n\
+             - Call on the participants your briefing lists as yet to speak, \
+             one per turn, until none are left\n\
+             - Never write a participant's turn for them: until a participant \
+             has answered you do not know what it found, and a contribution you \
+             compose on its behalf is invention\n"
+        };
+
         // The harness's own words about itself, when it has any.
         let summary = if harness.description.is_empty() {
             String::new()
@@ -906,10 +929,7 @@ impl Session {
              - You can give them specific instructions after the @ mention\n\
              - Only call on ONE participant at a time\n\
              {end_rules}\
-             - You control the flow: decide who speaks, when to move phases, \
-             when to summarize, when to check consensus\n\
-             - You can summarize, comment, redirect, or challenge participants \
-             at any point\n\
+             {flow_rules}\
              {rounds_rule}\
              {extra}",
             self.gameplan.name, self.gameplan.body, participants[0],
@@ -1225,10 +1245,10 @@ impl Session {
 // tested without a provider.
 
 impl LoopHost for Session {
-    fn orchestrator_turn(&mut self, purpose: &str) -> Result<String> {
+    fn orchestrator_turn(&mut self, purpose: &str, instruction: Option<&str>) -> Result<String> {
         let agent = self.orchestrator_agent()?;
         let prompt = self.orch_prompt.clone();
-        self.turn(&agent, &prompt, purpose, None)
+        self.turn(&agent, &prompt, purpose, instruction)
     }
 
     fn participant_turn(&mut self, name: &str, instruction: &str) -> Result<String> {
@@ -1265,7 +1285,8 @@ impl LoopHost for Session {
 
     fn closing_turn(&mut self, prompt: &str) -> Result<String> {
         self.conversation.directive(prompt);
-        self.orchestrator_turn("final summary")
+        // No briefing: the phases are done, and there is nobody left to call.
+        self.orchestrator_turn("final summary", None)
     }
 
     fn record_summary(&mut self, text: &str, turn: i64) -> Result<()> {
@@ -1969,6 +1990,50 @@ mod tests {
         assert!(prompt.contains("4. rethink (1 round) [rethink]"));
         assert!(prompt.contains("Write NEXT_PHASE to end the current phase early"));
         assert!(!prompt.contains("The session ends after"));
+        // Phases own the flow, so the orchestrator is not told it does. The
+        // generic licence contradicts the phase block above it, and an
+        // orchestrator resolving that contradiction stops calling the roster.
+        assert!(!prompt.contains("You control the flow"));
+        assert!(!prompt.contains("at any point"));
+        assert!(prompt.contains("the phases advance on their own"));
+        assert!(prompt.contains("Never write a participant's turn for them"));
+    }
+
+    #[test]
+    fn a_phase_less_gameplan_keeps_the_orchestrator_in_charge_of_the_flow() {
+        // The counterpart: with no phases there is no loop-owned rotation to
+        // contradict, and withholding the licence would leave nobody driving.
+        let temp = TempDir::new("prompt-flow");
+        let provider = Arc::new(SequenceProvider::new(&["END_SESSION", "Done."]));
+        let channel = Arc::new(CaptureChannel::default());
+        let path = temp.join("flat.md");
+        std::fs::write(
+            &path,
+            "---\nname: flat\nagents:\n  orchestrator:\n    required: true\n\
+             loop:\n  max_rounds: 2\n---\n\nBody.\n",
+        )
+        .expect("write the gameplan");
+        let config = SessionConfig {
+            gameplan: path,
+            topic: "Anything".to_string(),
+            provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            channel: Some(channel),
+            memory: temp.join("memory.md"),
+            turn_delay: Duration::ZERO,
+            ..SessionConfig::default()
+        };
+        let mut session = Session::new(config).expect("a session");
+        session.add_participant(Agent::new("Alice", "m"));
+        session.add_participant(Agent::new("Bob", "m"));
+        session
+            .add_orchestrator(Agent::new("Mod", "m"))
+            .expect("accepted");
+        session.run().expect("a run");
+
+        let prompt = provider.system_prompts().remove(0);
+        assert!(prompt.contains("You control the flow"));
+        assert!(prompt.contains("The session ends after 2 rounds"));
+        assert!(!prompt.contains("Never write a participant's turn for them"));
     }
 
     #[test]

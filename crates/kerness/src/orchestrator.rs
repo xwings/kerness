@@ -48,7 +48,11 @@ static JSON_FENCE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// report a recovery anyway.
 pub trait LoopHost {
     /// Run one orchestrator turn and return its reply.
-    fn orchestrator_turn(&mut self, purpose: &str) -> Result<String>;
+    ///
+    /// *instruction* is the standing briefing for this turn, carried the same
+    /// way [`LoopHost::participant_turn`] carries the phase requirement: as a
+    /// user-role prompt appended for this turn only, never persisted.
+    fn orchestrator_turn(&mut self, purpose: &str, instruction: Option<&str>) -> Result<String>;
 
     /// Run one participant turn and return its reply.
     fn participant_turn(&mut self, name: &str, instruction: &str) -> Result<String>;
@@ -277,6 +281,15 @@ impl PhaseTracker {
         lines.join("\n")
     }
 
+    /// The next participant owed a turn, if anyone is.
+    ///
+    /// [`PhaseTracker::briefing`] names the whole pending set for an
+    /// orchestrator that is choosing; this names the head of it for one that
+    /// has stopped choosing and needs a single concrete move.
+    fn next_owed(&self) -> Option<&str> {
+        self.pending.first().map(String::as_str)
+    }
+
     /// Note that *name* spoke.
     ///
     /// Returns true when that turn closed a round — the caller's cue to
@@ -496,6 +509,10 @@ impl OrchestratorLoop {
     }
 
     /// Tell the orchestrator where in the declared structure it is.
+    ///
+    /// This marks the boundary in the shared conversation, so participants see
+    /// the phase turn over too. It is not how the orchestrator learns who owes
+    /// a turn — see [`OrchestratorLoop::standing_briefing`] for that.
     fn brief(&self, host: &mut dyn LoopHost) -> Result<()> {
         if !self.phases.phased() || self.phases.exhausted {
             return Ok(());
@@ -505,6 +522,27 @@ impl OrchestratorLoop {
             host.directive(&text)?;
         }
         Ok(())
+    }
+
+    /// The briefing as it stands for the turn about to be taken.
+    ///
+    /// Carried into *every* orchestrator turn, because a briefing delivered
+    /// only at boundaries is stale for every turn in between: the pending set
+    /// shrinks with each participant who speaks, and an orchestrator reading a
+    /// boundary-old copy re-calls someone who already spoke. That never clears
+    /// `pending`, so the round never closes, so the next boundary never
+    /// arrives — the staleness is self-sustaining, and the orchestrator's way
+    /// out is to give up on the roster and speak for the participants it never
+    /// called.
+    ///
+    /// [`OrchestratorLoop::turn_instruction`] already does exactly this for
+    /// participants, and for the same stated reason: a standing requirement
+    /// that depends on being remembered is advisory.
+    fn standing_briefing(&self) -> String {
+        if !self.phases.phased() || self.phases.exhausted {
+            return String::new();
+        }
+        self.phases.briefing()
     }
 
     fn record_progress(&mut self) {
@@ -602,7 +640,9 @@ impl OrchestratorLoop {
     }
 
     fn orchestrator_says(&mut self, host: &mut dyn LoopHost, purpose: &str) -> Result<String> {
-        let reply = host.orchestrator_turn(purpose)?;
+        let briefing = self.standing_briefing();
+        let reply =
+            host.orchestrator_turn(purpose, (!briefing.is_empty()).then_some(briefing.as_str()))?;
         self.state.turn_count += 1;
         self.publish(host);
         host.deliver(
@@ -669,12 +709,28 @@ impl OrchestratorLoop {
         }
     }
 
+    /// What to tell an orchestrator whose reply named nobody and ended nothing.
+    ///
+    /// Where a round is still open the loop knows exactly who is owed the next
+    /// turn, so it says the name. Asking only for "an @Name" hands the problem
+    /// back unchanged to the one reader that has already demonstrated it cannot
+    /// solve it, and the usual answer is the same unusable reply again until
+    /// the retry budget is gone and the session is forced to end — with the
+    /// round one turn from closing.
     fn hint(&self) -> String {
-        format!(
+        let mut hint = format!(
             "Your last response didn't contain an @Name mention or one of these keywords: {}. \
              Please either call on a participant using @Name or end the session.",
             self.spec.terminate_on.join(", ")
-        )
+        );
+        if let Some(next) = self.phases.next_owed() {
+            hint.push_str(&format!(
+                " {next} has not spoken this round. Reply with \"@{next}, \" and your instruction, \
+                 and nothing else — {next} answers for itself, and a turn you write on its behalf \
+                 is not one it took."
+            ));
+        }
+        hint
     }
 
     /// Ask for the summary, and for the declared result fields with it.
@@ -898,6 +954,9 @@ mod tests {
         delivered: Vec<(String, String, String)>,
         notes: Vec<String>,
         directives: Vec<String>,
+        /// The standing briefing carried into each orchestrator turn, in order.
+        /// Empty string where the turn carried none.
+        briefed: Vec<String>,
         /// Every closing prompt in order — `[0]` is the draft ask, the last is
         /// the one whose answer was committed.
         closing_prompts: Vec<String>,
@@ -919,6 +978,7 @@ mod tests {
                 delivered: Vec::new(),
                 notes: Vec::new(),
                 directives: Vec::new(),
+                briefed: Vec::new(),
                 closing_prompts: Vec::new(),
                 summary: None,
                 routed: Vec::new(),
@@ -941,7 +1001,13 @@ mod tests {
     }
 
     impl LoopHost for StubHost {
-        fn orchestrator_turn(&mut self, _purpose: &str) -> Result<String> {
+        fn orchestrator_turn(
+            &mut self,
+            _purpose: &str,
+            instruction: Option<&str>,
+        ) -> Result<String> {
+            self.briefed
+                .push(instruction.unwrap_or_default().to_string());
             Ok(self
                 .replies
                 .pop_front()
@@ -1165,6 +1231,27 @@ mod tests {
 
         assert_ne!(state.end_reason, EndReason::Forced);
         assert_eq!(host.senders(), ["Mod", "Mod", "Alice", "Mod"]);
+    }
+
+    #[test]
+    fn the_re_ask_names_the_participant_still_owed_a_turn() {
+        // Alice has spoken, so the unparseable reply leaves exactly one move
+        // worth suggesting. Re-asking for "an @Name" without saying which is
+        // the same question the orchestrator just failed to answer, and it
+        // usually answers it the same way until the budget is gone.
+        let mut host = StubHost::new(&["@Alice, go.", "mumble", "@Bob, go.", "END_SESSION", "S."]);
+        driver(phased(vec![think()]))
+            .with_retries(2)
+            .run(&mut host)
+            .expect("the stub never fails");
+
+        assert!(
+            host.directives
+                .iter()
+                .any(|d| d.contains("Bob has not spoken this round")),
+            "the re-ask must name Bob: {:?}",
+            host.directives
+        );
     }
 
     #[test]
@@ -1514,6 +1601,39 @@ mod tests {
             turnover.directives.last().unwrap().contains("argue"),
             "{:?}",
             turnover.directives
+        );
+    }
+
+    #[test]
+    fn every_orchestrator_turn_carries_the_briefing_as_it_stands() {
+        // Boundary-only briefing is the bug: the second orchestrator turn
+        // happens after Alice spoke but before the round closed, so a briefing
+        // delivered only at boundaries still names Alice as owing a turn. An
+        // orchestrator that believes it re-calls her, which never clears
+        // `pending`, so the round never closes and Bob is never heard from.
+        let mut host = StubHost::new(&["@Alice, go.", "@Bob, go.", "END_SESSION", "Summary."]);
+        run(&mut host, phased(vec![think()]));
+
+        assert!(host.briefed[0].contains("Yet to speak this round: Alice, Bob."));
+        assert!(
+            host.briefed[1].contains("Yet to speak this round: Bob."),
+            "the turn after Alice spoke must not still be owed her: {}",
+            host.briefed[1]
+        );
+    }
+
+    #[test]
+    fn a_phase_less_run_briefs_nobody() {
+        // Nothing to be told: no phase to name, and `max_rounds` is the only
+        // structure. The turn must carry no instruction at all rather than an
+        // empty one.
+        let mut host = StubHost::new(&["@Alice, go.", "END_SESSION", "Summary."]);
+        run(&mut host, LoopSpec::default());
+
+        assert!(
+            host.briefed.iter().all(String::is_empty),
+            "{:?}",
+            host.briefed
         );
     }
 

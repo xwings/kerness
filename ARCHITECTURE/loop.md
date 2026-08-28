@@ -36,6 +36,8 @@ different control flow implements `LoopHost` and keeps everything else. Serves
   consensus, exhausted rounds, forced end, or an explicit terminator.
 - `crates/kerness/src/orchestrator.rs:179` — `PhaseTracker` — advances through the
   declared phases and decides when each is satisfied.
+- `crates/kerness/src/orchestrator.rs:249` — `PhaseTracker::briefing()` — the
+  active phase, the round, and who has yet to speak in it.
 - `crates/kerness/src/orchestrator.rs:473` — `snapshot()` — the resumable state,
   handed to [sessionfile.md](sessionfile.md).
 - `crates/kerness/src/orchestrator.rs:704` — `closing_prompt(fields)` — asks the
@@ -50,6 +52,36 @@ different control flow implements `LoopHost` and keeps everything else. Serves
 `LoopHost` and `PhaseTracker` are not exported from the Python package: the first
 is a trait a Rust caller implements, and the second is internal to the loop. The
 loop, its state, and the end reasons are exported.
+
+### Where the orchestrator learns who still owes a turn
+
+The pending set lives in `PhaseTracker` and the orchestrator cannot see it, so
+it is told — twice, for two different readers:
+
+- **Every orchestrator turn** carries `standing_briefing()` (`:534`) as its
+  `instruction`, the same per-turn channel `turn_instruction()` (`:704`) uses to
+  put the phase requirement in front of every participant. This is how the
+  orchestrator knows who to call.
+- **Each phase boundary** additionally appends `brief()` (`:499`) to the shared
+  conversation, so participants see the phase turn over.
+- **Each retry** re-asks through `hint()` (`:711`), which names the head of the
+  pending set outright. The generic "reply with an @Name" is the question the
+  orchestrator has just demonstrated it cannot answer, so asking it again
+  unchanged tends to draw the same unusable reply until the budget is spent and
+  the session is forced to end — with the round one turn from closing.
+
+The per-turn copy is what makes the rotation work, and a boundary-only briefing
+is not a weaker version of it but a broken one. Between boundaries the pending
+set shrinks with every participant who speaks, so a boundary-old copy names
+people who have already spoken. An orchestrator that believes it re-calls one of
+them; `record_turn` (`:284`) only removes a name that is still pending, so the
+re-call clears nothing, the round never closes, and the next boundary — the only
+thing that would have corrected the briefing — never arrives. The failure
+sustains itself, and an orchestrator with a roster it cannot make progress
+against will eventually stop calling participants and write their contributions
+itself. For the same reason the orchestrator's rules block drops the "you
+control the flow ... summarize at any point" licence when the harness declares
+phases; see [session.md](session.md).
 
 ## Interactions
 

@@ -37,6 +37,14 @@ the rest.
   `SessionResult`.
 - `crates/kerness/src/session.rs:1208` — `impl LoopHost for Session` — how the
   orchestrator loop drives it.
+- `crates/kerness/src/session.rs:796` — `build_orchestrator_prompt(participants)`
+  — the gameplan body, the roster, the phase block, and the rules. Which flow
+  rules it carries depends on whether the harness declared phases: without them
+  the orchestrator controls the flow and is told so, and with them the loop does,
+  so the orchestrator is told to work the briefing's pending list instead and not
+  to write a participant's turn for it. Granting both is a contradiction the
+  model resolves by fabricating the turns it never called — see
+  [loop.md](loop.md).
 - `crates/kerness/src/session.rs:463` — `add_participant(agent)` / `:475`
   `add_orchestrator` / `:493` `add_skill` / `:506` `add_tool` — the registration
   chain; each returns `&mut Self` so registration composes.
