@@ -91,13 +91,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # maturin develop wants a virtualenv, and this is the same layout the
-      # repository's own Verification commands assume.
+      # repository's own Verification commands assume. It runs from
+      # bindings/python because that is where pyproject.toml lives; the venv
+      # stays at the root, which maturin resolves from its own path.
       - name: Install
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install 'maturin>=1.7,<2.0' 'ruff>=0.16,<0.17'
-          .venv/bin/maturin develop --extras dev
+          cd bindings/python && ../../.venv/bin/maturin develop --extras dev
 
       - name: Test
         run: .venv/bin/python -m pytest bindings/python/tests -q

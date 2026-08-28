@@ -2,6 +2,8 @@
 /dist
 /.venv
 /third_party
+# maturin runs from bindings/python/, so --out lands there
+/bindings/python/dist
 __pycache__/
 *.pyc
 *.so

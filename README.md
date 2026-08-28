@@ -166,11 +166,14 @@ pip install kerness                  # runtime
 pip install 'kerness[structured]'    # plus pydantic, for OpenAIProvider(output_type=...)
 ```
 
-From a checkout, either side:
+From a checkout, either side. The root is a Cargo workspace, so a Python build
+starts from the binding's own directory:
 
 ```sh
-cargo test --workspace               # the kernel
-maturin develop && python -m kerness.selfcheck   # the binding; pass = "OK: all core checks passed"
+cargo test --workspace                           # the kernel
+
+cd bindings/python && maturin develop            # the binding
+python -m kerness.selfcheck                      # pass = "OK: all core checks passed"
 ```
 
 ## A run, in Rust
@@ -294,12 +297,14 @@ or a different agent roster is refused, not half-applied.
 ## Layout
 
 ```text
+Cargo.toml       # the only manifest at the root
 crates/kerness/  # the kernel, pure Rust — no PyO3, no Python
   src/           #   24 modules, 305 unit tests inline
   tests/         #   88 integration tests, over the public API only
   examples/      #   8 runnable Rust harnesses, one needing no key
   assets/        #   bundled gameplans, personas, skills
 bindings/python/ # everything the wheel is built from
+  pyproject.toml #   the wheel's manifest — `pip install .` runs here
   src/           #   the PyO3 extension module, kerness._core
   kerness/       #   the Python package: shims, deliberate Python, assets
   tests/         #   pytest suite, over the binding
@@ -324,9 +329,9 @@ cargo test --workspace                     # 305 unit + 88 integration
 cargo build -p kerness --examples          # every example still compiles
 cargo run -p kerness --example offline_debate   # a whole session, no key
 
-maturin develop
-python -m pytest bindings/python/tests -q # 394 tests
-python -m kerness.selfcheck               # exit 0
+python -m pytest bindings/python/tests -q      # 394 tests
+python -m kerness.selfcheck                    # exit 0
+ruff check bindings/python
 ```
 
 CI runs all of it on every push, on Rust stable and the 1.88 MSRV floor, and on

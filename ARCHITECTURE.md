@@ -44,13 +44,16 @@ There is no daemon, no database, no listening socket, and no background thread.
 Filesystem writes are confined to paths the caller opts into: the memory file,
 the session file, channel logs, and directories added to the access policy.
 
-A built wheel is tagged `kerness-0.1.0-cp310-abi3-<platform>` — one wheel per
-platform covers every supported Python.
+A built wheel is tagged `kerness-<version>-cp310-abi3-<platform>` — one wheel
+per platform covers every supported Python, and `<version>` is whatever the root
+`Cargo.toml` says.
 
 ## Workspace Layout
 
 One artifact per top-level directory: `crates/` is the crate, `bindings/` is
-everything the wheel is made of. Neither reaches into the other's tests.
+everything the wheel is made of. Neither reaches into the other's tests, and the
+root carries one manifest — `Cargo.toml`. A Python build starts from
+`bindings/python/`, not from here.
 
 ```
 Cargo.toml                  workspace root, shared dependency versions
@@ -62,7 +65,9 @@ crates/
     examples/               8 harnesses driven from Rust alone
 bindings/
   python/                   everything the wheel is built from
+    pyproject.toml          the wheel's manifest; `pip install .` runs here
     Cargo.toml              the `kerness-py` crate, a workspace member
+    LICENSE  README.md      symlinks to the root copies
     src/                    11 modules, one per boundary concern
     kerness/                the installed Python package
       __init__.py           bootstrap + public surface
@@ -81,11 +86,22 @@ ARCHITECTURE.md             this file
 ARCHITECTURE/               one file per subsystem
 ```
 
-`pyproject.toml` stays at the root, because that is where a build backend is
-looked for; it points `manifest-path` and `python-source` at `bindings/python/`.
-Nothing else under `bindings/python/` reaches the wheel — maturin packages only
-the directory matching `module-name`, so `tests/` and `examples/` sit beside the
-package without shipping in it.
+The two symlinks are load-bearing. `readme` and `license-files` in
+`pyproject.toml` resolve against the directory holding it and reject a `..`
+path, so without a local `LICENSE` and `README.md` the wheel builds and ships
+neither the licence text nor the long description, with nothing on stderr to say
+so.
+
+Nothing under `bindings/python/` other than the package reaches the wheel —
+maturin packages only the directory matching `module-name`, so `tests/` and
+`examples/` sit beside it without shipping in it. The sdist is wider: maturin
+roots it at the Cargo workspace, so it carries `crates/` as well, which is what
+lets it build from source with no wheel available.
+
+The version is declared once, as `[workspace.package] version` in the root
+`Cargo.toml`. `pyproject.toml` is `dynamic = ["version"]`, the extension exposes
+`env!("CARGO_PKG_VERSION")` as `_core.__version__`, and the package re-exports
+that as `kerness.__version__`. A release bumps one number.
 
 `crates/kerness/assets/` and
 `bindings/python/kerness/{gameplans,personas,skills}/` hold byte-identical
@@ -170,18 +186,26 @@ cargo test --workspace -q                             # pass = 305 unit + 88 int
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key, no network
-.venv/bin/maturin develop                             # pass = "Installed kerness-0.1.0"
 .venv/bin/python -m pytest bindings/python/tests -q   # pass = 394 passed
 .venv/bin/python -m kerness.selfcheck                 # pass = "OK: all core checks passed", exit 0
+.venv/bin/ruff check bindings/python                  # pass = "All checks passed!"
+```
+
+The wheel is built from `bindings/python/`, because that is where
+`pyproject.toml` is:
+
+```sh
+cd bindings/python && ../../.venv/bin/maturin develop   # pass = "Installed kerness-0.1.0"
 ```
 
 `.github/workflows/ci.yml` runs all of the above on every push, plus
-`cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D warnings`,
-`cargo check --workspace --all-targets --locked` on the MSRV toolchain, and
-`ruff check`. See [testing.md](ARCHITECTURE/testing.md).
+`cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D warnings` and
+`cargo check --workspace --all-targets --locked` on the MSRV toolchain. See
+[testing.md](ARCHITECTURE/testing.md).
 
 `maturin` and `python` are not on `PATH` in this workspace; invoke them from
-`.venv/bin/`.
+`.venv/bin/`. `maturin` resolves the virtualenv from its own path, so it does
+not matter that the venv is at the root and the command runs two levels down.
 
 ## Coding Discipline
 

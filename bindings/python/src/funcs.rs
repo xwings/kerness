@@ -610,6 +610,10 @@ pub fn render_turn<'py>(py: Python<'py>, turn: PyRef<'_, PyTurn>) -> PyResult<Bo
 /// Register every function in this module on `_core`.
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
+    // The version this crate was built at, which is the workspace version the
+    // wheel is named for. `kerness.__version__` re-exports it, so the number is
+    // declared once, in the root Cargo.toml.
+    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add(
         "DEFAULT_TERMINATORS",
         PyTuple::new(py, utils::DEFAULT_TERMINATORS.iter().copied())?,

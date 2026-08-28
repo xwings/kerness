@@ -11,7 +11,7 @@ from kerness import _core, _enums, exceptions
 # personas, and skills were installed. This is the only place that knows.
 _core.bootstrap(exceptions, _enums.ToolDialect, str(Path(__file__).resolve().parent))
 
-__version__ = "0.1.0"
+__version__ = _core.__version__
 
 from kerness.access import (
     AccessManager,

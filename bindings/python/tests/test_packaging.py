@@ -1,10 +1,14 @@
 """Packaging invariants.
 
-Two things in this repository are declared twice because two distributions
-need them, and nothing but this file keeps either pair in step: the version,
-once for pip and once for callers reading ``kerness.__version__``; and the
-built-in gameplans, personas, and skills, once inside the Rust crate and once
-inside the Python package.
+The version is declared once, as ``[workspace.package] version`` in the root
+``Cargo.toml``. Everything else derives from it: ``pyproject.toml`` is
+``dynamic``, and ``kerness.__version__`` is what the extension was compiled
+with. That chain runs through maturin and a rebuild, so this file checks the
+number that arrives rather than the one that was written.
+
+The built-in gameplans, personas, and skills are the one thing still declared
+twice, because two distributions need them: once inside the Rust crate and once
+inside the Python package. Nothing in the build keeps that pair in step.
 """
 
 from pathlib import Path
@@ -16,15 +20,21 @@ CRATE_ASSETS = ROOT / "crates" / "kerness" / "assets"
 PACKAGE_ASSETS = Path(kerness.__file__).resolve().parent
 
 
-def _declared_version() -> str:
-    for line in (ROOT / "pyproject.toml").read_text().splitlines():
-        if line.startswith("version = "):
+def _workspace_version() -> str:
+    section = ""
+    for line in (ROOT / "Cargo.toml").read_text().splitlines():
+        if line.startswith("["):
+            section = line.strip()
+        elif section == "[workspace.package]" and line.startswith("version = "):
             return line.split("=", 1)[1].strip().strip('"')
-    raise AssertionError("pyproject.toml declares no version")
+    raise AssertionError("Cargo.toml declares no [workspace.package] version")
 
 
-def test_the_package_and_pyproject_agree_on_the_version():
-    assert kerness.__version__ == _declared_version()
+def test_the_package_reports_the_workspace_version():
+    """A stale extension is the failure this catches: the wheel is named for the
+    workspace version, so an installed package reporting an older one means the
+    binary in ``site-packages`` predates the bump it is being tested against."""
+    assert kerness.__version__ == _workspace_version()
 
 
 def test_the_crate_and_the_package_ship_the_same_assets():

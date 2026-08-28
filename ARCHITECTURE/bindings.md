@@ -29,6 +29,7 @@ deliberately Python and the bundled assets.
 | `bindings/python/src/{provider,session,access,skill,channel}.rs` | one boundary concern each |
 | `bindings/python/kerness/__init__.py` | bootstrap and the public surface |
 | `bindings/python/kerness/<subsystem>.py` | re-export shims, one per crate module |
+| `bindings/python/pyproject.toml` | the wheel's manifest; a Python build starts here |
 
 ## Key Types and Entry Points
 
@@ -48,6 +49,10 @@ deliberately Python and the bundled assets.
   built-in tools.
 - `bindings/python/src/funcs.rs:40` onward — the free functions, and the
   constant block in `register()` that re-exports every framework constant.
+- `bindings/python/src/funcs.rs:616` — `__version__` — `env!("CARGO_PKG_VERSION")`
+  at the top of that block. `kerness/__init__.py:14` re-exports it, so the
+  number a caller reads is the one the binary was compiled at rather than a
+  literal that can drift from it.
 - `bindings/python/kerness/__init__.py:68` — `__all__` — the public Python surface.
 
 ### Three patterns the boundary needs
@@ -81,14 +86,15 @@ method boundary. See [channel.md](channel.md) for the full account.
 
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-.venv/bin/maturin develop                             # pass = "Installed kerness-0.1.0"
 .venv/bin/python -m pytest bindings/python/tests -q   # pass = 394 passed
+cd bindings/python && ../../.venv/bin/maturin develop # pass = "Installed kerness-0.1.0"
 ```
 
 - The whole `bindings/python/tests/` suite exercises the Python surface only; a
   gap in the binding shows up as a test failure, not as a Rust compile error.
-- `bindings/python/tests/test_packaging.py` asserts the version is declared once
-  in `pyproject.toml` and once in the package and that the two agree.
+- `bindings/python/tests/test_packaging.py` asserts the installed package
+  reports the root `Cargo.toml`'s `[workspace.package] version`, which is what
+  catches a stale extension left in `site-packages` after a bump.
 
 ## Open Gaps / Roadmap
 

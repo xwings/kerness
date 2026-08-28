@@ -4,12 +4,17 @@ build-backend = "maturin"
 
 [project]
 name = "kerness"
-version = "0.1.0"
 description = "Kernel for harness — the framework multi-agent AI harnesses are built on"
+# Symlinks to the repository root. `readme` and `license-files` resolve against
+# this directory and reject a `..` path, so without them the wheel ships no
+# licence text and no long description — and says nothing about it.
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
+# Read from `[workspace.package] version` in the root Cargo.toml, so a release
+# bumps one number. The extension re-exports it as `kerness.__version__`.
+dynamic = ["version"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -36,16 +41,16 @@ select = ["E4", "E7", "E9", "F"]
 # `bootstrap` hands the extension the three things it cannot declare itself,
 # and must run before any shim imports a name from it. Every import below that
 # call is late by construction.
-"bindings/python/kerness/__init__.py" = ["E402"]
+"kerness/__init__.py" = ["E402"]
 
 [tool.maturin]
-manifest-path = "bindings/python/Cargo.toml"
+manifest-path = "Cargo.toml"
 module-name = "kerness._core"
-python-source = "bindings/python"
+python-source = "."
 features = ["pyo3/extension-module"]
 include = [
     { path = "LICENSE", format = "sdist" },
-    { path = "bindings/python/kerness/gameplans/*.md", format = "sdist" },
-    { path = "bindings/python/kerness/personas/*.md", format = "sdist" },
-    { path = "bindings/python/kerness/skills/*/SKILL.md", format = "sdist" },
+    { path = "kerness/gameplans/*.md", format = "sdist" },
+    { path = "kerness/personas/*.md", format = "sdist" },
+    { path = "kerness/skills/*/SKILL.md", format = "sdist" },
 ]

@@ -93,7 +93,10 @@ The eight integration files:
   [bindings.md](bindings.md), which nothing on the Rust side can reach.
 - `release.yml`'s `verify-sdist` job installs the source distribution into a
   clean interpreter *with no checkout beside it*, so an asset the wheel failed to
-  include cannot be masked by the working tree.
+  include cannot be masked by the working tree. It is also the only check on the
+  `LICENSE` and `README.md` symlinks in `bindings/python/`: `license-files` and
+  `readme` resolve against that directory, and if they resolve to nothing the
+  build still succeeds and simply ships less.
 
 ## How to Test
 
@@ -104,6 +107,12 @@ cargo test --workspace -q                             # pass = 305 unit + 88 int
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key
 .venv/bin/python -m pytest bindings/python/tests -q   # pass = 394 passed
+```
+
+The wheel is built from `bindings/python/`, where `pyproject.toml` lives:
+
+```sh
+cd bindings/python && ../../.venv/bin/maturin develop # pass = "Installed kerness-0.1.0"
 ```
 
 CI runs those, plus `cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D
