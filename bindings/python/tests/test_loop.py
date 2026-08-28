@@ -34,6 +34,9 @@ class StubHost:
         self.notes: list[str] = []
         self.directives: list[str] = []
         self.purposes: list[str] = []
+        #: The standing briefing carried into each orchestrator turn, in order.
+        #: None where the turn carried none.
+        self.briefed: list[str | None] = []
         #: Every closing prompt in order — [0] is the draft ask, [-1] is the
         #: one whose answer was committed.
         self.closing_prompts: list[str] = []
@@ -43,8 +46,9 @@ class StubHost:
         #: does not.
         self.routed: list[tuple[str, str]] = []
 
-    def orchestrator_turn(self, purpose):
+    def orchestrator_turn(self, purpose, instruction):
         self.purposes.append(purpose)
+        self.briefed.append(instruction)
         return self._replies.pop(0) if self._replies else "(exhausted)"
 
     def participant_turn(self, name, instruction):
@@ -467,6 +471,27 @@ class TestRoundsClose:
 
         assert len(turnover.directives) >= 2
         assert "argue" in turnover.directives[-1]
+
+    def test_every_orchestrator_turn_carries_the_briefing_as_it_stands(self):
+        """The boundary copy is stale for every turn in between. The second
+        orchestrator turn happens after Alice spoke but before the round
+        closed, so it must not still be told Alice owes a turn — believing
+        that, it re-calls her, which never clears the pending set, so the
+        round never closes and Bob is never heard from."""
+        host = StubHost([
+            "@Alice, go.", "@Bob, go.", "END_SESSION", "Summary.",
+        ])
+        loop(host, phased(THINK)).run()
+
+        assert "Yet to speak this round: Alice, Bob." in host.briefed[0]
+        assert "Yet to speak this round: Bob." in host.briefed[1]
+
+    def test_a_phase_less_run_briefs_nobody(self):
+        """No phase to name, so the turn carries no instruction at all."""
+        host = StubHost(["@Alice, go.", "END_SESSION", "Summary."])
+        loop(host).run()
+
+        assert all(carried is None for carried in host.briefed), host.briefed
 
 
 class TestPhasesEndTheRun:

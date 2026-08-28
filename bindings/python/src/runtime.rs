@@ -561,9 +561,13 @@ struct PyHost<'py> {
 }
 
 impl LoopHost for PyHost<'_> {
-    fn orchestrator_turn(&mut self, purpose: &str) -> kerness::Result<String> {
+    fn orchestrator_turn(
+        &mut self,
+        purpose: &str,
+        instruction: Option<&str>,
+    ) -> kerness::Result<String> {
         self.host
-            .call_method1("orchestrator_turn", (purpose,))
+            .call_method1("orchestrator_turn", (purpose, instruction))
             .and_then(|reply| reply.extract())
             .catch()
     }
