@@ -66,7 +66,7 @@ jobs:
           manylinux: auto
           working-directory: bindings/python
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.platform }}-${{ matrix.target }}
           path: bindings/python/dist
@@ -83,7 +83,7 @@ jobs:
           args: --out dist
           working-directory: bindings/python
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: bindings/python/dist
