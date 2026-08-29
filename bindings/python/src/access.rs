@@ -27,9 +27,9 @@ use crate::types::{path_to_py, pybool};
 #[pyclass(name = "AccessRequest", module = "kerness._core", frozen, get_all)]
 #[derive(Clone)]
 pub struct PyAccessRequest {
-    /// `"command"`, `"file"`, or `"dir"`.
+    /// `"command"` — the only kind the framework raises.
     pub kind: String,
-    /// `"run"`, `"read"`, or `"list"`.
+    /// `"run"`.
     pub action: String,
     pub target: String,
     pub actor: String,
@@ -122,9 +122,7 @@ pub fn policy_from_py(object: &Bound<'_, PyAny>) -> PyResult<AccessPolicy> {
         auto_approve_prefixes: object.getattr("auto_approve_prefixes")?.extract()?,
         workspace: path_string(&object.getattr("workspace")?)?,
         agent_workspaces: agent_workspaces(&object.getattr("agent_workspaces")?)?,
-        allowed_programs: object.getattr("allowed_programs")?.extract()?,
         allowed_commands: object.getattr("allowed_commands")?.extract()?,
-        allowed_prefixes: object.getattr("allowed_prefixes")?.extract()?,
         allowed_command_patterns: object.getattr("allowed_command_patterns")?.extract()?,
         allowed_files: path_strings(&object.getattr("allowed_files")?)?,
         allowed_dirs: path_strings(&object.getattr("allowed_dirs")?)?,
@@ -209,9 +207,9 @@ impl PyAccessManager {
     }
 
     /// Validate a command execution request.
-    #[pyo3(signature = (command, program, actor=""))]
-    fn check_command(&self, command: &str, program: &str, actor: &str) -> PyResult<()> {
-        self.inner.check_command(command, program, actor).raise()
+    #[pyo3(signature = (command, actor=""))]
+    fn check_command(&self, command: &str, actor: &str) -> PyResult<()> {
+        self.inner.check_command(command, actor).raise()
     }
 
     /// Validate a file or directory access request, returning the resolved path.

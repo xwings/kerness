@@ -37,7 +37,7 @@ pub fn run_command(
     let argv = shell_words::split(command)
         .map_err(|err| Error::session(format!("Invalid command syntax: {err}")))?;
     let program = argv.first().map(String::as_str).unwrap_or("");
-    access.check_command(command, program, actor)?;
+    access.check_command(command, actor)?;
 
     let mut builder = Command::new(program);
     builder
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn an_allowed_command_returns_its_stdout() {
-        let access = allowing(|policy| policy.allowed_programs = vec!["echo".into()]);
+        let access = allowing(|policy| policy.allowed_commands = vec!["echo *".into()]);
         let out = run_command(&access, "echo hello", None, None, "").expect("runs");
         assert_eq!(out, "hello\n");
     }
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn a_failing_command_reports_its_code_and_stderr() {
-        let access = allowing(|policy| policy.allowed_programs = vec!["sh".into()]);
+        let access = allowing(|policy| policy.allowed_commands = vec!["sh *".into()]);
         let error = run_command(&access, "sh -c 'echo boom >&2; exit 3'", None, None, "")
             .expect_err("exit 3");
         let message = error.to_string();
@@ -175,7 +175,7 @@ mod tests {
     fn there_is_no_shell_so_metacharacters_are_arguments() {
         // `echo hi; rm -rf /` is one program named `echo` with `;` and `rm` as
         // arguments — the semicolon never separates anything.
-        let access = allowing(|policy| policy.allowed_programs = vec!["echo".into()]);
+        let access = allowing(|policy| policy.allowed_commands = vec!["echo *".into()]);
         let out = run_command(&access, "echo hi ; rm -rf /tmp/nope", None, None, "").expect("runs");
         assert_eq!(out, "hi ; rm -rf /tmp/nope\n");
     }
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn a_command_that_overruns_its_deadline_is_killed() {
-        let access = allowing(|policy| policy.allowed_programs = vec!["sleep".into()]);
+        let access = allowing(|policy| policy.allowed_commands = vec!["sleep *".into()]);
         let error = run_command(
             &access,
             "sleep 30",
@@ -209,7 +209,7 @@ mod tests {
         // The reader threads exist for this: a child filling its pipe blocks
         // until someone drains it, and a parent that waited for exit first
         // would deadlock.
-        let access = allowing(|policy| policy.allowed_programs = vec!["sh".into()]);
+        let access = allowing(|policy| policy.allowed_commands = vec!["sh *".into()]);
         let out = run_command(
             &access,
             "sh -c 'yes abcdefgh | head -n 100000'",
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn cwd_is_where_the_command_runs() {
         let dir = TempDir::resolved("cwd");
-        let access = allowing(|policy| policy.allowed_programs = vec!["pwd".into()]);
+        let access = allowing(|policy| policy.allowed_commands = vec!["pwd".into()]);
         let out = run_command(&access, "pwd", Some(&dir.0), None, "").expect("runs");
         assert_eq!(out.trim(), dir.text());
     }

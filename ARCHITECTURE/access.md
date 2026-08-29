@@ -7,22 +7,29 @@ is checked here first, against a policy the caller declares up front. Nothing
 else in the framework decides whether an action is allowed — the tools in
 `exec.rs` take an `&AccessManager` and cannot act without one.
 
-Two mechanisms, and the difference between them is the module's organising
-idea. **An allowlist answers *may I*.** It is additive: `allowed_programs`,
-`allowed_command_patterns`, and `allowed_dirs` each name something the caller
-opened, an approver may open more, and `allow_dirs` opens more mid-session.
-**A workspace answers *is this inside the world*.** It grants nothing, it is
-checked before any allowlist, and it can only subtract — a path outside it is
-refused even when an allowlist entry and a yes-saying approver would both have
-admitted it. It is also the working directory a command starts in, so a
-confined session's commands are *in* the confinement rather than merely unable
-to name their way out of it.
+Commands and paths are two separate questions, and the module's organising idea
+is that only one of them has a human in it.
+
+**A command is asked about.** `auto_approve_prefixes`, `allowed_commands`, and
+`allowed_command_patterns` each name something the caller opened; a command
+matching none of them goes to the approver, and a session with no approver
+refuses it.
+
+**A path is settled.** The workspace grants its own contents — every path under
+it is reachable with no allowlist entry — and `allowed_files` and `allowed_dirs`
+reach past it, which is how a session confined to one project still reads
+`/tmp`. The union of the two is the whole of what a session can touch: a path
+outside it is refused outright, with no approver consulted, because *may I* has
+no answer out there. Unset, the workspace is the process's own current
+directory rather than the whole filesystem. It is also the working directory a
+command starts in, so a confined session's commands are *in* the confinement
+rather than merely unable to name their way out of it.
 
 ## Status
 
 `done` — implemented and tested, with direct tests for traversal and symlink
-escape rather than only for the happy path, against both the allowlists and the
-workspace.
+escape rather than only for the happy path, against both the workspace and the
+allowlists that reach past it.
 
 ## Code Structure
 
@@ -41,44 +48,48 @@ after construction still takes effect.
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/access.rs:65` — `AccessPolicy` — the declaration: allowed
-  programs, allowed command patterns, allowed directories, the workspace, and
-  whether a skill bundle's own directory is trusted.
-- `crates/kerness/src/access.rs:77` — `AccessPolicy::workspace` — the directory
-  the session is confined to, `None` for the whole filesystem.
-- `crates/kerness/src/access.rs:88` — `AccessPolicy::agent_workspaces` —
+- `crates/kerness/src/access.rs:67` — `AccessPolicy` — the declaration: the
+  workspace, the two command allow-lists, the path allow-lists, and whether a
+  skill bundle's own directory is trusted.
+- `crates/kerness/src/access.rs:87` — `AccessPolicy::workspace` — the directory
+  the session works in, `None` for the process's own current directory. It
+  grants its contents rather than only bounding them.
+- `crates/kerness/src/access.rs:98` — `AccessPolicy::agent_workspaces` —
   per-agent workspaces, each of which narrows the session's.
-- `crates/kerness/src/access.rs:138` — `AccessManager` — the policy plus the
+- `crates/kerness/src/access.rs:112` — `AccessPolicy::allowed_commands` —
+  anchored globs over the whole command line; `"*"` allows every command, and a
+  pattern with no `*` is exact.
+- `crates/kerness/src/access.rs:172` — `AccessManager` — the policy plus the
   directories granted at runtime; owns every decision.
-- `crates/kerness/src/access.rs:250` — `check_command(command, program, actor)` —
-  program allow-list first, then whole-line patterns, then the prompt.
-- `crates/kerness/src/access.rs:275` — `check_path(action, path, actor)` — the
-  workspace first, then the allowlists; resolves the path and returns the
-  canonical `PathBuf`, so the caller cannot re-resolve it differently afterwards.
-- `crates/kerness/src/access.rs:227` — `check_workspace(purpose, path, actor)` —
-  the workspace check alone, for a path the caller chose rather than a model
-  asked for: the memory file, the session file, a channel's log.
-- `crates/kerness/src/access.rs:185` — `workspace_for(actor)` — the workspace an
+- `crates/kerness/src/access.rs:249` — `check_command(command, actor)` —
+  auto-approve prefixes, then globs, then whole-line patterns, then the prompt.
+- `crates/kerness/src/access.rs:279` — `check_path(purpose, path, actor)` — the
+  workspace and the path allow-lists, and nothing else; resolves the path and
+  returns the canonical `PathBuf`, so the caller cannot re-resolve it
+  differently afterwards. *purpose* is a tool's action (`"read"`, `"list"`) or
+  the framework's description of a file it writes for its own reasons
+  (`"The memory file"`) — the same check either way.
+- `crates/kerness/src/access.rs:217` — `workspace_for(actor)` — the workspace an
   actor is held to, and the directory its commands start in.
-- `crates/kerness/src/access.rs:197` — `confine_agent(agent, workspace)` — narrow
+- `crates/kerness/src/access.rs:229` — `confine_agent(agent, workspace)` — narrow
   one agent, refusing a workspace outside the session's.
-- `crates/kerness/src/access.rs:299` — `allow_dirs(paths)` — how a skill grants its
+- `crates/kerness/src/access.rs:298` — `allow_dirs(paths)` — how a skill grants its
   bundle directory at activation time.
-- `crates/kerness/src/access.rs:44` — `ApprovePrompt` — the trait a human-in-the-loop
-  prompt implements; `None` means deny.
+- `crates/kerness/src/access.rs:46` — `ApprovePrompt` — the trait a human-in-the-loop
+  prompt implements; `None` means deny. Only ever asked about a command.
 - `crates/kerness/src/exec.rs:30` — `run_command(...)` — the only place a
   subprocess is spawned, with `DEFAULT_TIMEOUT` at `exec.rs:18`.
 - `bindings/python/kerness/access.py:21` — `prompt_on_console(req)` — deliberately Python:
   it calls `input()`, and tests monkeypatch the module attribute.
 
 `AccessPolicy`'s derived `Default` and `AccessPolicy::new()` disagree on
-`trust_skill_bundles`; the difference is documented at `access.rs:109`.
+`trust_skill_bundles`; the difference is documented at `access.rs:145`.
 
 ### Why an agent workspace narrows rather than replaces
 
 Every other per-agent option in the framework simply overrides the session's:
 an agent naming a model, a persona, or a provider gets the one it named. The
-workspace is the one exception, and `confine_agent` (`access.rs:197`) is where
+workspace is the one exception, and `confine_agent` (`access.rs:229`) is where
 the exception is enforced — a workspace outside the session's is an
 `AccessDenied` naming the agent, at `run()`, before a single provider call.
 
@@ -105,34 +116,41 @@ cargo test -p kerness access                                       # pass = 0 fa
 .venv/bin/python -m pytest bindings/python/tests/test_access.py -q # pass = 0 failed
 ```
 
-- `bindings/python/tests/test_access.py:150` — `test_traversal_out_of_an_allowed_dir_is_denied` —
-  and `:161` `test_a_symlink_out_of_an_allowed_dir_is_denied`: the two escapes
+- `bindings/python/tests/test_access.py:154` — `test_traversal_out_of_an_allowed_dir_is_denied` —
+  and `:165` `test_a_symlink_out_of_an_allowed_dir_is_denied`: the two escapes
   `check_path` exists to stop, tested at the layer that owns them.
-- `:340` — `test_a_workspace_refuses_what_an_allowlist_and_an_approver_both_allow`
-  — the whole point of a second mechanism: it refuses what the first one allowed.
-  `:363` `test_traversal_cannot_step_out_of_the_workspace` is the same escape
-  again, against the workspace this time.
-- `:389` `test_the_default_policy_confines_nothing` — a workspace is opt-in;
-  defaulting it to the working directory would confine every caller who never
-  asked to be.
+- `:345` — `test_a_workspace_grants_its_contents_and_names_itself_when_it_refuses`
+  — a read admitted with nothing allowlisted, and a refusal that names the
+  workspace it fell outside. `:364`
+  `test_an_allowlist_reaches_outside_the_workspace` is the other half: an entry
+  past the workspace widens it rather than being refused by it. `:378`
+  `test_traversal_cannot_step_out_of_the_workspace` is the escape above again,
+  against the workspace this time.
+- `:180` `test_a_yes_saying_approver_cannot_widen_the_path_boundary` — what
+  makes the boundary hard: an approver that would say yes is never asked.
+- `:400` `test_an_unset_workspace_is_the_current_directory` — not the whole
+  filesystem; a policy that says nothing about paths confines to where the
+  program was launched.
 - `crates/kerness/tests/access_e2e.rs` — the workspace seen from a configured
   session: `a_workspace_confines_a_read_a_write_and_a_commands_working_directory`,
   `the_sessions_own_write_paths_are_confined_too` (a memory, session, or channel
   file outside the workspace fails at `Session::new`), and
   `an_agent_workspace_narrows_the_sessions_and_a_wider_one_names_the_agent`.
-- `:259` `test_a_bare_policy_allows_nothing` and `:278`
+- `:267` `test_a_bare_policy_allows_nothing` and `:284`
   `test_a_manager_with_no_policy_at_all_still_denies` — the default is closed.
-- `:69` `test_allowed_commands_is_exact_not_prefix` and `:119`
-  `test_an_invalid_regex_is_skipped_not_raised` — how the command check refuses.
-- `:308` `test_the_console_prompt_denies_when_stdin_cannot_answer` — the reason
+- `:76` `test_a_command_glob_is_anchored_at_both_ends`, `:87`
+  `test_a_bare_star_allows_every_command`, and `:123`
+  `test_an_invalid_regex_is_skipped_not_raised` — how the command check admits
+  and refuses.
+- `:314` `test_the_console_prompt_denies_when_stdin_cannot_answer` — the reason
   `prompt_on_console` stays Python.
 
 ## Open Gaps / Roadmap
 
-- The command allow-list matches on the resolved program name and the literal
-  command line. A shell metacharacter that changes which program runs is caught
-  by the pattern check, not by parsing the line; callers who allow a shell should
-  allow it by pattern, not by program.
+- Both command allow-lists match the literal command line. A shell
+  metacharacter that changes which program runs is not caught by parsing the
+  line, so a glob like `sh *` grants whatever that shell is handed; callers who
+  allow a shell are allowing everything it can reach.
 - Per-actor policy is the workspace and nothing else. One manager serves every
   agent, keyed by actor for the workspace; the allowlists stay session-wide,
   because a per-agent allowlist under override semantics would let an agent widen

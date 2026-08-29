@@ -96,13 +96,12 @@ class AccessPolicy:
     approve_prompt: ApprovePrompt | None = None
     auto_approve_prefixes: list[str] = field(default_factory=list)
 
-    #: The directory the session is confined to, or ``None`` for the whole
-    #: filesystem. This is not an allowlist entry and it grants nothing: an
-    #: allowlist answers *may I*, and the workspace answers *is this inside the
-    #: world*. It is checked first and it can only subtract, so a path outside
-    #: it is refused even when an ``allowed_dirs`` entry or an approver would
-    #: have admitted it. It also becomes the working directory a command starts
-    #: in.
+    #: The directory the session works in, or ``None`` for the process's own
+    #: current directory. It *grants*: every path under it is reachable without
+    #: an allowlist entry, so a session pointed at ``/opt/harness`` reads that
+    #: tree and its subdirectories on the strength of the workspace alone. It
+    #: also becomes the working directory a command starts in. Reaching further
+    #: is :attr:`allowed_dirs`' job, not an approver's.
     workspace: str | Path | None = None
 
     #: Workspaces for named agents, each of which *narrows* :attr:`workspace`.
@@ -113,12 +112,24 @@ class AccessPolicy:
     #: by passing ``workspace=`` to an agent rather than filled in here.
     agent_workspaces: dict[str, str | Path] = field(default_factory=dict)
 
-    allowed_programs: list[str] = field(default_factory=list)
+    #: Commands agents may run, as anchored globs over the whole command line.
+    #: ``*`` stands for any run of characters, including none: ``["*"]`` allows
+    #: every command, ``"git *"`` any git invocation carrying arguments, and a
+    #: pattern with no ``*`` is an exact match. Anchored rather than searched —
+    #: unlike :attr:`allowed_command_patterns` — so ``"git *"`` cannot admit
+    #: ``sudo git push``. Empty is the default, and it allows nothing.
     allowed_commands: list[str] = field(default_factory=list)
-    allowed_prefixes: list[str] = field(default_factory=list)
+    #: Commands agents may run, as regexes searched anywhere in the line. The
+    #: unanchored counterpart to :attr:`allowed_commands`, and the looser of the
+    #: two.
     allowed_command_patterns: list[str] = field(default_factory=list)
 
+    #: Files and directories reachable *in addition to* :attr:`workspace`. This
+    #: is how a session confined to one project still reads ``/tmp``. The
+    #: workspace and these together are the whole of what a session can touch.
     allowed_files: list[str | Path] = field(default_factory=list)
+    #: Directories reachable in addition to the workspace — see
+    #: :attr:`allowed_files`.
     allowed_dirs: list[str | Path] = field(default_factory=list)
 
     #: Whether activating a skill grants read access to the ``scripts/`` and
