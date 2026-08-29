@@ -23,9 +23,9 @@ use kerness::sessionfile::SCHEMA_VERSION;
 use kerness::skill::loader::{list_builtin_skills, load_skill};
 use kerness::utils::DEFAULT_TERMINATORS;
 use kerness::{
-    Agent, Channel, ConsoleChannel, Conversation, Error, Memory, Provider, Role, Session,
-    SessionConfig, SessionResult, ToolCall, ToolDialect, ToolDispatcher, ToolResult, ToolSpec,
-    VERSION,
+    Agent, Channel, ConsoleChannel, Conversation, Error, Memory, Provider, ReasoningEffort, Role,
+    Session, SessionConfig, SessionResult, ToolCall, ToolDialect, ToolDispatcher, ToolResult,
+    ToolSpec, VERSION,
 };
 
 use common::{RecordingChannel, ScriptedProvider};
@@ -192,10 +192,45 @@ fn a_provider_written_outside_the_crate_is_a_provider() {
     assert_eq!(provider.name(), "outsider");
     assert_eq!(provider.effective_dialect(), ToolDialect::Text);
     assert!(provider.accepts_tools());
+    assert_eq!(
+        provider.effective_effort(ReasoningEffort::Max),
+        Some(ReasoningEffort::Max)
+    );
 
     let reply = provider
-        .chat_with_retries("gpt-4o", &[], "shape check", None)
+        .chat_with_retries("gpt-4o", &[], "shape check", None, ReasoningEffort::High)
         .expect("the double never fails");
     assert_eq!(reply.content, "hello");
     assert_eq!(provider.purposes(), vec!["shape check"]);
+}
+
+/// The level is written as a word in a gameplan or a Python call, so the
+/// spelling it accepts is part of the public surface, not an internal detail.
+#[test]
+fn a_reasoning_effort_is_read_and_written_as_its_name() {
+    for (name, level) in [
+        ("minimal", ReasoningEffort::Minimal),
+        ("low", ReasoningEffort::Low),
+        ("medium", ReasoningEffort::Medium),
+        ("high", ReasoningEffort::High),
+        ("xhigh", ReasoningEffort::XHigh),
+        ("max", ReasoningEffort::Max),
+    ] {
+        assert_eq!(ReasoningEffort::parse(name).unwrap(), level);
+        assert_eq!(level.as_str(), name);
+        assert_eq!(level.to_string(), name);
+    }
+
+    assert_eq!(ReasoningEffort::default(), ReasoningEffort::High);
+    assert_eq!(
+        Agent::new("Alice", "gpt-4o").reasoning_effort,
+        ReasoningEffort::High
+    );
+
+    let error = ReasoningEffort::parse("higher").expect_err("a typo is not a level");
+    assert_eq!(
+        error.to_string(),
+        "Unknown reasoning effort 'higher'. Expected 'minimal', 'low', \
+         'medium', 'high', 'xhigh', or 'max'."
+    );
 }

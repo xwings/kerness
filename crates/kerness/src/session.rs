@@ -1227,7 +1227,13 @@ impl Session {
             return Ok(String::new());
         };
         let messages = as_values(&summary_request(turns));
-        match provider.chat_with_retries(&agent.model, &messages, "compaction", None) {
+        match provider.chat_with_retries(
+            &agent.model,
+            &messages,
+            "compaction",
+            None,
+            agent.reasoning_effort,
+        ) {
             Ok(response) => Ok(response.content),
             Err(error) if error.is_provider() => {
                 logging::warning("Compaction summary failed; leaving history intact");
@@ -1525,7 +1531,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::provider::{ProviderBase, ProviderResponse};
+    use crate::provider::{ProviderBase, ProviderResponse, ReasoningEffort};
 
     /// A scratch directory that removes itself.
     struct TempDir(PathBuf);
@@ -1612,6 +1618,7 @@ mod tests {
             _model: &str,
             messages: &[Value],
             _tools: Option<&[ToolSpec]>,
+            _effort: ReasoningEffort,
         ) -> Result<ProviderResponse> {
             lock(&self.calls).push(messages.to_vec());
             if self.replies.is_empty() {

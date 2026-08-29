@@ -26,6 +26,62 @@ pub use custom::{CustomConfig, CustomProvider};
 pub use openai::{OpenAiConfig, OpenAiProvider, OPENAI_BASE_URL};
 pub use openrouter::{OpenRouterConfig, OpenRouterProvider, OPENROUTER_BASE_URL};
 
+/// How hard the model should think before answering.
+///
+/// A closed set rather than a string, so a misspelling is caught where it is
+/// written instead of becoming a 400 on the first turn. Not every backend
+/// accepts every level — Anthropic has no `minimal`, and a model with no
+/// reasoning mode at all rejects the parameter outright — which is what
+/// [`Provider::note_reasoning_effort_rejected`] is for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    Minimal,
+    Low,
+    Medium,
+    /// The level an agent reasons at when its caller names none.
+    #[default]
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    /// The name this level is written with, and sent as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReasoningEffort::Minimal => "minimal",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::XHigh => "xhigh",
+            ReasoningEffort::Max => "max",
+        }
+    }
+
+    /// Read a level from its written name.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "minimal" => Ok(ReasoningEffort::Minimal),
+            "low" => Ok(ReasoningEffort::Low),
+            "medium" => Ok(ReasoningEffort::Medium),
+            "high" => Ok(ReasoningEffort::High),
+            "xhigh" => Ok(ReasoningEffort::XHigh),
+            "max" => Ok(ReasoningEffort::Max),
+            other => Err(Error::Value(format!(
+                "Unknown reasoning effort {}. Expected 'minimal', 'low', \
+                 'medium', 'high', 'xhigh', or 'max'.",
+                pyfmt::repr_str(other)
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One reply from a provider, normalized across backends.
 ///
 /// Every field above `content` is optional detail a caller may want and the
@@ -65,16 +121,17 @@ impl ProviderResponse {
 
 /// The state [`Provider`]'s supplied methods keep, which a trait cannot hold.
 ///
-/// Every backend owns one and hands it back from [`Provider::base`]. The
-/// degrade latch is atomic rather than behind a lock because it only ever
+/// Every backend owns one and hands it back from [`Provider::base`]. Both
+/// degrade latches are atomic rather than behind a lock because each only ever
 /// moves in one direction, so a racing pair of turns cannot disagree about
-/// where it ended up.
+/// where either ended up.
 #[derive(Debug)]
 pub struct ProviderBase {
     retries: u32,
     backoff_sec: f64,
     interval_sec: Option<f64>,
     native_tools_disabled: AtomicBool,
+    reasoning_effort_disabled: AtomicBool,
 }
 
 impl ProviderBase {
@@ -85,6 +142,7 @@ impl ProviderBase {
             backoff_sec,
             interval_sec,
             native_tools_disabled: AtomicBool::new(false),
+            reasoning_effort_disabled: AtomicBool::new(false),
         }
     }
 }
@@ -109,12 +167,16 @@ pub trait Provider: Send + Sync {
     /// Send one chat request.
     ///
     /// *tools* arrives only when the effective dialect can carry it, so an
-    /// implementation never has to re-check the latch.
+    /// implementation never has to re-check that latch. *effort* arrives as the
+    /// agent asked for it and still has to be run through
+    /// [`Provider::effective_effort`], because whether the endpoint will take
+    /// it is only known once it has refused it.
     fn chat(
         &self,
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse>;
 
     /// The dialect this backend speaks natively.
@@ -140,6 +202,15 @@ pub trait Provider: Send + Sync {
         supplied_effective_dialect(self)
     }
 
+    /// The effort to actually send, or `None` once this provider has been
+    /// latched down by [`Provider::note_reasoning_effort_rejected`].
+    ///
+    /// The counterpart of [`Provider::effective_dialect`], and read at the same
+    /// point: while the payload is being built.
+    fn effective_effort(&self, effort: ReasoningEffort) -> Option<ReasoningEffort> {
+        supplied_effective_effort(self, effort)
+    }
+
     /// Latch this provider down to the text protocol if *error* means "no tool
     /// support", and report whether it fired.
     ///
@@ -150,19 +221,30 @@ pub trait Provider: Send + Sync {
         supplied_note_native_tools_rejected(self, error)
     }
 
+    /// Latch this provider's reasoning effort off if *error* means "no such
+    /// parameter", and report whether it fired.
+    ///
+    /// One-way, and false on every call after the first: the retry that follows
+    /// sends the same arguments, so a latch that reported itself twice would be
+    /// a loop rather than a fallback.
+    fn note_reasoning_effort_rejected(&self, error: &Error) -> bool {
+        supplied_note_reasoning_effort_rejected(self, error)
+    }
+
     /// Send a chat request, retrying on failure.
     ///
     /// *purpose* names the call in the failure message. An endpoint that
-    /// rejects the tool schemas is retried once without them rather than
-    /// failing the turn.
+    /// rejects the tool schemas, or the effort level, is retried once without
+    /// the part it refused rather than failing the turn.
     fn chat_with_retries(
         &self,
         model: &str,
         messages: &[Value],
         purpose: &str,
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
-        supplied_chat_with_retries(self, model, messages, purpose, tools)
+        supplied_chat_with_retries(self, model, messages, purpose, tools, effort)
     }
 
     /// Call [`Provider::chat`], passing *tools* only when they can be used.
@@ -171,8 +253,9 @@ pub trait Provider: Send + Sync {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
-        supplied_chat_dispatch(self, model, messages, tools)
+        supplied_chat_dispatch(self, model, messages, tools, effort)
     }
 }
 
@@ -196,6 +279,21 @@ pub fn supplied_effective_dialect<P: Provider + ?Sized>(provider: &P) -> ToolDia
         return ToolDialect::Text;
     }
     declared
+}
+
+/// The body of [`Provider::effective_effort`].
+pub fn supplied_effective_effort<P: Provider + ?Sized>(
+    provider: &P,
+    effort: ReasoningEffort,
+) -> Option<ReasoningEffort> {
+    if provider
+        .base()
+        .reasoning_effort_disabled
+        .load(Ordering::Relaxed)
+    {
+        return None;
+    }
+    Some(effort)
 }
 
 /// The body of [`Provider::note_native_tools_rejected`].
@@ -224,6 +322,43 @@ pub fn supplied_note_native_tools_rejected<P: Provider + ?Sized>(
     true
 }
 
+/// The body of [`Provider::note_reasoning_effort_rejected`].
+pub fn supplied_note_reasoning_effort_rejected<P: Provider + ?Sized>(
+    provider: &P,
+    error: &Error,
+) -> bool {
+    let Error::ProviderHttp {
+        status_code, body, ..
+    } = error
+    else {
+        return false;
+    };
+    let body = body.to_lowercase();
+    // The four backends spell the parameter four ways, so the refusal is
+    // recognised by any of them rather than by one canonical name.
+    let names_the_parameter = ["reasoning_effort", "output_config", "effort", "reasoning"]
+        .iter()
+        .any(|name| body.contains(name));
+    if !matches!(status_code, 400 | 404 | 422) || !names_the_parameter {
+        return false;
+    }
+    // `swap` rather than `store`: the retry that follows a `true` sends the
+    // same arguments back, so reporting the latch twice would recurse.
+    if provider
+        .base()
+        .reasoning_effort_disabled
+        .swap(true, Ordering::Relaxed)
+    {
+        return false;
+    }
+    logging::warning(&format!(
+        "Provider {} rejected the reasoning effort parameter (HTTP {status_code}); \
+         omitting it for the rest of this session.",
+        provider.name()
+    ));
+    true
+}
+
 /// The body of [`Provider::chat_with_retries`].
 pub fn supplied_chat_with_retries<P: Provider + ?Sized>(
     provider: &P,
@@ -231,10 +366,11 @@ pub fn supplied_chat_with_retries<P: Provider + ?Sized>(
     messages: &[Value],
     purpose: &str,
     tools: Option<&[ToolSpec]>,
+    effort: ReasoningEffort,
 ) -> Result<ProviderResponse> {
     let base = provider.base();
     let attempt = || {
-        let response = provider.chat_dispatch(model, messages, tools)?;
+        let response = provider.chat_dispatch(model, messages, tools, effort)?;
         // A native tool-use response legitimately carries empty text, so
         // emptiness is only an error when there is no tool call either.
         if response.content.trim().is_empty() && response.tool_calls.is_empty() {
@@ -250,7 +386,12 @@ pub fn supplied_chat_with_retries<P: Provider + ?Sized>(
             if tools.is_some_and(|tools| !tools.is_empty())
                 && provider.note_native_tools_rejected(&error)
             {
-                return provider.chat_with_retries(model, messages, purpose, None);
+                return provider.chat_with_retries(model, messages, purpose, None, effort);
+            }
+            // Tools first: a body naming both drops the schemas, and the effort
+            // latch gets its own turn if the next attempt fails the same way.
+            if provider.note_reasoning_effort_rejected(&error) {
+                return provider.chat_with_retries(model, messages, purpose, tools, effort);
             }
             Err(error)
         }
@@ -269,13 +410,14 @@ pub fn supplied_chat_dispatch<P: Provider + ?Sized>(
     model: &str,
     messages: &[Value],
     tools: Option<&[ToolSpec]>,
+    effort: ReasoningEffort,
 ) -> Result<ProviderResponse> {
     if tools.is_some_and(|tools| !tools.is_empty())
         && provider.effective_dialect() != ToolDialect::Text
     {
-        return provider.chat(model, messages, tools);
+        return provider.chat(model, messages, tools, effort);
     }
-    provider.chat(model, messages, None)
+    provider.chat(model, messages, None, effort)
 }
 
 /// The body every OpenAI-compatible endpoint takes, before the parts that
@@ -422,6 +564,17 @@ fn attach_tool_schemas(
 ) {
     if let Some(schemas) = tool_schemas(dialect, tools.unwrap_or(&[])) {
         payload.insert("tools".to_string(), Value::Array(schemas));
+    }
+}
+
+/// Add the effort level to *payload* in the OpenAI spelling, shared by the two
+/// backends that speak chat-completions natively.
+///
+/// `None` means this endpoint has already refused the parameter, so the key is
+/// left off entirely rather than sent with a placeholder.
+fn attach_reasoning_effort(payload: &mut Map<String, Value>, effort: Option<ReasoningEffort>) {
+    if let Some(effort) = effort {
+        payload.insert("reasoning_effort".to_string(), json!(effort.as_str()));
     }
 }
 
@@ -590,7 +743,7 @@ mod tests {
             ..OpenRouterConfig::default()
         });
         let response = provider
-            .chat("test/model", &[user("hi")], None)
+            .chat("test/model", &[user("hi")], None, ReasoningEffort::High)
             .expect("the reply is well formed");
 
         let (url, payload, _) = recorder.last();
@@ -610,7 +763,7 @@ mod tests {
     fn a_plain_openai_turn_is_untouched() {
         let (_guard, recorder) = install(vec![reply("  openai reply  ", "gpt-4o", json!({}))]);
         let response = openai("sk-test")
-            .chat("gpt-4o", &[user("hi")], None)
+            .chat("gpt-4o", &[user("hi")], None, ReasoningEffort::High)
             .expect("the reply is well formed");
 
         let (url, payload, _) = recorder.last();
@@ -648,7 +801,9 @@ mod tests {
             ..OpenAiConfig::default()
         })
         .unwrap();
-        provider.chat("gpt-4o", &[user("hi")], None).unwrap();
+        provider
+            .chat("gpt-4o", &[user("hi")], None, ReasoningEffort::High)
+            .unwrap();
 
         let format = recorder.payload()["response_format"].clone();
         assert_eq!(format["type"], json!("json_schema"));
@@ -673,7 +828,7 @@ mod tests {
             ..OpenAiConfig::default()
         })
         .unwrap()
-        .chat("gpt-4o", &[], None)
+        .chat("gpt-4o", &[], None, ReasoningEffort::High)
         .unwrap();
 
         assert_eq!(
@@ -701,7 +856,7 @@ mod tests {
                 ..OpenAiConfig::default()
             })
             .unwrap()
-            .chat("gpt-4o", &[], None)
+            .chat("gpt-4o", &[], None, ReasoningEffort::High)
             .unwrap();
 
             let format = recorder.payload()["response_format"]["json_schema"].clone();
@@ -732,7 +887,7 @@ mod tests {
             ..OpenAiConfig::default()
         })
         .unwrap()
-        .chat("gpt-4o", &[], None)
+        .chat("gpt-4o", &[], None, ReasoningEffort::High)
         .unwrap();
 
         assert_eq!(response.content, r#"{"answer":"ok","score":7}"#);
@@ -751,7 +906,7 @@ mod tests {
             ..OpenAiConfig::default()
         })
         .unwrap()
-        .chat("gpt-4o", &[], None)
+        .chat("gpt-4o", &[], None, ReasoningEffort::High)
         .expect_err("the body is not the schema");
 
         let message = error.to_string();
@@ -782,6 +937,7 @@ mod tests {
                     user("hi"),
                 ],
                 None,
+                ReasoningEffort::High,
             )
             .expect("the reply is well formed");
 
@@ -807,7 +963,12 @@ mod tests {
             credential: ClaudeCredential::OAuth("oauth-token-456".to_string()),
             ..ClaudeConfig::default()
         })
-        .chat("claude-sonnet-4-20250514", &[user("hi")], None)
+        .chat(
+            "claude-sonnet-4-20250514",
+            &[user("hi")],
+            None,
+            ReasoningEffort::High,
+        )
         .unwrap();
 
         assert_eq!(
@@ -853,7 +1014,7 @@ mod tests {
         let (guard, recorder) = install(vec![reply("ok", "m", json!({}))]);
         assert_eq!(
             provider
-                .chat_with_retries("m", &[], "test", None)
+                .chat_with_retries("m", &[], "test", None, ReasoningEffort::High)
                 .unwrap()
                 .content,
             "ok"
@@ -867,7 +1028,7 @@ mod tests {
         ]);
         assert_eq!(
             provider
-                .chat_with_retries("m", &[], "test", None)
+                .chat_with_retries("m", &[], "test", None, ReasoningEffort::High)
                 .unwrap()
                 .content,
             "ok"
@@ -877,7 +1038,7 @@ mod tests {
 
         let (_guard, _recorder) = install(vec![Err(Error::session("always fail"))]);
         let error = provider
-            .chat_with_retries("m", &[], "test", None)
+            .chat_with_retries("m", &[], "test", None, ReasoningEffort::High)
             .expect_err("the budget runs out");
         assert!(
             error.to_string().starts_with("All retries exhausted"),
@@ -893,7 +1054,7 @@ mod tests {
             json!({"prompt_tokens": 10}),
         )]);
         let response = custom("https://coding.dashscope.aliyuncs.com/v1/")
-            .chat("qwen3.5-plus", &[user("hi")], None)
+            .chat("qwen3.5-plus", &[user("hi")], None, ReasoningEffort::High)
             .expect("the reply is well formed");
 
         let (url, payload, _) = recorder.last();
@@ -925,7 +1086,7 @@ mod tests {
                 max_tokens,
                 ..CustomConfig::default()
             })
-            .chat("m", &[], None)
+            .chat("m", &[], None, ReasoningEffort::High)
             .unwrap();
 
             assert_eq!(recorder.payload()["max_tokens"], json!(expected));
@@ -945,7 +1106,7 @@ mod tests {
                 .clone(),
             ..CustomConfig::default()
         })
-        .chat("m", &[], None)
+        .chat("m", &[], None, ReasoningEffort::High)
         .unwrap();
 
         assert_eq!(recorder.header("X-Custom").unwrap(), "value");
@@ -965,7 +1126,7 @@ mod tests {
         ];
         for provider in providers {
             let error = provider
-                .chat("m", &[user("hi")], None)
+                .chat("m", &[user("hi")], None, ReasoningEffort::High)
                 .expect_err("the body is not a reply");
             assert!(
                 error.to_string().starts_with("Unexpected response"),
@@ -1002,6 +1163,7 @@ mod tests {
                 model: &str,
                 _: &[Value],
                 _: Option<&[ToolSpec]>,
+                _: ReasoningEffort,
             ) -> Result<ProviderResponse> {
                 Ok(ProviderResponse {
                     model: model.to_string(),
@@ -1049,7 +1211,9 @@ mod tests {
     #[test]
     fn each_dialect_sends_its_own_schema_shape() {
         let (guard, recorder) = install(vec![reply("ok", "m", json!({}))]);
-        openai("k").chat("m", &[], Some(&[cmd_spec()])).unwrap();
+        openai("k")
+            .chat("m", &[], Some(&[cmd_spec()]), ReasoningEffort::High)
+            .unwrap();
         assert_eq!(
             recorder.payload()["tools"][0]["function"]["name"],
             json!("cmd")
@@ -1059,7 +1223,9 @@ mod tests {
         let (_guard, recorder) = install(vec![Ok(json!({
             "content": [{"text": "ok"}], "model": "m",
         }))]);
-        claude("k").chat("m", &[], Some(&[cmd_spec()])).unwrap();
+        claude("k")
+            .chat("m", &[], Some(&[cmd_spec()]), ReasoningEffort::High)
+            .unwrap();
         assert_eq!(
             recorder.payload()["tools"][0]["input_schema"],
             cmd_spec().parameters
@@ -1069,7 +1235,9 @@ mod tests {
     #[test]
     fn no_tools_key_when_there_is_nothing_to_send() {
         let (guard, recorder) = install(vec![reply("ok", "m", json!({}))]);
-        openai("k").chat("m", &[], None).unwrap();
+        openai("k")
+            .chat("m", &[], None, ReasoningEffort::High)
+            .unwrap();
         assert_eq!(recorder.payload().get("tools"), None);
         drop(guard);
 
@@ -1080,7 +1248,9 @@ mod tests {
             url: "https://x".to_string(),
             body: "tools unsupported".to_string(),
         });
-        latched.chat("m", &[], Some(&[cmd_spec()])).unwrap();
+        latched
+            .chat("m", &[], Some(&[cmd_spec()]), ReasoningEffort::High)
+            .unwrap();
         assert_eq!(recorder.payload().get("tools"), None);
     }
 
@@ -1099,7 +1269,9 @@ mod tests {
             }],
             "model": "m",
         }))]);
-        let response = openai("k").chat("m", &[], None).unwrap();
+        let response = openai("k")
+            .chat("m", &[], None, ReasoningEffort::High)
+            .unwrap();
 
         assert_eq!(response.content, "");
         assert_eq!(
@@ -1120,7 +1292,9 @@ mod tests {
             "model": "m",
             "stop_reason": "tool_use",
         }))]);
-        let response = claude("k").chat("m", &[], None).unwrap();
+        let response = claude("k")
+            .chat("m", &[], None, ReasoningEffort::High)
+            .unwrap();
         assert_eq!(response.content, "");
         assert_eq!(
             response.tool_calls,
@@ -1137,7 +1311,10 @@ mod tests {
             "model": "m",
         }))]);
         assert_eq!(
-            claude("k").chat("m", &[], None).unwrap().content,
+            claude("k")
+                .chat("m", &[], None, ReasoningEffort::High)
+                .unwrap()
+                .content,
             "one\ntwo"
         );
     }
@@ -1157,7 +1334,7 @@ mod tests {
             ..OpenAiConfig::default()
         })
         .unwrap()
-        .chat("m", &[], None)
+        .chat("m", &[], None, ReasoningEffort::High)
         .unwrap();
 
         assert_eq!(response.structured, None);
@@ -1177,7 +1354,7 @@ mod tests {
             ..ClaudeConfig::default()
         });
         let response = provider
-            .chat_with_retries("m", &[], "turn", Some(&[cmd_spec()]))
+            .chat_with_retries("m", &[], "turn", Some(&[cmd_spec()]), ReasoningEffort::High)
             .expect("a tool-use turn carries no text");
         assert_eq!(response.content, "");
         assert_eq!(recorder.count(), 1);
@@ -1193,9 +1370,159 @@ mod tests {
             ..OpenAiConfig::default()
         })
         .unwrap()
-        .chat_with_retries("m", &[], "turn", None)
+        .chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
         .expect_err("an empty reply beside nothing at all is a failure");
         assert!(error.is_provider(), "{error}");
+    }
+
+    /// Four backends, four spellings. Nothing normalizes between them, so the
+    /// only thing that catches a wrong key is asserting each one.
+    #[test]
+    fn each_backend_spells_the_effort_level_its_own_way() {
+        let (guard, recorder) = install(vec![reply("ok", "m", json!({}))]);
+        openai("k")
+            .chat("m", &[], None, ReasoningEffort::Low)
+            .unwrap();
+        assert_eq!(recorder.payload()["reasoning_effort"], json!("low"));
+        drop(guard);
+
+        let (guard, recorder) = install(vec![reply("ok", "m", json!({}))]);
+        custom("https://x/v1")
+            .chat("m", &[], None, ReasoningEffort::XHigh)
+            .unwrap();
+        assert_eq!(recorder.payload()["reasoning_effort"], json!("xhigh"));
+        drop(guard);
+
+        let (guard, recorder) = install(vec![reply("ok", "m", json!({}))]);
+        openrouter("k")
+            .chat("m", &[], None, ReasoningEffort::Max)
+            .unwrap();
+        assert_eq!(recorder.payload()["reasoning"], json!({"effort": "max"}));
+        drop(guard);
+
+        let (_guard, recorder) = install(vec![Ok(json!({
+            "content": [{"text": "ok"}], "model": "m",
+        }))]);
+        claude("k")
+            .chat("m", &[], None, ReasoningEffort::Minimal)
+            .unwrap();
+        assert_eq!(
+            recorder.payload()["output_config"],
+            json!({"effort": "minimal"})
+        );
+    }
+
+    /// The vendor's own body wins, because an endpoint that spells the level
+    /// differently has no other way to say so.
+    #[test]
+    fn an_extra_body_outranks_the_effort_key_it_shares_a_name_with() {
+        let (_guard, recorder) = install(vec![reply("ok", "m", json!({}))]);
+        CustomProvider::new(CustomConfig {
+            url: "https://x/v1".to_string(),
+            api_key: "k".to_string(),
+            extra_body: json!({"reasoning_effort": "vendor-special"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..CustomConfig::default()
+        })
+        .chat("m", &[], None, ReasoningEffort::High)
+        .unwrap();
+
+        assert_eq!(
+            recorder.payload()["reasoning_effort"],
+            json!("vendor-special")
+        );
+    }
+
+    #[test]
+    fn a_400_naming_the_effort_parameter_latches_it_off_for_good() {
+        let provider = openai("k");
+        let rejection = Error::ProviderHttp {
+            status_code: 400,
+            url: "https://x".to_string(),
+            body: "Unrecognized request argument supplied: reasoning_effort".to_string(),
+        };
+
+        assert!(provider.note_reasoning_effort_rejected(&rejection));
+        assert_eq!(provider.effective_effort(ReasoningEffort::High), None);
+        // False the second time, and that is what stops the retry recursing:
+        // the arm that fires on `true` re-sends the same arguments.
+        assert!(!provider.note_reasoning_effort_rejected(&rejection));
+        assert_eq!(provider.effective_effort(ReasoningEffort::High), None);
+    }
+
+    #[test]
+    fn a_failure_that_is_not_about_the_effort_parameter_does_not_latch() {
+        let provider = openai("k");
+        assert!(
+            !provider.note_reasoning_effort_rejected(&Error::ProviderHttp {
+                status_code: 400,
+                url: "https://x".to_string(),
+                body: "invalid api key".to_string(),
+            })
+        );
+        assert!(
+            !provider.note_reasoning_effort_rejected(&Error::ProviderHttp {
+                status_code: 500,
+                url: "https://x".to_string(),
+                body: "reasoning_effort broke".to_string(),
+            })
+        );
+        assert_eq!(
+            provider.effective_effort(ReasoningEffort::Medium),
+            Some(ReasoningEffort::Medium)
+        );
+    }
+
+    #[test]
+    fn a_model_with_no_reasoning_mode_retries_once_without_the_level() {
+        let (_guard, recorder) = install(vec![
+            Err(Error::ProviderHttp {
+                status_code: 400,
+                url: "https://x".to_string(),
+                body: "Unsupported parameter: 'reasoning_effort'".to_string(),
+            }),
+            Ok(json!({"choices": [{"message": {"content": "plain reply"}}], "model": "m"})),
+        ]);
+        let provider = OpenAiProvider::new(OpenAiConfig {
+            api_key: "k".to_string(),
+            retries: 0,
+            backoff_sec: 0.0,
+            ..OpenAiConfig::default()
+        })
+        .unwrap();
+        let response = provider
+            .chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
+            .expect("the degrade latch salvages the turn");
+
+        assert_eq!(response.content, "plain reply");
+        assert_eq!(recorder.count(), 2);
+        assert_eq!(recorder.payload().get("reasoning_effort"), None);
+    }
+
+    /// An endpoint that refuses the level twice is out of fallbacks, so the
+    /// error reaches the caller rather than the retry going round again.
+    #[test]
+    fn a_second_refusal_is_reported_rather_than_retried() {
+        let (_guard, recorder) = install(vec![Err(Error::ProviderHttp {
+            status_code: 400,
+            url: "https://x".to_string(),
+            body: "Unsupported parameter: 'reasoning_effort'".to_string(),
+        })]);
+        let provider = OpenAiProvider::new(OpenAiConfig {
+            api_key: "k".to_string(),
+            retries: 0,
+            backoff_sec: 0.0,
+            ..OpenAiConfig::default()
+        })
+        .unwrap();
+        let error = provider
+            .chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
+            .expect_err("the endpoint refuses everything");
+
+        assert!(error.is_provider(), "{error}");
+        assert_eq!(recorder.count(), 2);
     }
 
     #[test]
@@ -1216,7 +1543,7 @@ mod tests {
             ..CustomConfig::default()
         });
         let response = provider
-            .chat_with_retries("m", &[], "turn", Some(&[cmd_spec()]))
+            .chat_with_retries("m", &[], "turn", Some(&[cmd_spec()]), ReasoningEffort::High)
             .expect("the degrade latch salvages the turn");
 
         assert_eq!(response.content, "plain reply");

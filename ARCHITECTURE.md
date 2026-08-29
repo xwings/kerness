@@ -160,6 +160,7 @@ Python package as well as the crate.
 | `DEFAULT_TERMINATORS` | `CONSENSUS_REACHED`, `END_SESSION` | `crates/kerness/src/utils.rs:12` |
 | `RESERVED_TOOL_NAMES` | `["Skill"]` | `crates/kerness/src/harness.rs:25` |
 | `DEFAULT_TIMEOUT` | 60s | `crates/kerness/src/exec.rs:18` |
+| `ReasoningEffort::default()` | `high` | `crates/kerness/src/provider/mod.rs:37` |
 | Provider base URLs | OpenAI, OpenRouter, Anthropic | `crates/kerness/src/provider/{openai,openrouter,claude}.rs:17,15,15` |
 
 ## Roadmap

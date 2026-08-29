@@ -19,10 +19,11 @@ use kerness::error::{Error, Result};
 use kerness::http::{self, Headers, HttpTransport, UreqTransport};
 use kerness::provider::{
     supplied_chat_dispatch, supplied_chat_with_retries, supplied_effective_dialect,
-    supplied_note_native_tools_rejected, ClaudeConfig, ClaudeCredential, ClaudeProvider,
+    supplied_effective_effort, supplied_note_native_tools_rejected,
+    supplied_note_reasoning_effort_rejected, ClaudeConfig, ClaudeCredential, ClaudeProvider,
     CustomConfig, CustomProvider, OpenAiConfig, OpenAiProvider, OpenRouterConfig,
-    OpenRouterProvider, Provider, ProviderBase, ProviderResponse, CLAUDE_BASE_URL, OPENAI_BASE_URL,
-    OPENROUTER_BASE_URL,
+    OpenRouterProvider, Provider, ProviderBase, ProviderResponse, ReasoningEffort, CLAUDE_BASE_URL,
+    OPENAI_BASE_URL, OPENROUTER_BASE_URL,
 };
 use kerness::tooling::ToolSpec;
 use kerness::toolschema::ToolDialect;
@@ -57,6 +58,18 @@ impl Backing {
             Backing::Standalone(base) => base,
             Backing::Backend(provider) => provider.base(),
         }
+    }
+}
+
+/// Read an effort level from the word Python passed, or take the default.
+///
+/// A level crosses the boundary as a string for the same reason a role does:
+/// the caller writes `reasoning_effort="low"`, and a wrong word has to fail
+/// where it was written rather than as a 400 on the first turn.
+fn effort_from_py(value: Option<&str>) -> PyResult<ReasoningEffort> {
+    match value {
+        Some(value) => ReasoningEffort::parse(value).raise(),
+        None => Ok(ReasoningEffort::default()),
     }
 }
 
@@ -292,20 +305,22 @@ impl PyProviderCore {
     }
 
     /// Send one request through the Rust backend.
-    #[pyo3(signature = (model, messages, tools=None))]
+    #[pyo3(signature = (model, messages, tools=None, reasoning_effort=None))]
     fn chat(
         &self,
         model: &str,
         messages: &Bound<'_, PyAny>,
         tools: Option<&Bound<'_, PyAny>>,
+        reasoning_effort: Option<&str>,
     ) -> PyResult<PyProviderResponse> {
         let provider = self.provider()?;
         let messages = messages_from_py(messages)?;
         let tools = tool_specs(tools)?;
+        let effort = effort_from_py(reasoning_effort)?;
         // The GIL is held throughout: the request goes out through a transport
         // that calls back into Python, so releasing it here would only mean
         // taking it again one frame down.
-        let response = provider.chat(model, &messages, tools.as_deref());
+        let response = provider.chat(model, &messages, tools.as_deref(), effort);
         Ok(PyProviderResponse::adopt(response.raise()?))
     }
 
@@ -316,6 +331,17 @@ impl PyProviderCore {
         owner: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         dialect_to_py(py, supplied_effective_dialect(&self.view(owner)?))
+    }
+
+    /// The effort *owner* should actually send, or `None` once latched off.
+    #[pyo3(signature = (owner, reasoning_effort=None))]
+    fn effective_effort(
+        &self,
+        owner: &Bound<'_, PyAny>,
+        reasoning_effort: Option<&str>,
+    ) -> PyResult<Option<&'static str>> {
+        let effort = effort_from_py(reasoning_effort)?;
+        Ok(supplied_effective_effort(&self.view(owner)?, effort).map(ReasoningEffort::as_str))
     }
 
     /// Latch *owner* down to the text protocol if *error* means "no tools".
@@ -335,8 +361,26 @@ impl PyProviderCore {
         ))
     }
 
+    /// Latch *owner*'s effort level off if *error* means "no such parameter".
+    fn note_reasoning_effort_rejected(
+        &self,
+        py: Python<'_>,
+        owner: &Bound<'_, PyAny>,
+        error: &Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
+        if !error.is_instance_of::<PyBaseException>() {
+            return Ok(false);
+        }
+        let raised = PyErr::from_value(error.clone());
+        Ok(supplied_note_reasoning_effort_rejected(
+            &self.view(owner)?,
+            &from_py(py, &raised),
+        ))
+    }
+
     /// Send a request through *owner*, retrying on failure.
-    #[pyo3(signature = (owner, model, messages, purpose="", tools=None))]
+    #[pyo3(signature = (owner, model, messages, purpose="", tools=None, reasoning_effort=None))]
+    #[allow(clippy::too_many_arguments)]
     fn chat_with_retries(
         &self,
         owner: &Bound<'_, PyAny>,
@@ -344,32 +388,42 @@ impl PyProviderCore {
         messages: &Bound<'_, PyAny>,
         purpose: &str,
         tools: Option<&Bound<'_, PyAny>>,
+        reasoning_effort: Option<&str>,
     ) -> PyResult<PyProviderResponse> {
         let messages = messages_from_py(messages)?;
         let tools = tool_specs(tools)?;
+        let effort = effort_from_py(reasoning_effort)?;
         let response = supplied_chat_with_retries(
             &self.view(owner)?,
             model,
             &messages,
             purpose,
             tools.as_deref(),
+            effort,
         );
         Ok(PyProviderResponse::adopt(response.raise()?))
     }
 
     /// Call *owner*'s `chat`, passing *tools* only when they can be used.
-    #[pyo3(signature = (owner, model, messages, tools=None))]
+    #[pyo3(signature = (owner, model, messages, tools=None, reasoning_effort=None))]
     fn chat_dispatch(
         &self,
         owner: &Bound<'_, PyAny>,
         model: &str,
         messages: &Bound<'_, PyAny>,
         tools: Option<&Bound<'_, PyAny>>,
+        reasoning_effort: Option<&str>,
     ) -> PyResult<PyProviderResponse> {
         let messages = messages_from_py(messages)?;
         let tools = tool_specs(tools)?;
-        let response =
-            supplied_chat_dispatch(&self.view(owner)?, model, &messages, tools.as_deref());
+        let effort = effort_from_py(reasoning_effort)?;
+        let response = supplied_chat_dispatch(
+            &self.view(owner)?,
+            model,
+            &messages,
+            tools.as_deref(),
+            effort,
+        );
         Ok(PyProviderResponse::adopt(response.raise()?))
     }
 }
@@ -414,22 +468,22 @@ impl Provider for PyProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         Python::with_gil(|py| {
             let owner = self.owner.bind(py);
             let messages = messages_to_py(py, messages)?;
-            // `tools` goes as a keyword, and only when there is something to
-            // send: a subclass whose `chat` predates tool calling never
-            // declared the parameter, and never gets far enough to be offered
-            // it either.
-            let reply = match tools.filter(|tools| !tools.is_empty()) {
-                Some(tools) => {
-                    let kwargs = PyDict::new(py);
-                    kwargs.set_item("tools", tool_specs_to_py(py, tools)?)?;
-                    owner.call_method("chat", (model, messages), Some(&kwargs))?
-                }
-                None => owner.call_method1("chat", (model, messages))?,
-            };
+            // Both extras go as keywords, and only when the subclass can take
+            // them: a `chat` that predates tool calling, or predates effort
+            // levels, never declared the parameter and is never offered it.
+            let kwargs = PyDict::new(py);
+            if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+                kwargs.set_item("tools", tool_specs_to_py(py, tools)?)?;
+            }
+            if accepts(owner, "_chat_accepts_reasoning_effort") {
+                kwargs.set_item("reasoning_effort", effort.as_str())?;
+            }
+            let reply = owner.call_method("chat", (model, messages), Some(&kwargs))?;
             Ok(reply.extract::<PyProviderResponse>()?.inner)
         })
         .catch()
@@ -476,25 +530,37 @@ impl Provider for PyProvider {
         .unwrap_or(false)
     }
 
+    fn note_reasoning_effort_rejected(&self, error: &Error) -> bool {
+        Python::with_gil(|py| {
+            let raised = to_py(error.clone()).into_value(py);
+            self.owner
+                .bind(py)
+                .call_method1("note_reasoning_effort_rejected", (raised,))
+                .and_then(|value| value.extract::<bool>())
+        })
+        .unwrap_or(false)
+    }
+
     fn chat_with_retries(
         &self,
         model: &str,
         messages: &[Value],
         purpose: &str,
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         Python::with_gil(|py| {
+            let owner = self.owner.bind(py);
             let kwargs = PyDict::new(py);
             kwargs.set_item("purpose", purpose)?;
             if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
                 kwargs.set_item("tools", tool_specs_to_py(py, tools)?)?;
             }
+            if accepts(owner, "_retries_accept_reasoning_effort") {
+                kwargs.set_item("reasoning_effort", effort.as_str())?;
+            }
             let messages = messages_to_py(py, messages)?;
-            let reply = self.owner.bind(py).call_method(
-                "chat_with_retries",
-                (model, messages),
-                Some(&kwargs),
-            )?;
+            let reply = owner.call_method("chat_with_retries", (model, messages), Some(&kwargs))?;
             Ok(reply.extract::<PyProviderResponse>()?.inner)
         })
         .catch()
@@ -505,6 +571,7 @@ impl Provider for PyProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         Python::with_gil(|py| {
             let messages = messages_to_py(py, messages)?;
@@ -515,11 +582,24 @@ impl Provider for PyProvider {
             let reply = self
                 .owner
                 .bind(py)
-                .call_method1("_chat_dispatch", (model, messages, tools))?;
+                .call_method1("_chat_dispatch", (model, messages, tools, effort.as_str()))?;
             Ok(reply.extract::<PyProviderResponse>()?.inner)
         })
         .catch()
     }
+}
+
+/// Ask *owner* one of the signature probes, treating a missing or unhappy
+/// probe as "no".
+///
+/// `_chat_dispatch` is private and always the base class's, so it takes the
+/// level positionally; the two public entry points a subclass may have
+/// overridden are the ones that have to be asked first.
+fn accepts(owner: &Bound<'_, PyAny>, probe: &str) -> bool {
+    owner
+        .call_method0(probe)
+        .and_then(|value| value.extract::<bool>())
+        .unwrap_or(false)
 }
 
 /// Wrap a Python provider so the framework can call it.

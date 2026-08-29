@@ -15,7 +15,7 @@ use kerness::harness::{
     ResultType,
 };
 use kerness::persona::PersonaConfig;
-use kerness::provider::ProviderResponse;
+use kerness::provider::{ProviderResponse, ReasoningEffort};
 use kerness::pyfmt::repr_str;
 use kerness::session::Memories;
 use kerness::skill::loader::SkillConfig;
@@ -667,6 +667,7 @@ impl PyAgent {
     #[pyo3(signature = (
         name,
         model=String::new(),
+        reasoning_effort="high".to_string(),
         persona=String::new(),
         role="participant".to_string(),
         language=String::new(),
@@ -679,6 +680,7 @@ impl PyAgent {
     fn new(
         name: String,
         model: String,
+        reasoning_effort: String,
         persona: String,
         role: String,
         language: String,
@@ -692,6 +694,7 @@ impl PyAgent {
             inner: Agent {
                 name,
                 model,
+                reasoning_effort: ReasoningEffort::parse(&reasoning_effort).raise()?,
                 persona,
                 role: Role::parse(&role).raise()?,
                 language,
@@ -725,6 +728,18 @@ impl PyAgent {
     #[setter]
     fn set_model(&mut self, value: String) {
         self.inner.model = value;
+    }
+
+    /// How hard this agent's model should think, as the word it was set with.
+    #[getter]
+    fn reasoning_effort(&self) -> &str {
+        self.inner.reasoning_effort.as_str()
+    }
+
+    #[setter]
+    fn set_reasoning_effort(&mut self, value: String) -> PyResult<()> {
+        self.inner.reasoning_effort = ReasoningEffort::parse(&value).raise()?;
+        Ok(())
     }
 
     #[getter]
@@ -862,6 +877,7 @@ impl PyAgent {
         let (left, right) = (&self.inner, &other.inner);
         left.name == right.name
             && left.model == right.model
+            && left.reasoning_effort == right.reasoning_effort
             && left.persona == right.persona
             && left.role == right.role
             && left.language == right.language
@@ -872,9 +888,11 @@ impl PyAgent {
 
     fn __repr__(&self) -> String {
         format!(
-            "Agent(name={}, model={}, persona={}, role={}, language={}, system_prompt={})",
+            "Agent(name={}, model={}, reasoning_effort={}, persona={}, role={}, \
+             language={}, system_prompt={})",
             repr_str(&self.inner.name),
             repr_str(&self.inner.model),
+            repr_str(self.inner.reasoning_effort.as_str()),
             repr_str(&self.inner.persona),
             repr_str(self.inner.role.as_str()),
             repr_str(&self.inner.language),

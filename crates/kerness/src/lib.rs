@@ -49,7 +49,7 @@ pub use crate::conversation::{ChatMessage, Conversation, Message, Turn};
 pub use crate::error::{Error, Result};
 pub use crate::memory::Memory;
 pub use crate::persona::PersonaConfig;
-pub use crate::provider::{Provider, ProviderResponse};
+pub use crate::provider::{Provider, ProviderResponse, ReasoningEffort};
 pub use crate::session::{Session, SessionConfig, SessionResult};
 pub use crate::tooling::{ToolCall, ToolHandler, ToolSpec};
 pub use crate::toolkit::{ToolDispatcher, ToolResult};

@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 use crate::persona::{format_persona_for_prompt, load_persona};
-use crate::provider::Provider;
+use crate::provider::{Provider, ReasoningEffort};
 use crate::pyfmt;
 
 /// What an agent is in the session.
@@ -57,6 +57,9 @@ impl fmt::Display for Role {
 pub struct Agent {
     pub name: String,
     pub model: String,
+    /// How hard this agent's model should think. Beside the model rather than
+    /// on the provider, so two agents sharing one backend can differ.
+    pub reasoning_effort: ReasoningEffort,
     /// Persona prose, or a path to a `.md` persona file.
     pub persona: String,
     pub role: Role,
@@ -80,6 +83,7 @@ impl Agent {
         Agent {
             name: name.into(),
             model: model.into(),
+            reasoning_effort: ReasoningEffort::default(),
             persona: String::new(),
             role: Role::Participant,
             language: String::new(),
@@ -208,6 +212,7 @@ impl fmt::Debug for Agent {
         f.debug_struct("Agent")
             .field("name", &self.name)
             .field("model", &self.model)
+            .field("reasoning_effort", &self.reasoning_effort)
             .field("persona", &self.persona)
             .field("role", &self.role)
             .field("language", &self.language)

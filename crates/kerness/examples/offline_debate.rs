@@ -20,7 +20,7 @@ use std::time::Duration;
 use kerness::agent::{Agent, Role};
 use kerness::channel::ConsoleChannel;
 use kerness::error::Result;
-use kerness::provider::{Provider, ProviderBase, ProviderResponse};
+use kerness::provider::{Provider, ProviderBase, ProviderResponse, ReasoningEffort};
 use kerness::session::{Session, SessionConfig};
 use kerness::tooling::ToolSpec;
 use serde_json::Value;
@@ -65,6 +65,7 @@ impl Provider for Canned {
         _model: &str,
         _messages: &[Value],
         _tools: Option<&[ToolSpec]>,
+        _effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         Ok(ProviderResponse::text("..."))
     }
@@ -75,6 +76,7 @@ impl Provider for Canned {
         _messages: &[Value],
         purpose: &str,
         _tools: Option<&[ToolSpec]>,
+        _effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         if purpose.contains("orchestrator") {
             let index = self.next_route.fetch_add(1, Ordering::SeqCst);

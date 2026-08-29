@@ -3,8 +3,9 @@
 use serde_json::{Map, Value};
 
 use super::{
-    answering_model, attach_tool_schemas, bearer_headers, chat_completions_payload,
-    openai_response, reported_usage, Provider, ProviderBase, ProviderResponse,
+    answering_model, attach_reasoning_effort, attach_tool_schemas, bearer_headers,
+    chat_completions_payload, openai_response, reported_usage, Provider, ProviderBase,
+    ProviderResponse, ReasoningEffort,
 };
 use crate::error::Result;
 use crate::http::{self, Headers};
@@ -118,6 +119,7 @@ impl Provider for CustomProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         let mut headers = bearer_headers(&self.api_key);
         for (name, value) in &self.extra_headers {
@@ -134,6 +136,9 @@ impl Provider for CustomProvider {
             self.top_p,
             self.max_tokens,
         );
+        // Before the extra body, unlike the tool schemas: a vendor that spells
+        // the level its own way needs to be able to overwrite this key.
+        attach_reasoning_effort(&mut payload, self.effective_effort(effort));
         for (key, value) in &self.extra_body {
             payload.insert(key.clone(), value.clone());
         }

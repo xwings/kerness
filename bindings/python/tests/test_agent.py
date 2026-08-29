@@ -122,3 +122,24 @@ class TestRoleChecks:
         for role in ("orchestrater", "moderator"):
             with pytest.raises(ValueError, match="Unknown agent role"):
                 Agent(name="Mod", model="test/model", role=role)
+
+
+class TestReasoningEffort:
+    def test_the_level_defaults_to_high_and_round_trips_as_its_name(self):
+        """It sits beside the model because it is chosen with the model."""
+        assert Agent(name="Alice", model="test/model").reasoning_effort == "high"
+
+        agent = Agent(name="Alice", model="test/model", reasoning_effort="minimal")
+        assert agent.reasoning_effort == "minimal"
+
+        agent.reasoning_effort = "xhigh"
+        assert agent.reasoning_effort == "xhigh"
+
+    def test_an_unknown_level_is_rejected(self):
+        """Caught where it was written rather than as a 400 on the first turn."""
+        with pytest.raises(ValueError, match="Unknown reasoning effort"):
+            Agent(name="Alice", model="test/model", reasoning_effort="thorough")
+
+        agent = Agent(name="Alice", model="test/model")
+        with pytest.raises(ValueError, match="Unknown reasoning effort"):
+            agent.reasoning_effort = "HIGH"

@@ -4,7 +4,7 @@ use serde_json::{json, Map, Value};
 
 use super::{
     answering_model, anthropic_text, attach_tool_schemas, convert_messages_for_claude,
-    reported_usage, Provider, ProviderBase, ProviderResponse,
+    reported_usage, Provider, ProviderBase, ProviderResponse, ReasoningEffort,
 };
 use crate::error::Result;
 use crate::http::{self, Headers};
@@ -116,6 +116,7 @@ impl Provider for ClaudeProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         let (system_content, filtered_messages) = convert_messages_for_claude(messages);
 
@@ -126,6 +127,15 @@ impl Provider for ClaudeProvider {
         payload.insert("temperature".to_string(), json!(self.temperature));
         if !system_content.is_empty() {
             payload.insert("system".to_string(), json!(system_content));
+        }
+        // The messages API carries the level inside `output_config`, and accepts
+        // a narrower set of names than the enum offers; a level this model has
+        // no word for is a rejection, which is what the latch is for.
+        if let Some(effort) = self.effective_effort(effort) {
+            payload.insert(
+                "output_config".to_string(),
+                json!({"effort": effort.as_str()}),
+            );
         }
         attach_tool_schemas(&mut payload, self.effective_dialect(), tools);
 

@@ -3,8 +3,9 @@
 use serde_json::{json, Map, Value};
 
 use super::{
-    answering_model, attach_tool_schemas, bearer_headers, chat_completions_payload,
-    openai_response, reported_usage, Provider, ProviderBase, ProviderResponse,
+    answering_model, attach_reasoning_effort, attach_tool_schemas, bearer_headers,
+    chat_completions_payload, openai_response, reported_usage, Provider, ProviderBase,
+    ProviderResponse, ReasoningEffort,
 };
 use crate::error::{Error, Result};
 use crate::http;
@@ -124,6 +125,7 @@ impl Provider for OpenAiProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         let mut payload = chat_completions_payload(
             model,
@@ -135,6 +137,7 @@ impl Provider for OpenAiProvider {
         if let Some(response_format) = &self.response_format {
             payload.insert("response_format".to_string(), response_format.clone());
         }
+        attach_reasoning_effort(&mut payload, self.effective_effort(effort));
         attach_tool_schemas(&mut payload, self.effective_dialect(), tools);
 
         let url = format!("{}/chat/completions", self.base_url);

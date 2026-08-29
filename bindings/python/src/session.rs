@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kerness::agent::Role;
+use kerness::provider::ReasoningEffort;
 use kerness::pyfmt::repr_str;
 use kerness::session::{Session, SessionConfig, SessionResult};
 use kerness::tooling::{Arguments, ToolHandler};
@@ -180,6 +181,7 @@ impl PySession {
     fn agent(
         name: String,
         model: String,
+        reasoning_effort: String,
         persona: String,
         role: Role,
         language: String,
@@ -191,6 +193,7 @@ impl PySession {
         Ok(kerness::Agent {
             name,
             model,
+            reasoning_effort: ReasoningEffort::parse(&reasoning_effort).raise()?,
             persona,
             role,
             language,
@@ -323,6 +326,7 @@ impl PySession {
     #[pyo3(signature = (
         name,
         model=String::new(),
+        reasoning_effort="high".to_string(),
         persona=String::new(),
         language=String::new(),
         system_prompt=String::new(),
@@ -335,6 +339,7 @@ impl PySession {
         mut slf: PyRefMut<'py, Self>,
         name: String,
         model: String,
+        reasoning_effort: String,
         persona: String,
         language: String,
         system_prompt: String,
@@ -345,6 +350,7 @@ impl PySession {
         let agent = PySession::agent(
             name,
             model,
+            reasoning_effort,
             persona,
             Role::Participant,
             language,
@@ -361,6 +367,7 @@ impl PySession {
     #[pyo3(signature = (
         name,
         model=String::new(),
+        reasoning_effort="high".to_string(),
         persona=String::new(),
         language=String::new(),
         system_prompt=String::new(),
@@ -373,6 +380,7 @@ impl PySession {
         mut slf: PyRefMut<'py, Self>,
         name: String,
         model: String,
+        reasoning_effort: String,
         persona: String,
         language: String,
         system_prompt: String,
@@ -383,6 +391,7 @@ impl PySession {
         let agent = PySession::agent(
             name,
             model,
+            reasoning_effort,
             persona,
             Role::Orchestrator,
             language,

@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use kerness::channel::Channel;
 use kerness::error::Result;
-use kerness::provider::{Provider, ProviderBase, ProviderResponse};
+use kerness::provider::{Provider, ProviderBase, ProviderResponse, ReasoningEffort};
 use kerness::session::SessionConfig;
 use kerness::tooling::{ToolCall, ToolSpec};
 use kerness::toolschema::ToolDialect;
@@ -232,6 +232,7 @@ impl Provider for ScriptedProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        _effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         self.record(model, messages, "", tools);
         Ok(ProviderResponse::text(self.reply_for("")))
@@ -245,6 +246,7 @@ impl Provider for ScriptedProvider {
         messages: &[Value],
         purpose: &str,
         tools: Option<&[ToolSpec]>,
+        _effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         self.record(model, messages, purpose, tools);
         Ok(ProviderResponse::text(self.reply_for(purpose)))
@@ -306,6 +308,7 @@ impl Provider for ToolProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        _effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         self.calls().push(Call {
             model: model.to_string(),

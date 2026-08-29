@@ -1,10 +1,10 @@
 //! The OpenRouter backend.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::{
     answering_model, attach_tool_schemas, bearer_headers, chat_completions_payload,
-    openai_response, reported_usage, Provider, ProviderBase, ProviderResponse,
+    openai_response, reported_usage, Provider, ProviderBase, ProviderResponse, ReasoningEffort,
 };
 use crate::error::Result;
 use crate::http;
@@ -97,6 +97,7 @@ impl Provider for OpenRouterProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         let mut headers = bearer_headers(&self.api_key);
         if !self.app_url.is_empty() {
@@ -113,6 +114,11 @@ impl Provider for OpenRouterProvider {
             self.top_p,
             self.max_tokens,
         );
+        // OpenRouter nests the level rather than taking OpenAI's flat key, and
+        // normalizes it onward to whatever the routed model actually wants.
+        if let Some(effort) = self.effective_effort(effort) {
+            payload.insert("reasoning".to_string(), json!({"effort": effort.as_str()}));
+        }
         attach_tool_schemas(&mut payload, self.effective_dialect(), tools);
 
         let url = format!("{}/chat/completions", self.base_url);

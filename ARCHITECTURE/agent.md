@@ -28,20 +28,26 @@ authority to address participants by name.
 
 - `crates/kerness/src/agent.rs:21` — `Role` — `Participant` or `Orchestrator`;
   `parse` at `:37` rejects anything else rather than defaulting.
-- `crates/kerness/src/agent.rs:57` — `Agent` — name, model, provider, persona,
-  system prompt, role, and the per-agent memory path.
-- `crates/kerness/src/agent.rs:94` — `build_system_prompt(...)` — the base prompt
+- `crates/kerness/src/agent.rs:57` — `Agent` — name, model, reasoning effort,
+  provider, persona, system prompt, role, and the per-agent memory path.
+- `crates/kerness/src/agent.rs:98` — `build_system_prompt(...)` — the base prompt
   plus persona, in the order a reader of the transcript would expect them.
-- `crates/kerness/src/agent.rs:114` — `decorate_system_prompt(...)` — layers the
+- `crates/kerness/src/agent.rs:118` — `decorate_system_prompt(...)` — layers the
   optional parts on: skills index, memory block, tool prompt, reasoning note.
   Split from `build_system_prompt` because the session decorates a prompt it did
   not build, for an agent whose persona was already resolved.
-- `crates/kerness/src/agent.rs:174` — `build_messages(...)` — the system message
+- `crates/kerness/src/agent.rs:181` — `build_messages(...)` — the system message
   followed by history; this is exactly what goes to the provider.
-- `crates/kerness/src/agent.rs:189` — `is_orchestrator()` / `:193`
+- `crates/kerness/src/agent.rs:196` — `is_orchestrator()` / `:200`
   `is_participant()` — the role test the loop branches on.
 
-`Agent` implements `Debug` by hand (`agent.rs:203`) because the provider handle
+`reasoning_effort` sits beside `model` rather than on the provider, and for the
+same reason the model does: two agents can share one backend and still be asked
+to think at different depths. It is a `ReasoningEffort`
+([provider.md](provider.md)), defaults to `High`, and rides along on every
+provider call the agent makes — the follow-up after a tool result included.
+
+`Agent` implements `Debug` by hand (`agent.rs:210`) because the provider handle
 is a trait object with no useful representation, and a derived `Debug` would
 print nothing legible in a test failure.
 
@@ -68,6 +74,9 @@ cargo test -p kerness agent::                                     # pass = 0 fai
   `build_messages` guarantees.
 - `:105` — `test_the_two_roles_are_exclusive_and_participant_is_the_default` —
   and `:116` `test_an_unknown_role_is_rejected`.
+- `:128` — `test_the_level_defaults_to_high_and_round_trips_as_its_name` — and
+  `:138` `test_an_unknown_level_is_rejected`: `reasoning_effort` crosses the
+  boundary as a validated string, the way `role` does.
 
 ## Open Gaps / Roadmap
 

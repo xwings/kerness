@@ -642,3 +642,97 @@ class TestEmptyResponseGuard:
         resp = provider.chat_with_retries("m", [], purpose="turn", tools=[CMD_SPEC])
         assert resp.content == "plain reply"
         assert "tools" not in mock_post.call_args[0][1]
+
+
+class TestReasoningEffort:
+    """The level is per agent, so it travels per call rather than per provider."""
+
+    @patch("kerness.provider.http_post_json")
+    def test_each_backend_spells_the_level_its_own_way(self, mock_post):
+        """There is no shared key, and nothing normalises between them."""
+        mock_post.return_value = _reply("ok", model="m")
+        OpenAIProvider(api_key="k").chat("m", [], reasoning_effort="low")
+        assert mock_post.call_args[0][1]["reasoning_effort"] == "low"
+
+        CustomProvider(url="https://x/v1", api_key="k").chat(
+            "m", [], reasoning_effort="xhigh"
+        )
+        assert mock_post.call_args[0][1]["reasoning_effort"] == "xhigh"
+
+        OpenRouterProvider(api_key="k").chat("m", [], reasoning_effort="minimal")
+        assert mock_post.call_args[0][1]["reasoning"] == {"effort": "minimal"}
+
+        mock_post.return_value = {"content": [{"text": "ok"}], "model": "m"}
+        ClaudeProvider(api_key="k").chat("m", [], reasoning_effort="max")
+        assert mock_post.call_args[0][1]["output_config"] == {"effort": "max"}
+
+    @patch("kerness.provider.http_post_json")
+    def test_the_level_is_high_when_nobody_names_one(self, mock_post):
+        """``high`` is sent rather than standing in for "unset"."""
+        mock_post.return_value = _reply("ok", model="m")
+        OpenAIProvider(api_key="k").chat("m", [])
+        assert mock_post.call_args[0][1]["reasoning_effort"] == "high"
+
+    def test_an_unknown_level_is_rejected_where_it_was_written(self):
+        provider = OpenAIProvider(api_key="k")
+        with pytest.raises(ValueError, match="Unknown reasoning effort"):
+            provider.chat("m", [], reasoning_effort="thorough")
+
+    def test_a_400_naming_the_parameter_latches_it_off_for_good(self):
+        provider = OpenAIProvider(api_key="k")
+        exc = ProviderHTTPError(400, "https://x", "unknown parameter reasoning_effort")
+
+        assert provider.note_reasoning_effort_rejected(exc) is True
+        assert provider.effective_effort("high") is None
+        assert provider.effective_effort("low") is None
+
+    def test_a_second_refusal_is_reported_rather_than_retried(self):
+        """The retry re-sends identical arguments, so a latch that reported
+        itself twice would never stop."""
+        provider = OpenAIProvider(api_key="k")
+        exc = ProviderHTTPError(400, "https://x", "unsupported: reasoning_effort")
+
+        assert provider.note_reasoning_effort_rejected(exc) is True
+        assert provider.note_reasoning_effort_rejected(exc) is False
+
+    def test_a_failure_that_is_not_about_the_level_does_not_latch(self):
+        provider = OpenAIProvider(api_key="k")
+
+        assert provider.note_reasoning_effort_rejected(
+            ProviderHTTPError(400, "https://x", "invalid api key")
+        ) is False
+        assert provider.note_reasoning_effort_rejected(
+            ProviderHTTPError(500, "https://x", "reasoning_effort broke")
+        ) is False
+        assert provider.effective_effort("high") == "high"
+
+    @patch("kerness.provider.http_post_json")
+    def test_a_rejected_endpoint_retries_once_without_the_level(self, mock_post):
+        mock_post.side_effect = [
+            ProviderHTTPError(400, "https://x", "unrecognised key reasoning_effort"),
+            {"choices": [{"message": {"content": "plain reply"}}], "model": "m"},
+        ]
+        provider = CustomProvider(url="https://x/v1", api_key="k",
+                                  retries=0, backoff_sec=0)
+        resp = provider.chat_with_retries("m", [], purpose="turn")
+        assert resp.content == "plain reply"
+        assert "reasoning_effort" not in mock_post.call_args[0][1]
+
+    def test_a_chat_that_never_declared_the_level_is_never_offered_one(self):
+        """The same courtesy ``tools`` gets: a provider written before the
+        parameter existed keeps working untouched."""
+        seen = []
+
+        class EffortUnaware(Provider):
+            def chat(self, model, messages, tools=None):
+                seen.append("no kwarg")
+                return ProviderResponse(content="hi", model=model)
+
+        class Aware(Provider):
+            def chat(self, model, messages, tools=None, reasoning_effort=None):
+                seen.append(reasoning_effort)
+                return ProviderResponse(content="hi", model=model)
+
+        EffortUnaware().chat_with_retries("m", [], purpose="turn")
+        Aware().chat_with_retries("m", [], purpose="turn", reasoning_effort="low")
+        assert seen == ["no kwarg", "low"]
