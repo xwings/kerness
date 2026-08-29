@@ -34,6 +34,7 @@ pub mod persona;
 pub mod prompting;
 pub mod provider;
 pub mod pyfmt;
+pub mod role;
 pub mod session;
 pub mod sessionfile;
 pub mod skill;
@@ -43,13 +44,17 @@ pub mod toolschema;
 pub mod utils;
 pub mod yaml;
 
-pub use crate::agent::{Agent, Role};
+#[cfg(test)]
+mod testing;
+
+pub use crate::agent::Agent;
 pub use crate::channel::{Channel, ConsoleChannel, FileChannel, LogChannel, MultiChannel};
 pub use crate::conversation::{ChatMessage, Conversation, Message, Turn};
 pub use crate::error::{Error, Result};
 pub use crate::memory::Memory;
 pub use crate::persona::PersonaConfig;
 pub use crate::provider::{Provider, ProviderResponse, ReasoningEffort};
+pub use crate::role::{Position, RoleConfig};
 pub use crate::session::{Session, SessionConfig, SessionResult};
 pub use crate::tooling::{ToolCall, ToolHandler, ToolSpec};
 pub use crate::toolkit::{ToolDispatcher, ToolResult};

@@ -12,10 +12,14 @@ use std::path::PathBuf;
 use kerness::agent_runtime;
 use kerness::compaction;
 use kerness::conversation::ChatMessage;
+use kerness::exec;
 use kerness::gameplan;
 use kerness::harness;
 use kerness::jsonschema;
 use kerness::persona;
+use kerness::provider;
+use kerness::role;
+use kerness::session;
 use kerness::sessionfile::{self, SessionSnapshot};
 use kerness::skill::loader as skill_loader;
 use kerness::skill::runtime as skill_runtime;
@@ -27,11 +31,11 @@ use kerness::{orchestrator, prompting};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::convert::{map_from_py, map_to_py, value_from_py, value_to_py};
+use crate::convert::{chat_to_py, map_from_py, map_to_py, value_from_py, value_to_py};
 use crate::errors::Raise;
 use crate::types::{
     dialect_from_py, PyGameplanConfig, PyHarnessSpec, PyPersonaConfig, PyProviderResponse,
-    PyResultField, PySkillConfig, PyToolCall, PyToolResult, PyToolSpec, PyTurn,
+    PyResultField, PyRoleConfig, PySkillConfig, PyToolCall, PyToolResult, PyToolSpec, PyTurn,
 };
 
 // ---------------------------------------------------------------------- utils
@@ -275,18 +279,7 @@ pub fn compact(
 /// The messages a summarizer is asked with.
 #[pyfunction]
 pub fn summary_request<'py>(py: Python<'py>, turns: Vec<PyTurn>) -> PyResult<Bound<'py, PyList>> {
-    messages(py, &compaction::summary_request(&raw_turns(&turns)))
-}
-
-fn messages<'py>(py: Python<'py>, chat: &[ChatMessage]) -> PyResult<Bound<'py, PyList>> {
-    let list = PyList::empty(py);
-    for message in chat {
-        let dict = PyDict::new(py);
-        dict.set_item("role", &message.role)?;
-        dict.set_item("content", &message.content)?;
-        list.append(dict)?;
-    }
-    Ok(list)
+    chat_to_py(py, &compaction::summary_request(&raw_turns(&turns)))
 }
 
 // -------------------------------------------------------------------- harness
@@ -333,6 +326,35 @@ pub fn load_gameplan(name_or_path: &str) -> PyResult<PyGameplanConfig> {
 #[pyfunction]
 pub fn list_builtin_gameplans() -> Vec<String> {
     gameplan::list_builtin_gameplans()
+}
+
+// ----------------------------------------------------------------------- role
+
+/// Load a role by builtin name or path.
+#[pyfunction]
+#[pyo3(signature = (path, *, search=None))]
+pub fn load_role(path: &str, search: Option<Vec<PathBuf>>) -> PyResult<PyRoleConfig> {
+    Ok(PyRoleConfig::adopt(
+        role::load_role(path, &search.unwrap_or_default()).raise()?,
+    ))
+}
+
+/// The roles that ship with the package.
+#[pyfunction]
+pub fn list_builtin_roles() -> Vec<String> {
+    role::list_builtin_roles()
+}
+
+/// The file a role name or path resolves to.
+#[pyfunction]
+#[pyo3(signature = (path, *, search=None))]
+pub fn resolve_role_path(
+    py: Python<'_>,
+    path: &str,
+    search: Option<Vec<PathBuf>>,
+) -> PyResult<Py<PyAny>> {
+    let resolved = role::resolve_role_path(path, &search.unwrap_or_default()).raise()?;
+    crate::types::path_to_py(py, resolved.to_string_lossy().as_ref())
 }
 
 // -------------------------------------------------------------------- persona
@@ -621,10 +643,33 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("INVALID_CALL", tooling::INVALID_CALL)?;
     module.add("SKILL_TOOL_NAME", skill_runtime::SKILL_TOOL_NAME)?;
     module.add("SCHEMA_VERSION", sessionfile::SCHEMA_VERSION)?;
+    module.add(
+        "DEFAULT_MAX_CONTEXT_TOKENS",
+        session::DEFAULT_MAX_CONTEXT_TOKENS,
+    )?;
+    // A `Duration` on the Rust side, seconds here, because that is the unit
+    // `Session.run_command(timeout_sec=…)` takes.
+    module.add("DEFAULT_TIMEOUT_SEC", exec::DEFAULT_TIMEOUT.as_secs_f64())?;
+    module.add(
+        "DEFAULT_REQUEST_TIMEOUT_SEC",
+        provider::DEFAULT_REQUEST_TIMEOUT_SEC,
+    )?;
+    module.add("DEFAULT_RETRIES", provider::DEFAULT_RETRIES)?;
+    module.add("DEFAULT_BACKOFF_SEC", provider::DEFAULT_BACKOFF_SEC)?;
+    module.add("DEFAULT_TEMPERATURE", provider::DEFAULT_TEMPERATURE)?;
+    module.add("DEFAULT_TOP_P", provider::DEFAULT_TOP_P)?;
+    module.add(
+        "DEFAULT_CLAUDE_MAX_TOKENS",
+        provider::DEFAULT_CLAUDE_MAX_TOKENS,
+    )?;
+    module.add("OPENAI_BASE_URL", provider::OPENAI_BASE_URL)?;
+    module.add("OPENROUTER_BASE_URL", provider::OPENROUTER_BASE_URL)?;
+    module.add("CLAUDE_BASE_URL", provider::CLAUDE_BASE_URL)?;
     module.add("CHARS_PER_TOKEN", compaction::CHARS_PER_TOKEN)?;
     module.add("COMPACT_TO_FRACTION", compaction::COMPACT_TO_FRACTION)?;
     module.add("SUMMARY_PREFIX", compaction::SUMMARY_PREFIX)?;
     module.add("SUMMARY_PROMPT", compaction::SUMMARY_PROMPT)?;
+    module.add("DEFAULT_ROLE_FILE", role::DEFAULT_ROLE_FILE)?;
     module.add("MEMORY_HEADER", prompting::MEMORY_HEADER)?;
     module.add("MEMORY_WRITE_HINT", prompting::MEMORY_WRITE_HINT)?;
     module.add("FORCED_END_NOTE", orchestrator::FORCED_END_NOTE)?;
@@ -671,6 +716,9 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         validate_harness,
         load_gameplan,
         list_builtin_gameplans,
+        load_role,
+        list_builtin_roles,
+        resolve_role_path,
         load_persona,
         format_persona_for_prompt,
         list_builtin_personas,

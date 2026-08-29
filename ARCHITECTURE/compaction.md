@@ -4,8 +4,7 @@
 
 A long session outgrows the model's context window. Compaction is the answer:
 estimate how large the turn history is, and when it crosses the ceiling, replace
-the oldest half with a single summary turn and keep the rest verbatim. Serves
-**M1**.
+the oldest half with a single summary turn and keep the rest verbatim.
 
 The estimate is deliberately crude — characters divided by four — because the
 alternative is a tokenizer per model family, and the ceiling exists to stay
@@ -40,7 +39,7 @@ under a hard limit, not to fill it exactly.
 - `crates/kerness/src/compaction.rs:86` — `compact(turns, limit, summarize)` —
   returns `None` when the history is under the limit, so the caller can tell
   "nothing to do" from "rewritten".
-- `crates/kerness/src/compaction.rs:143` — `summary_request(turns)` — the messages
+- `crates/kerness/src/compaction.rs:147` — `summary_request(turns)` — the messages
   sent to the summarizing model.
 
 `compact` takes the summarizer as a closure rather than a provider, so the
@@ -62,10 +61,10 @@ cargo test -p kerness compaction                                       # pass = 
 .venv/bin/python -m pytest bindings/python/tests/test_compaction.py -q # pass = 0 failed
 ```
 
-- `bindings/python/tests/test_compaction.py:49` — `test_it_leaves_a_short_conversation_alone`;
-  `:64` `test_the_result_is_topic_summary_then_recent_turns`; `:116`
+- `bindings/python/tests/test_compaction.py:47` — `test_it_leaves_a_short_conversation_alone`;
+  `:62` `test_the_result_is_topic_summary_then_recent_turns`; `:114`
   `test_the_summarizer_sees_only_the_dropped_turns`.
-- `:87` `test_the_newest_turn_is_kept_even_when_it_alone_is_too_big` and `:55`
+- `:85` `test_the_newest_turn_is_kept_even_when_it_alone_is_too_big` and `:53`
   `test_a_single_oversized_turn_is_not_compactable` are the two edge cases that
   decide what `compact` does when halving cannot help.
 

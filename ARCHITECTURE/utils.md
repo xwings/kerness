@@ -5,7 +5,7 @@
 The small shared primitives every other module reaches for: scanning a model's
 reply for a keyword, an addressed agent, or a memory marker; retrying a fallible
 call with backoff; and formatting values the way Python does, so that a value
-crossing the boundary renders identically on both sides. Serves **M1**.
+crossing the boundary renders identically on both sides.
 
 Nothing here is speculative — each function has more than one caller, which is
 the bar for living in this module rather than beside its only user.
@@ -36,7 +36,7 @@ the bar for living in this module rather than beside its only user.
   scan.
 - `crates/kerness/src/utils.rs:122` — `parse_memory_markers(text)` — splits a reply
   into the text to show and the memory entries to append.
-- `crates/kerness/src/utils.rs:175` — `retry(...)` — attempts, backoff, and a
+- `crates/kerness/src/utils.rs:179` — `retry(...)` — attempts, backoff, and a
   predicate deciding what is retryable; the provider retry is built on it.
 - `crates/kerness/src/pyfmt.rs:25` — `json_dumps_indent2(value)` — matches
   `json.dumps(..., indent=2)` byte for byte, which is what tool results and

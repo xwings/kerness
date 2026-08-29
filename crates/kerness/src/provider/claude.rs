@@ -4,7 +4,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     answering_model, anthropic_text, attach_tool_schemas, convert_messages_for_claude,
-    reported_usage, Provider, ProviderBase, ProviderResponse, ReasoningEffort,
+    reported_usage, Provider, ProviderBase, ProviderResponse, ReasoningEffort, DEFAULT_BACKOFF_SEC,
+    DEFAULT_REQUEST_TIMEOUT_SEC, DEFAULT_RETRIES, DEFAULT_TEMPERATURE,
 };
 use crate::error::Result;
 use crate::http::{self, Headers};
@@ -16,6 +17,13 @@ pub const CLAUDE_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 /// The API version header value the endpoint requires.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The reply ceiling sent when the caller names none.
+///
+/// Anthropic requires the field, so there is no "unset" to send; the bindings
+/// declare the same number as a Python default, which is why it is named here
+/// rather than written twice.
+pub const DEFAULT_CLAUDE_MAX_TOKENS: i64 = 4096;
 
 /// How the request proves who is asking.
 ///
@@ -65,12 +73,12 @@ impl Default for ClaudeConfig {
         ClaudeConfig {
             credential: ClaudeCredential::ApiKey(String::new()),
             base_url: CLAUDE_BASE_URL.to_string(),
-            timeout_sec: 60,
-            retries: 2,
-            backoff_sec: 2.0,
+            timeout_sec: DEFAULT_REQUEST_TIMEOUT_SEC,
+            retries: DEFAULT_RETRIES,
+            backoff_sec: DEFAULT_BACKOFF_SEC,
             interval_sec: None,
-            temperature: 1.0,
-            max_tokens: 4096,
+            temperature: DEFAULT_TEMPERATURE,
+            max_tokens: DEFAULT_CLAUDE_MAX_TOKENS,
         }
     }
 }

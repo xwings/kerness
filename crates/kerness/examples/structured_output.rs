@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use kerness::agent::{Agent, Role};
+use kerness::agent::Agent;
 use kerness::channel::ConsoleChannel;
 use kerness::error::Result;
 use kerness::provider::{OpenAiConfig, OpenAiProvider};
@@ -76,18 +76,19 @@ fn main() -> Result<()> {
         ..Default::default()
     })?;
 
-    session.add_participant(Agent {
-        persona: "Procurement officer weighing price against delivery risk".to_string(),
-        ..Agent::new("Buyer", "gpt-4o")
-    });
-    session.add_participant(Agent {
-        persona: "Engineering lead who has to live with the delivery".to_string(),
-        ..Agent::new("Engineer", "gpt-4o")
-    });
-    session.add_orchestrator(Agent {
-        role: Role::Orchestrator,
+    session.add_agent(Agent {
+        persona: Some("Procurement officer weighing price against delivery risk".to_string()),
+        ..Agent::new("Buyer").with_model("gpt-4o")
+    })?;
+    session.add_agent(Agent {
+        persona: Some("Engineering lead who has to live with the delivery".to_string()),
+        ..Agent::new("Engineer").with_model("gpt-4o")
+    })?;
+    session.add_agent(Agent {
         provider: Some(structured),
-        ..Agent::new("Chair", "gpt-4o")
+        ..Agent::new("Chair")
+            .with_model("gpt-4o")
+            .with_role("orchestrator")
     })?;
 
     let result = session.run()?;

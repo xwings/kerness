@@ -111,29 +111,9 @@ impl Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TempDir;
 
     /// A directory that removes itself, so these tests leave no trace either.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("kerness-memory-{tag}"));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(path)
-        }
-
-        fn join(&self, name: &str) -> PathBuf {
-            self.0.join(name)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn loading_an_absent_file_reads_empty_and_creates_nothing() {
         let dir = TempDir::new("absent");

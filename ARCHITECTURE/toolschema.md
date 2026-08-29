@@ -6,7 +6,7 @@ Native tool calling, in three dialects. Providers differ in how tools are
 declared, how a tool call comes back, and how a result is fed in; this module
 owns all three shapes for each. When a provider has no native support the
 framework falls back to the prompt rendering in [toolkit.md](toolkit.md), and
-`ToolDialect` is what decides between them. Serves **M1**.
+`ToolDialect` is what decides between them.
 
 ## Status
 

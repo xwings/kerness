@@ -5,8 +5,7 @@
 The session's memory of what has been said, in two shapes at once. `turns` is
 the structured record — who spoke, in which round, of what kind — and
 `transcript` is the flat message list a harness prints or saves. `render()`
-turns the first into the `ChatMessage` list a provider is actually sent. Serves
-**M1**.
+turns the first into the `ChatMessage` list a provider is actually sent.
 
 Keeping both is what lets compaction rewrite the history without losing the
 transcript, and lets a resumed session restore each independently.

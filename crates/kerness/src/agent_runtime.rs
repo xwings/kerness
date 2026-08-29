@@ -189,11 +189,11 @@ impl<'a> AgentRunner<'a> {
             _ => None,
         };
         self.provider.chat_with_retries(
-            &self.agent.model,
+            self.agent.model_name(),
             &messages,
             purpose,
             tools.as_deref(),
-            self.agent.reasoning_effort,
+            self.agent.effort(),
         )
     }
 }
@@ -257,7 +257,7 @@ mod tests {
     /// to outlive it in the test's own scope.
     fn fixture(tools: Vec<ToolSpec>) -> (Agent, ToolDispatcher) {
         (
-            Agent::new("Alice", "m"),
+            Agent::new("Alice").with_model("m"),
             ToolDispatcher::new(Arc::new(move || tools.clone())),
         )
     }
@@ -387,7 +387,7 @@ mod tests {
     fn the_agents_own_effort_rides_along_on_every_call_of_the_turn() {
         let provider = MockProvider::text(&[call_block("ping").as_str(), "Got pong."]);
         let (mut agent, dispatcher) = fixture(ping());
-        agent.reasoning_effort = ReasoningEffort::Low;
+        agent.reasoning_effort = Some(ReasoningEffort::Low);
         let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
 
         runner.run(&[], "turn", None).expect("a turn");

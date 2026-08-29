@@ -127,24 +127,25 @@ def main() -> None:
         ),
     )
 
-    session.add_participant(
+    session.add_agent(
         "Leo",
         model="gpt-5.2",
         persona=str(HERE / "personas" / "aggressive_bluffer.md"),
     )
-    session.add_participant(
+    session.add_agent(
         "Mina",
         model="gpt-4o",
         persona=str(HERE / "personas" / "tight_conservative.md"),
     )
-    session.add_participant(
+    session.add_agent(
         "Kai",
         model="gpt-5.1",
         persona=str(HERE / "personas" / "analytic_pro.md"),
     )
-    session.add_orchestrator(
+    session.add_agent(
         "Dealer",
         model="gpt-5.1",
+        role="orchestrator",
         persona="Professional poker dealer and fair referee",
     )
 

@@ -73,9 +73,9 @@ def main() -> None:
         channel=channel,
     )
 
-    session.add_participant("Alice", model="openai/gpt-4o", persona="Open-source advocate")
-    session.add_participant("Bob", model="anthropic/claude-sonnet-4", persona="Security researcher")
-    session.add_orchestrator("Moderator", model="openai/gpt-4o")
+    session.add_agent("Alice", model="openai/gpt-4o", persona="Open-source advocate")
+    session.add_agent("Bob", model="anthropic/claude-sonnet-4", persona="Security researcher")
+    session.add_agent("Moderator", model="openai/gpt-4o", role="orchestrator")
 
     result = session.run()
 

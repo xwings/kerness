@@ -21,7 +21,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use kerness::agent::{Agent, Role};
+use kerness::agent::Agent;
 use kerness::channel::{Channel, ConsoleChannel, MultiChannel};
 use kerness::error::Result;
 use kerness::provider::{OpenRouterConfig, OpenRouterProvider};
@@ -105,12 +105,13 @@ fn main() -> Result<()> {
         ..Default::default()
     })?;
 
-    session.add_participant(Agent::new("Alice", "openai/gpt-4o"));
-    session.add_participant(Agent::new("Bob", "anthropic/claude-sonnet-4"));
-    session.add_orchestrator(Agent {
-        role: Role::Orchestrator,
-        ..Agent::new("Mod", "openai/gpt-4o")
-    })?;
+    session.add_agent(Agent::new("Alice").with_model("openai/gpt-4o"))?;
+    session.add_agent(Agent::new("Bob").with_model("anthropic/claude-sonnet-4"))?;
+    session.add_agent(
+        Agent::new("Mod")
+            .with_model("openai/gpt-4o")
+            .with_role("orchestrator"),
+    )?;
 
     let result = session.run()?;
     println!("\nSummary: {}", result.summary());

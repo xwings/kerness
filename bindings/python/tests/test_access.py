@@ -330,3 +330,64 @@ class TestTheDefaultIsNonInteractive:
         )
         assert manager.check_command("git status", "git") is None
         assert [r.target for r in seen] == ["git status"]
+
+
+class TestContainmentWorkspace:
+    """An allowlist answers *may I*; the workspace answers *is this inside the
+    world*.  The two are separate mechanisms, and the workspace is the one that
+    can only ever subtract."""
+
+    def test_a_workspace_refuses_what_an_allowlist_and_an_approver_both_allow(
+        self, tmp_path
+    ):
+        inside = tmp_path / "work"
+        inside.mkdir()
+        (inside / "ok.txt").write_text("contents")
+        (tmp_path / "outside.txt").write_text("secret")
+
+        manager = AccessManager(
+            AccessPolicy(
+                approve_prompt=lambda req: True,
+                allowed_dirs=[tmp_path],
+                workspace=inside,
+            )
+        )
+        assert manager.check_path("read", str(inside / "ok.txt")) == (
+            inside / "ok.txt"
+        ).resolve()
+
+        with pytest.raises(AccessDeniedError) as caught:
+            manager.check_path("read", str(tmp_path / "outside.txt"))
+        assert "outside the workspace" in str(caught.value)
+
+    def test_traversal_cannot_step_out_of_the_workspace(self, tmp_path):
+        """The workspace is compared after resolution, so ``..`` buys nothing."""
+        inside = tmp_path / "work"
+        inside.mkdir()
+        (tmp_path / "outside.txt").write_text("secret")
+
+        manager = AccessManager(
+            AccessPolicy(
+                approve_prompt=lambda req: True,
+                allowed_dirs=[tmp_path],
+                workspace=inside,
+            )
+        )
+        with pytest.raises(AccessDeniedError):
+            manager.check_path("read", str(inside / ".." / "outside.txt"))
+
+    def test_a_path_is_a_str_or_a_Path_in_either_slot(self, tmp_path):
+        """``workspace`` accepts what the other path fields accept."""
+        inside = tmp_path / "work"
+        inside.mkdir()
+        for workspace in (inside, str(inside)):
+            manager = AccessManager(
+                AccessPolicy(allowed_dirs=[inside], workspace=workspace)
+            )
+            assert manager.check_path("list", str(inside)) == inside.resolve()
+
+    def test_the_default_policy_confines_nothing(self):
+        """A workspace is opt-in.  Defaulting it to the working directory would
+        confine every caller who never asked to be."""
+        assert AccessPolicy().workspace is None
+        assert AccessPolicy().agent_workspaces == {}

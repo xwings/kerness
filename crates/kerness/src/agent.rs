@@ -10,88 +10,119 @@ use crate::error::{Error, Result};
 use crate::persona::{format_persona_for_prompt, load_persona};
 use crate::provider::{Provider, ReasoningEffort};
 use crate::pyfmt;
-
-/// What an agent is in the session.
-///
-/// A closed set rather than a string: an unrecognised role satisfies neither
-/// [`Agent::is_orchestrator`] nor the orchestrator lookup, so accepting one
-/// would turn the session's conductor into an extra debater with no error
-/// anywhere.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Role {
-    #[default]
-    Participant,
-    Orchestrator,
-}
-
-impl Role {
-    /// The name this role is written with in a gameplan.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Role::Participant => "participant",
-            Role::Orchestrator => "orchestrator",
-        }
-    }
-
-    /// Read a role from its written name.
-    pub fn parse(value: &str) -> Result<Self> {
-        match value {
-            "participant" => Ok(Role::Participant),
-            "orchestrator" => Ok(Role::Orchestrator),
-            other => Err(Error::Value(format!(
-                "Unknown agent role {}. Expected 'participant' or 'orchestrator'.",
-                pyfmt::repr_str(other)
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for Role {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+use crate::role::{load_role, Position, DEFAULT_ROLE_FILE};
 
 /// One participant in a session, and everything that shapes its prompt.
+///
+/// Every option an agent shares with the session is written `None` for "the
+/// session decides". [`Session::run`](crate::session::Session::run) fills those
+/// in once, before the first turn, so a `None` seen during a run means the
+/// session declared nothing either — never "not resolved yet".
 #[derive(Clone)]
 pub struct Agent {
     pub name: String,
-    pub model: String,
+    /// The model to call. `None` takes the session's.
+    pub model: Option<String>,
     /// How hard this agent's model should think. Beside the model rather than
-    /// on the provider, so two agents sharing one backend can differ.
-    pub reasoning_effort: ReasoningEffort,
-    /// Persona prose, or a path to a `.md` persona file.
-    pub persona: String,
-    pub role: Role,
-    /// Language to answer in, if the session pins one.
-    pub language: String,
+    /// on the provider, so two agents sharing one backend can differ. `None`
+    /// takes the session's.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Persona prose, or a path to a `.md` persona file. `None` takes the
+    /// session's, which is itself `None` when no persona is pinned.
+    pub persona: Option<String>,
+    /// What this agent is here to do: a built-in role name, a path to a `.md`
+    /// role file, or the description written out as prose. `None` is a plain
+    /// participant, which is what an agent that named nothing must be — the
+    /// orchestrator is a privileged singleton, and defaulting into it would
+    /// hand the session's conductor's seat to anyone who said nothing.
+    ///
+    /// Unlike every other option here this one does *not* take the session's:
+    /// a session-wide role would make every agent the orchestrator at once.
+    /// [`Session::add_agent`](crate::session::Session::add_agent) reads it into
+    /// [`Agent::position`] and pins a file spec to an absolute path.
+    pub role: Option<String>,
+    /// Where this agent sits in the loop, read out of [`Agent::role`] when the
+    /// session admits the agent. Written by the session, not by the caller.
+    pub position: Position,
+    /// Language to answer in. `None` takes the session's, which is itself
+    /// `None` when the session pins no language.
+    pub language: Option<String>,
     /// Replaces the session's default prompt when set.
-    pub system_prompt: String,
+    pub system_prompt: Option<String>,
     /// The backend this agent calls. The session supplies one when the agent
     /// has none of its own.
+    ///
+    /// Set this and you must set [`Agent::model`] too: the session's model
+    /// names a model on the *session's* backend, so inheriting it across a
+    /// provider boundary would send one vendor's model name to another.
     pub provider: Option<Arc<dyn Provider>>,
     /// Skills this agent may load. `None` means every skill the session has;
     /// an empty list means none.
     pub skills: Option<Vec<String>>,
     /// Memory scope name, when this agent keeps its own.
     pub memory: Option<String>,
+    /// A directory this agent alone is confined to. It must sit inside the
+    /// session's workspace, which it narrows rather than replaces — see
+    /// [`AccessPolicy::agent_workspaces`](crate::access::AccessPolicy::agent_workspaces).
+    /// `None` leaves the agent held to the session's.
+    pub workspace: Option<String>,
 }
 
 impl Agent {
-    /// A participant with no persona, language, or provider of its own.
-    pub fn new(name: impl Into<String>, model: impl Into<String>) -> Self {
+    /// A participant that takes every option from the session.
+    pub fn new(name: impl Into<String>) -> Self {
         Agent {
             name: name.into(),
-            model: model.into(),
-            reasoning_effort: ReasoningEffort::default(),
-            persona: String::new(),
-            role: Role::Participant,
-            language: String::new(),
-            system_prompt: String::new(),
+            model: None,
+            reasoning_effort: None,
+            persona: None,
+            role: None,
+            position: Position::Participant,
+            language: None,
+            system_prompt: None,
             provider: None,
             skills: None,
             memory: None,
+            workspace: None,
         }
+    }
+
+    /// Call *model* rather than the session's.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Take *role*: a built-in name, a path to a `.md` role file, or prose.
+    ///
+    /// Only a role file can seat an orchestrator, and only by declaring
+    /// `position: orchestrator` in its frontmatter. Prose always seats a
+    /// participant, so `"orchestrator, but sceptical"` describes a
+    /// participant's job rather than quietly taking over the session.
+    pub fn with_role(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
+        self
+    }
+
+    /// Call *provider* rather than the session's, with *model* on it.
+    ///
+    /// The two are set together because setting a provider alone is the one
+    /// combination [`Session::run`](crate::session::Session::run) rejects.
+    pub fn with_provider(mut self, provider: Arc<dyn Provider>, model: impl Into<String>) -> Self {
+        self.provider = Some(provider);
+        self.model = Some(model.into());
+        self
+    }
+
+    /// The model to call, or `""` before the session has resolved one.
+    pub fn model_name(&self) -> &str {
+        self.model.as_deref().unwrap_or_default()
+    }
+
+    /// The effort to reason at, or the framework default before the session
+    /// has resolved one.
+    pub fn effort(&self) -> ReasoningEffort {
+        self.reasoning_effort.unwrap_or_default()
     }
 
     /// Build the full system prompt, falling back to *default_prompt*.
@@ -101,11 +132,7 @@ impl Agent {
         show_reasoning: Option<bool>,
         skills_prompt: &str,
     ) -> Result<String> {
-        let base = if self.system_prompt.is_empty() {
-            default_prompt
-        } else {
-            &self.system_prompt
-        };
+        let base = self.system_prompt.as_deref().unwrap_or(default_prompt);
         self.decorate_system_prompt(base, show_reasoning, skills_prompt)
     }
 
@@ -122,7 +149,7 @@ impl Agent {
         skills_prompt: &str,
     ) -> Result<String> {
         let mut prompt = Cow::Borrowed(prompt);
-        if !self.persona.is_empty() {
+        if self.persona.is_some() {
             prompt = Cow::Owned(format!("{prompt}\n{}", self.resolve_persona()?));
         }
         match show_reasoning {
@@ -134,8 +161,8 @@ impl Agent {
             }
             None => {}
         }
-        if !self.language.is_empty() {
-            prompt = Cow::Owned(format!("{prompt}\nRespond in {}.", self.language));
+        if let Some(language) = &self.language {
+            prompt = Cow::Owned(format!("{prompt}\nRespond in {language}."));
         }
         if !skills_prompt.is_empty() {
             prompt = Cow::Owned(format!("{prompt}\n{skills_prompt}"));
@@ -144,9 +171,9 @@ impl Agent {
         // common case, and three unconditional rewrites would copy it three
         // times to produce the string it already was.
         for (placeholder, replacement) in [
-            ("{bot_id}", &self.name),
-            ("{bot_name}", &self.name),
-            ("{model}", &self.model),
+            ("{bot_id}", self.name.as_str()),
+            ("{bot_name}", self.name.as_str()),
+            ("{model}", self.model_name()),
         ] {
             if prompt.contains(placeholder) {
                 prompt = Cow::Owned(prompt.replace(placeholder, replacement));
@@ -167,13 +194,11 @@ impl Agent {
     /// The session pins every `.md` persona to a resolved absolute path before
     /// the run, so this stays a plain lookup with no search path of its own.
     fn resolve_persona(&self) -> Result<String> {
-        if self.persona.ends_with(".md") {
-            return Ok(format_persona_for_prompt(&load_persona(
-                &self.persona,
-                &[],
-            )?));
+        let persona = self.persona.as_deref().unwrap_or_default();
+        if persona.ends_with(".md") {
+            return Ok(format_persona_for_prompt(&load_persona(persona, &[])?));
         }
-        Ok(format!("Persona: {}", self.persona))
+        Ok(format!("Persona: {persona}"))
     }
 
     /// Build the message list for one provider call: system prompt, then
@@ -193,13 +218,91 @@ impl Agent {
         Ok(messages)
     }
 
+    /// This agent's base system prompt: the body of the role it named.
+    ///
+    /// The session pins every `.md` role to a resolved absolute path when it
+    /// admits the agent, so this stays a plain lookup with no search path of
+    /// its own — the same arrangement persona resolution works under. Prose is
+    /// its own prompt, and an agent that named no role at all reads the
+    /// built-in `participant` role.
+    pub fn resolve_role(&self) -> Result<String> {
+        let Some(role) = self.role.as_deref() else {
+            return Ok(load_role(DEFAULT_ROLE_FILE, &[])?.content);
+        };
+        if role.ends_with(".md") {
+            return Ok(load_role(role, &[])?.content);
+        }
+        Ok(role.to_string())
+    }
+
     pub fn is_orchestrator(&self) -> bool {
-        self.role == Role::Orchestrator
+        self.position == Position::Orchestrator
     }
 
     pub fn is_participant(&self) -> bool {
-        self.role != Role::Orchestrator
+        self.position != Position::Orchestrator
     }
+
+    /// Fill every unset option from *defaults*.
+    ///
+    /// Called once per agent before the first turn, which is what lets the rest
+    /// of the framework read these fields without repeating the fallback.
+    ///
+    /// Provider and model are the one pair that does not fall back
+    /// independently. A model name means something only on the backend it was
+    /// written for, so an agent that brings its own provider must bring its own
+    /// model: inheriting the session's would send one vendor's model name to
+    /// another and fail on the first turn, or worse, silently answer from the
+    /// wrong model.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Session`] when this agent sets a provider but no model, or when
+    /// neither it nor the session names a model at all.
+    pub fn inherit(&mut self, defaults: &AgentDefaults) -> Result<()> {
+        if self.provider.is_some() && self.model.is_none() {
+            return Err(Error::session(format!(
+                "Agent {} sets its own provider but no model. A model name \
+                 belongs to the backend it was written for, so the session's \
+                 model is not inherited across providers: set a model on this \
+                 agent.",
+                pyfmt::repr_str(&self.name)
+            )));
+        }
+        if self.model.is_none() {
+            self.model.clone_from(&defaults.model);
+        }
+        if self.model.is_none() {
+            return Err(Error::session(format!(
+                "Agent {} has no model and the session sets none. Give the \
+                 agent a model, or set one on SessionConfig.",
+                pyfmt::repr_str(&self.name)
+            )));
+        }
+        if self.reasoning_effort.is_none() {
+            self.reasoning_effort = Some(defaults.reasoning_effort);
+        }
+        if self.persona.is_none() {
+            self.persona.clone_from(&defaults.persona);
+        }
+        if self.language.is_none() {
+            self.language.clone_from(&defaults.language);
+        }
+        Ok(())
+    }
+}
+
+/// The session's answer for each option an agent may leave unset.
+///
+/// [`Agent::system_prompt`] is absent on purpose: it already falls back through
+/// the `default_prompt` argument to [`Agent::build_system_prompt`], so
+/// resolving it into the agent would give it two fallbacks that could disagree.
+#[derive(Clone, Debug, Default)]
+pub struct AgentDefaults {
+    pub model: Option<String>,
+    pub reasoning_effort: ReasoningEffort,
+    pub persona: Option<String>,
+    pub language: Option<String>,
 }
 
 /// The configuration, without the provider, skills, or memory.
@@ -215,6 +318,7 @@ impl fmt::Debug for Agent {
             .field("reasoning_effort", &self.reasoning_effort)
             .field("persona", &self.persona)
             .field("role", &self.role)
+            .field("position", &self.position)
             .field("language", &self.language)
             .field("system_prompt", &self.system_prompt)
             .finish()
@@ -223,35 +327,12 @@ impl fmt::Debug for Agent {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("kerness-agent-{tag}"));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(path)
-        }
-
-        fn write(&self, name: &str, text: &str) -> PathBuf {
-            let path = self.0.join(name);
-            std::fs::write(&path, text).expect("write persona");
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testing::TempDir;
 
     fn alice() -> Agent {
-        Agent::new("Alice", "test/model")
+        Agent::new("Alice").with_model("test/model")
     }
 
     #[test]
@@ -264,7 +345,7 @@ mod tests {
         );
 
         let custom = Agent {
-            system_prompt: "Custom prompt.".to_string(),
+            system_prompt: Some("Custom prompt.".to_string()),
             ..alice()
         };
         assert_eq!(
@@ -278,8 +359,8 @@ mod tests {
     #[test]
     fn every_decoration_is_appended_to_the_base() {
         let agent = Agent {
-            persona: "Pragmatic engineer".to_string(),
-            language: "French".to_string(),
+            persona: Some("Pragmatic engineer".to_string()),
+            language: Some("French".to_string()),
             ..alice()
         };
         let result = agent
@@ -329,7 +410,7 @@ mod tests {
         );
 
         let agent = Agent {
-            persona: path.display().to_string(),
+            persona: Some(path.display().to_string()),
             ..alice()
         };
         let result = agent.build_system_prompt("Base.", None, "").unwrap();
@@ -342,7 +423,7 @@ mod tests {
     #[test]
     fn a_missing_persona_file_fails_and_names_what_it_tried() {
         let agent = Agent {
-            persona: "typo.md".to_string(),
+            persona: Some("typo.md".to_string()),
             ..alice()
         };
         let error = agent
@@ -355,7 +436,7 @@ mod tests {
     #[test]
     fn a_plain_prose_persona_is_untouched() {
         let agent = Agent {
-            persona: "A sceptic who asks for evidence.".to_string(),
+            persona: Some("A sceptic who asks for evidence.".to_string()),
             ..alice()
         };
         assert!(agent
@@ -385,10 +466,10 @@ mod tests {
     }
 
     #[test]
-    fn the_two_roles_are_exclusive_and_participant_is_the_default() {
+    fn the_two_positions_are_exclusive_and_participant_is_the_default() {
         let orchestrator = Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Orch", "test/model")
+            position: Position::Orchestrator,
+            ..Agent::new("Orch").with_model("test/model")
         };
         assert!(orchestrator.is_orchestrator());
         assert!(!orchestrator.is_participant());
@@ -396,16 +477,128 @@ mod tests {
         assert!(!alice().is_orchestrator());
     }
 
-    #[test]
-    fn an_unknown_role_is_rejected() {
-        assert_eq!(Role::parse("participant").unwrap(), Role::Participant);
-        assert_eq!(Role::parse("orchestrator").unwrap(), Role::Orchestrator);
-        for role in ["orchestrater", "moderator"] {
-            let error = Role::parse(role).expect_err("a typo is not a role");
-            assert_eq!(
-                error.to_string(),
-                format!("Unknown agent role '{role}'. Expected 'participant' or 'orchestrator'.")
-            );
+    /// A backend that answers nothing; only its presence on an agent matters.
+    struct StubProvider(crate::provider::ProviderBase);
+
+    impl crate::provider::Provider for StubProvider {
+        fn name(&self) -> &str {
+            "StubProvider"
         }
+
+        fn base(&self) -> &crate::provider::ProviderBase {
+            &self.0
+        }
+
+        fn chat(
+            &self,
+            _model: &str,
+            _messages: &[Value],
+            _tools: Option<&[crate::tooling::ToolSpec]>,
+            _effort: ReasoningEffort,
+        ) -> Result<crate::provider::ProviderResponse> {
+            unreachable!("inheritance never calls the backend")
+        }
+    }
+
+    fn stub_provider() -> Arc<dyn Provider> {
+        Arc::new(StubProvider(crate::provider::ProviderBase::new(
+            0, 0.0, None,
+        )))
+    }
+
+    fn defaults() -> AgentDefaults {
+        AgentDefaults {
+            model: Some("session/model".to_string()),
+            reasoning_effort: ReasoningEffort::Low,
+            persona: Some("A session persona".to_string()),
+            language: Some("German".to_string()),
+        }
+    }
+
+    #[test]
+    fn an_unset_option_takes_the_sessions_and_a_set_one_keeps_its_own() {
+        let mut inherits = Agent::new("Alice");
+        inherits.inherit(&defaults()).expect("session supplies all");
+        assert_eq!(inherits.model_name(), "session/model");
+        assert_eq!(inherits.effort(), ReasoningEffort::Low);
+        assert_eq!(inherits.persona.as_deref(), Some("A session persona"));
+        assert_eq!(inherits.language.as_deref(), Some("German"));
+
+        let mut overrides = Agent {
+            reasoning_effort: Some(ReasoningEffort::High),
+            persona: Some("Its own persona".to_string()),
+            language: Some("French".to_string()),
+            ..Agent::new("Bob").with_model("own/model")
+        };
+        overrides.inherit(&defaults()).expect("agent supplies all");
+        assert_eq!(overrides.model_name(), "own/model");
+        assert_eq!(overrides.effort(), ReasoningEffort::High);
+        assert_eq!(overrides.persona.as_deref(), Some("Its own persona"));
+        assert_eq!(overrides.language.as_deref(), Some("French"));
+    }
+
+    /// The session may pin nothing at all, and that has to survive inheritance
+    /// as "nothing" rather than becoming an empty persona in the prompt.
+    #[test]
+    fn a_session_that_pins_nothing_leaves_the_agent_pinning_nothing() {
+        let mut agent = Agent::new("Alice").with_model("own/model");
+        agent
+            .inherit(&AgentDefaults::default())
+            .expect("a model of its own is enough");
+
+        assert_eq!(agent.persona, None);
+        assert_eq!(agent.language, None);
+        assert_eq!(agent.effort(), ReasoningEffort::default());
+        assert_eq!(
+            agent.build_system_prompt("Base.", None, "").unwrap(),
+            "Base."
+        );
+    }
+
+    /// The one pair that does not fall back independently: a model name is
+    /// only meaningful on the backend it was written for.
+    #[test]
+    fn an_agent_with_its_own_provider_must_bring_its_own_model() {
+        let mut agent = Agent::new("Alice");
+        agent.provider = Some(stub_provider());
+
+        let error = agent
+            .inherit(&defaults())
+            .expect_err("the session's model names a model on another backend");
+
+        assert!(matches!(error, Error::Session(_)), "{error:?}");
+        let message = error.to_string();
+        assert!(message.contains("'Alice'"), "{message}");
+        assert!(
+            message.contains("not inherited across providers"),
+            "{message}"
+        );
+
+        let mut paired = Agent::new("Bob").with_provider(stub_provider(), "own/model");
+        paired
+            .inherit(&defaults())
+            .expect("provider and model set together");
+        assert_eq!(paired.model_name(), "own/model");
+    }
+
+    #[test]
+    fn a_model_named_nowhere_is_an_error_that_says_both_places_to_set_it() {
+        let error = Agent::new("Alice")
+            .inherit(&AgentDefaults::default())
+            .expect_err("no model anywhere is not a runnable agent");
+
+        assert!(matches!(error, Error::Session(_)), "{error:?}");
+        let message = error.to_string();
+        assert!(message.contains("'Alice'"), "{message}");
+        assert!(message.contains("SessionConfig"), "{message}");
+    }
+
+    #[test]
+    fn a_named_role_is_kept_verbatim_until_the_session_reads_it() {
+        let agent = Agent::new("Alice")
+            .with_model("m")
+            .with_role("orchestrator, but sceptical");
+        assert_eq!(agent.role.as_deref(), Some("orchestrator, but sceptical"));
+        assert_eq!(agent.position, Position::Participant);
     }
 }

@@ -63,6 +63,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<types::PyAgent>()?;
     module.add_class::<types::PyMemory>()?;
     module.add_class::<types::PyPersonaConfig>()?;
+    module.add_class::<types::PyRoleConfig>()?;
     module.add_class::<types::PySkillConfig>()?;
     module.add_class::<types::PyOrchestratorSpec>()?;
     module.add_class::<types::PyParticipantSpec>()?;

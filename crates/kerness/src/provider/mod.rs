@@ -15,16 +15,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
+use crate::http::{self, Headers};
 use crate::logging;
 use crate::pyfmt;
 use crate::tooling::{ToolCall, ToolSpec};
 use crate::toolschema::{parse_openai_tool_calls, tool_schemas, ToolDialect};
 use crate::utils::retry;
 
-pub use claude::{ClaudeConfig, ClaudeCredential, ClaudeProvider, CLAUDE_BASE_URL};
+pub use claude::{
+    ClaudeConfig, ClaudeCredential, ClaudeProvider, CLAUDE_BASE_URL, DEFAULT_CLAUDE_MAX_TOKENS,
+};
 pub use custom::{CustomConfig, CustomProvider};
 pub use openai::{OpenAiConfig, OpenAiProvider, OPENAI_BASE_URL};
 pub use openrouter::{OpenRouterConfig, OpenRouterProvider, OPENROUTER_BASE_URL};
+
+/// The request defaults every built-in backend starts from.
+///
+/// Named rather than written into each `Default` impl because the bindings
+/// declare the same values a second time, as the defaults of the Python
+/// constructors. Two literals for one contract drift apart silently; a
+/// constant both sides name cannot. This is the rule the base URLs already
+/// follow.
+pub const DEFAULT_REQUEST_TIMEOUT_SEC: u64 = 60;
+/// Extra attempts after the first, so this many retries means this many + 1 calls.
+pub const DEFAULT_RETRIES: u32 = 2;
+/// Seconds to wait before the first retry, doubled for each one after it.
+pub const DEFAULT_BACKOFF_SEC: f64 = 2.0;
+/// The sampling temperature a backend asks for when its caller names none.
+pub const DEFAULT_TEMPERATURE: f64 = 1.0;
+/// The nucleus-sampling mass a backend asks for when its caller names none.
+pub const DEFAULT_TOP_P: f64 = 1.0;
 
 /// How hard the model should think before answering.
 ///
@@ -296,18 +316,32 @@ pub fn supplied_effective_effort<P: Provider + ?Sized>(
     Some(effort)
 }
 
+/// The status and lowercased body of a refusal both latches can interpret, or
+/// `None` for anything else.
+///
+/// Only these three codes mean "your request"; a 500 or a timeout says nothing
+/// about whether the parameter is supported, and latching on one would degrade
+/// a session for the rest of its life over a blip. The body is lowercased once
+/// here because each caller only goes on to look for a substring in it.
+fn interpretable_refusal(error: &Error) -> Option<(u16, String)> {
+    let Error::ProviderHttp {
+        status_code, body, ..
+    } = error
+    else {
+        return None;
+    };
+    matches!(status_code, 400 | 404 | 422).then(|| (*status_code, body.to_lowercase()))
+}
+
 /// The body of [`Provider::note_native_tools_rejected`].
 pub fn supplied_note_native_tools_rejected<P: Provider + ?Sized>(
     provider: &P,
     error: &Error,
 ) -> bool {
-    let Error::ProviderHttp {
-        status_code, body, ..
-    } = error
-    else {
+    let Some((status_code, body)) = interpretable_refusal(error) else {
         return false;
     };
-    if !matches!(status_code, 400 | 404 | 422) || !body.to_lowercase().contains("tool") {
+    if !body.contains("tool") {
         return false;
     }
     logging::warning(&format!(
@@ -327,19 +361,15 @@ pub fn supplied_note_reasoning_effort_rejected<P: Provider + ?Sized>(
     provider: &P,
     error: &Error,
 ) -> bool {
-    let Error::ProviderHttp {
-        status_code, body, ..
-    } = error
-    else {
+    let Some((status_code, body)) = interpretable_refusal(error) else {
         return false;
     };
-    let body = body.to_lowercase();
     // The four backends spell the parameter four ways, so the refusal is
     // recognised by any of them rather than by one canonical name.
     let names_the_parameter = ["reasoning_effort", "output_config", "effort", "reasoning"]
         .iter()
         .any(|name| body.contains(name));
-    if !matches!(status_code, 400 | 404 | 422) || !names_the_parameter {
+    if !names_the_parameter {
         return false;
     }
     // `swap` rather than `store`: the retry that follows a `true` sends the
@@ -509,6 +539,35 @@ fn openai_response(response: &Value, model: &str) -> Result<(String, Vec<ToolCal
         .trim()
         .to_string();
     Ok((content, tool_calls, finish_reason))
+}
+
+/// POST a chat-completions payload and read the reply into a response.
+///
+/// Three backends speak this protocol — OpenAI, OpenRouter, and any
+/// OpenAI-compatible endpoint — and they differ only in what they put *into*
+/// the payload and the headers. The URL, the request, and the decode are the
+/// same in all three, and `structured` is the one field they do not agree on:
+/// only [`OpenAiProvider`] asks for a schema, so it is left `None` here and
+/// filled in by the one caller that wants it.
+fn post_chat_completions(
+    base_url: &str,
+    payload: Map<String, Value>,
+    headers: &Headers,
+    timeout_sec: u64,
+    model: &str,
+) -> Result<ProviderResponse> {
+    let url = format!("{base_url}/chat/completions");
+    let response = http::post_json(&url, &Value::Object(payload), headers, timeout_sec)?;
+    let (content, tool_calls, stop_reason) = openai_response(&response, model)?;
+    Ok(ProviderResponse {
+        content,
+        model: answering_model(&response, model),
+        usage: reported_usage(&response),
+        structured: None,
+        tool_calls,
+        stop_reason,
+        raw: response,
+    })
 }
 
 /// Lift the system prompt out of *messages* for the Claude API.

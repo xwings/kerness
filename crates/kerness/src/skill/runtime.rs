@@ -87,6 +87,7 @@ pub struct SkillActivation {
 struct State {
     loaded: BTreeSet<String>,
     gate: Option<BTreeSet<String>>,
+    required: BTreeSet<String>,
 }
 
 impl SkillActivation {
@@ -116,6 +117,16 @@ impl SkillActivation {
             .clone()
     }
 
+    /// Tool names the skills active this turn declared they cannot work
+    /// without. Additive, and read after the gate — see [`admit_required`].
+    pub fn required(&self) -> BTreeSet<String> {
+        self.state
+            .lock()
+            .expect("activation lock poisoned")
+            .required
+            .clone()
+    }
+
     /// Activate a skill and return what the agent should read: the body, plus a
     /// bundle manifest when it ships one.
     ///
@@ -141,7 +152,7 @@ impl SkillActivation {
                     "[Skill:{name}] Already loaded earlier in this turn; see above."
                 ));
             }
-            narrow(&mut state, skill);
+            fold(&mut state, skill);
         }
         Ok(skill.content.clone() + &self.manifest(skill))
     }
@@ -174,12 +185,13 @@ impl SkillActivation {
     }
 }
 
-/// Fold a skill's `allowed-tools` into this turn's gate.
+/// Fold a skill's `allowed-tools` and `requires-tools` into this turn's state.
 ///
 /// The gate is the *union* across skills activated this turn. Two skills each
 /// naming a different tool must leave both callable, otherwise loading a second
 /// skill would silently disable the first.
-fn narrow(state: &mut State, skill: &SkillConfig) {
+fn fold(state: &mut State, skill: &SkillConfig) {
+    state.required.extend(skill.requires_tools.iter().cloned());
     let Some(allowed) = &skill.allowed_tools else {
         return;
     };
@@ -270,9 +282,45 @@ pub fn apply_gate(tools: &[ToolSpec], gate: Option<&BTreeSet<String>>) -> Vec<To
         .collect()
 }
 
+/// Add back the tools the active skills declared they require.
+///
+/// The one additive direction in the whole toolkit, and the counterpart to
+/// [`apply_gate`]: a skill that comes with instructions for driving a tool is
+/// useless if the gameplan's `tools:` list, or another skill's `allowed-tools`,
+/// left that tool out. It is still bounded by what the caller *registered* —
+/// *registered* is the source list, so a skill can reach a session's tools and
+/// never invent one. A name missing from *registered* is refused at
+/// [`Session::run`](crate::Session::run) rather than silently dropped here.
+pub fn admit_required(
+    tools: Vec<ToolSpec>,
+    registered: &[ToolSpec],
+    required: &BTreeSet<String>,
+) -> Vec<ToolSpec> {
+    let mut tools = tools;
+    for tool in registered {
+        if required.contains(&tool.name) && !tools.iter().any(|held| held.name == tool.name) {
+            tools.push(tool.clone());
+        }
+    }
+    tools
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TempDir;
+
+    /// A `demo/` skill directory shipping a `scripts/` bundle.
+    fn bundled(tag: &str, builtin: bool) -> (TempDir, SkillConfig) {
+        let dir = TempDir::new(tag);
+        dir.write("demo/scripts/run.sh", "echo hi\n");
+        let config = SkillConfig {
+            base_dir: Some(dir.join("demo")),
+            builtin,
+            ..skill("demo")
+        };
+        (dir, config)
+    }
 
     fn skill(name: &str) -> SkillConfig {
         SkillConfig {
@@ -413,6 +461,40 @@ mod tests {
     }
 
     #[test]
+    fn a_required_tool_comes_back_past_both_narrowings() {
+        // The additive direction: a skill's instructions for driving `cmd` are
+        // prose about nothing if a gameplan's `tools:` list, or another skill's
+        // `allowed-tools`, has already dropped it.
+        let act = activation(vec![SkillConfig {
+            allowed_tools: Some(vec!["read_file".into()]),
+            requires_tools: vec!["cmd".into()],
+            ..skill("a")
+        }]);
+        act.load("a").expect("loads");
+        assert_eq!(act.required(), ["cmd".to_string()].into_iter().collect());
+
+        let registered = [tool("cmd"), tool("read_file")];
+        let narrowed = apply_gate(&[tool("read_file")], act.gate().as_ref());
+        let admitted = admit_required(narrowed, &registered, &act.required());
+        assert_eq!(
+            admitted.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["read_file", "cmd"]
+        );
+    }
+
+    #[test]
+    fn a_required_tool_nobody_registered_is_not_invented_here() {
+        // Refusing it is `Session::run`'s job, before the first provider call.
+        // This layer has nothing to add back and must not fabricate a spec.
+        let required: BTreeSet<String> = ["write_file".to_string()].into_iter().collect();
+        let admitted = admit_required(vec![tool("cmd")], &[tool("cmd")], &required);
+        assert_eq!(
+            admitted.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["cmd"]
+        );
+    }
+
+    #[test]
     fn the_skill_tool_is_never_gated_out() {
         // An agent under a narrow skill must still be able to load another.
         let tools = [tool("cmd"), tool(SKILL_TOOL_NAME)];
@@ -460,31 +542,6 @@ mod tests {
         assert_eq!(registry.activation_for("Bob").names(), ["bob"]);
     }
 
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        /// A `demo/` skill directory shipping a `scripts/` bundle.
-        fn bundled(tag: &str, builtin: bool) -> (Self, SkillConfig) {
-            let root = std::env::temp_dir().join(format!("kerness-skillrt-{tag}"));
-            let _ = std::fs::remove_dir_all(&root);
-            let base = root.join("demo");
-            std::fs::create_dir_all(base.join("scripts")).expect("create bundle");
-            std::fs::write(base.join("scripts").join("run.sh"), "echo hi\n").expect("write script");
-            let config = SkillConfig {
-                base_dir: Some(base),
-                builtin,
-                ..skill("demo")
-            };
-            (TempDir(root), config)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     fn recording() -> (GrantPaths, Arc<Mutex<Vec<PathBuf>>>) {
         let granted = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&granted);
@@ -501,7 +558,7 @@ mod tests {
 
     #[test]
     fn a_builtin_bundle_is_listed_and_granted() {
-        let (_dir, config) = TempDir::bundled("granted", true);
+        let (_dir, config) = bundled("granted", true);
         let (grant, granted) = recording();
         let result = with_grant(config, grant).load("demo").expect("loads");
 
@@ -519,7 +576,7 @@ mod tests {
     #[test]
     fn an_untrusted_bundle_is_listed_but_not_granted() {
         // Activating a skill from an arbitrary path must not widen access.
-        let (_dir, config) = TempDir::bundled("untrusted", false);
+        let (_dir, config) = bundled("untrusted", false);
         let (grant, granted) = recording();
         let result = with_grant(config, grant).load("demo").expect("loads");
 

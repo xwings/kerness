@@ -102,32 +102,52 @@ class TestBuildMessages:
 
 
 class TestRoleChecks:
-    def test_the_two_roles_are_exclusive_and_participant_is_the_default(self):
+    def test_an_agent_on_its_own_is_always_a_participant(self):
+        """``role`` is the spec and ``position`` is the chair it selects, and
+        only ``Session.add_agent`` reads one into the other. An agent that has
+        been constructed but added nowhere therefore sits in no session at all,
+        which is a participant — the safe answer, and the one that keeps the
+        conductor's seat something a session grants rather than something a
+        constructor claims."""
         orchestrator = Agent(name="Orch", model="test/model", role="orchestrator")
-        participant = Agent(name="Alice", model="test/model", role="participant")
 
-        assert orchestrator.is_orchestrator is True
-        assert orchestrator.is_participant is False
-        assert participant.is_participant is True
-        assert participant.is_orchestrator is False
+        assert orchestrator.role == "orchestrator"
+        assert orchestrator.position == "participant"
+        assert orchestrator.is_participant is True
+        assert orchestrator.is_orchestrator is False
 
+    def test_an_unnamed_role_is_none_rather_than_a_default_string(self):
+        """Unset has to be distinguishable from ``"participant"`` written out:
+        the first takes the built-in role's prompt, the second is prose the
+        agent chose for itself."""
+        assert Agent(name="Alice", model="test/model").role is None
+        assert Agent(name="Alice", model="test/model").position == "participant"
         assert Agent(name="Alice", model="test/model").is_participant is True
 
-    def test_an_unknown_role_is_rejected(self):
-        """The dangerous outcome is not an error — it is the silent one. An
-        unrecognised role matches neither the orchestrator lookup nor
-        ``is_orchestrator``, so defaulting it to participant would quietly turn
-        the session's conductor into an extra debater. This asserts the loud
-        path wins."""
-        for role in ("orchestrater", "moderator"):
-            with pytest.raises(ValueError, match="Unknown agent role"):
-                Agent(name="Mod", model="test/model", role=role)
+    def test_any_string_is_a_role_because_prose_is_one(self):
+        """There is nothing to reject here. A role that is not a built-in name
+        and not a ``.md`` path is that agent's job written out, and prose seats
+        a participant however much it sounds like the other chair."""
+        agent = Agent(name="Mod", model="test/model", role="orchestrator, but sceptical")
+
+        assert agent.role == "orchestrator, but sceptical"
+        assert agent.position == "participant"
+
+    def test_position_is_read_only(self):
+        """It is derived from ``role`` at ``add_agent``, so writing it would be
+        writing an answer the session is about to overwrite — or worse, would
+        not."""
+        with pytest.raises(AttributeError):
+            Agent(name="Mod", model="test/model").position = "orchestrator"
 
 
 class TestReasoningEffort:
-    def test_the_level_defaults_to_high_and_round_trips_as_its_name(self):
-        """It sits beside the model because it is chosen with the model."""
-        assert Agent(name="Alice", model="test/model").reasoning_effort == "high"
+    def test_the_level_is_unset_until_named_and_round_trips_as_its_name(self):
+        """It sits beside the model because it is chosen with the model.
+
+        Unset is ``None``, not ``"high"``: the session's level fills it at
+        ``run()``, and a default written in here would shadow that."""
+        assert Agent(name="Alice", model="test/model").reasoning_effort is None
 
         agent = Agent(name="Alice", model="test/model", reasoning_effort="minimal")
         assert agent.reasoning_effort == "minimal"

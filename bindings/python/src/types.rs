@@ -8,7 +8,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use kerness::agent::Role;
 use kerness::gameplan::GameplanConfig;
 use kerness::harness::{
     AgentsSpec, HarnessSpec, LoopSpec, OrchestratorSpec, ParticipantSpec, PhaseSpec, ResultField,
@@ -17,6 +16,7 @@ use kerness::harness::{
 use kerness::persona::PersonaConfig;
 use kerness::provider::{ProviderResponse, ReasoningEffort};
 use kerness::pyfmt::repr_str;
+use kerness::role::{Position, RoleConfig};
 use kerness::session::Memories;
 use kerness::skill::loader::SkillConfig;
 use kerness::tooling::{Arguments, ToolCall, ToolHandler, ToolSpec};
@@ -388,7 +388,6 @@ impl PyProviderResponse {
         tool_calls=None,
         stop_reason=String::new(),
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn new(
         content: String,
         model: String,
@@ -661,42 +660,56 @@ impl PyAgent {
     }
 }
 
+/// An optional field as Python would write it: the quoted string, or `None`.
+fn repr_opt(value: Option<&str>) -> String {
+    match value {
+        Some(value) => repr_str(value),
+        None => "None".to_string(),
+    }
+}
+
 #[pymethods]
 impl PyAgent {
     #[new]
     #[pyo3(signature = (
         name,
-        model=String::new(),
-        reasoning_effort="high".to_string(),
-        persona=String::new(),
-        role="participant".to_string(),
-        language=String::new(),
-        system_prompt=String::new(),
+        model=None,
+        reasoning_effort=None,
+        persona=None,
+        role=None,
+        language=None,
+        system_prompt=None,
         provider=None,
         skills=None,
         memory=None,
+        workspace=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
-        model: String,
-        reasoning_effort: String,
-        persona: String,
-        role: String,
-        language: String,
-        system_prompt: String,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        persona: Option<String>,
+        role: Option<String>,
+        language: Option<String>,
+        system_prompt: Option<String>,
         provider: Option<Bound<'_, PyAny>>,
         skills: Option<Vec<String>>,
         memory: Option<String>,
+        workspace: Option<String>,
     ) -> PyResult<Self> {
         let provider = provider.filter(|object| !object.is_none());
         Ok(PyAgent {
             inner: Agent {
                 name,
                 model,
-                reasoning_effort: ReasoningEffort::parse(&reasoning_effort).raise()?,
+                reasoning_effort: match reasoning_effort {
+                    Some(level) => Some(ReasoningEffort::parse(&level).raise()?),
+                    None => None,
+                },
                 persona,
-                role: Role::parse(&role).raise()?,
+                role,
+                position: Position::Participant,
                 language,
                 system_prompt,
                 provider: match &provider {
@@ -705,6 +718,7 @@ impl PyAgent {
                 },
                 skills,
                 memory,
+                workspace,
             },
             provider: provider.map(Bound::unbind),
         })
@@ -720,66 +734,81 @@ impl PyAgent {
         self.inner.name = value;
     }
 
+    /// The model to call, or `None` to take the session's.
     #[getter]
-    fn model(&self) -> &str {
-        &self.inner.model
+    fn model(&self) -> Option<&str> {
+        self.inner.model.as_deref()
     }
 
     #[setter]
-    fn set_model(&mut self, value: String) {
+    fn set_model(&mut self, value: Option<String>) {
         self.inner.model = value;
     }
 
-    /// How hard this agent's model should think, as the word it was set with.
+    /// How hard this agent's model should think, as the word it was set with,
+    /// or `None` to take the session's.
     #[getter]
-    fn reasoning_effort(&self) -> &str {
-        self.inner.reasoning_effort.as_str()
+    fn reasoning_effort(&self) -> Option<&str> {
+        self.inner.reasoning_effort.map(|level| level.as_str())
     }
 
     #[setter]
-    fn set_reasoning_effort(&mut self, value: String) -> PyResult<()> {
-        self.inner.reasoning_effort = ReasoningEffort::parse(&value).raise()?;
+    fn set_reasoning_effort(&mut self, value: Option<String>) -> PyResult<()> {
+        self.inner.reasoning_effort = match value {
+            Some(level) => Some(ReasoningEffort::parse(&level).raise()?),
+            None => None,
+        };
         Ok(())
     }
 
     #[getter]
-    fn persona(&self) -> &str {
-        &self.inner.persona
+    fn persona(&self) -> Option<&str> {
+        self.inner.persona.as_deref()
     }
 
     #[setter]
-    fn set_persona(&mut self, value: String) {
+    fn set_persona(&mut self, value: Option<String>) {
         self.inner.persona = value;
     }
 
+    /// The role as it was written: a built-in name, a `.md` path, or prose.
+    /// `None` is a plain participant.
     #[getter]
-    fn role(&self) -> &str {
-        self.inner.role.as_str()
+    fn role(&self) -> Option<&str> {
+        self.inner.role.as_deref()
     }
 
     #[setter]
-    fn set_role(&mut self, value: String) -> PyResult<()> {
-        self.inner.role = Role::parse(&value).raise()?;
-        Ok(())
+    fn set_role(&mut self, value: Option<String>) {
+        self.inner.role = value;
+    }
+
+    /// Where this agent sits in the loop: `"participant"` or
+    /// `"orchestrator"`. Read-only, because it is `Session.add_agent` that
+    /// reads `role` and decides — an agent that has not been added anywhere is
+    /// always a participant.
+    #[getter]
+    fn position(&self) -> &str {
+        self.inner.position.as_str()
     }
 
     #[getter]
-    fn language(&self) -> &str {
-        &self.inner.language
+    fn language(&self) -> Option<&str> {
+        self.inner.language.as_deref()
     }
 
     #[setter]
-    fn set_language(&mut self, value: String) {
+    fn set_language(&mut self, value: Option<String>) {
         self.inner.language = value;
     }
 
     #[getter]
-    fn system_prompt(&self) -> &str {
-        &self.inner.system_prompt
+    fn system_prompt(&self) -> Option<&str> {
+        self.inner.system_prompt.as_deref()
     }
 
     #[setter]
-    fn set_system_prompt(&mut self, value: String) {
+    fn set_system_prompt(&mut self, value: Option<String>) {
         self.inner.system_prompt = value;
     }
 
@@ -820,6 +849,19 @@ impl PyAgent {
     #[setter]
     fn set_memory(&mut self, value: Option<String>) {
         self.inner.memory = value;
+    }
+
+    /// A directory this agent alone is confined to, which must sit inside the
+    /// session's workspace and narrows rather than replaces it. `None` leaves
+    /// the agent held to the session's.
+    #[getter]
+    fn workspace(&self) -> Option<&str> {
+        self.inner.workspace.as_deref()
+    }
+
+    #[setter]
+    fn set_workspace(&mut self, value: Option<String>) {
+        self.inner.workspace = value;
     }
 
     /// Whether this agent conducts the session.
@@ -880,23 +922,26 @@ impl PyAgent {
             && left.reasoning_effort == right.reasoning_effort
             && left.persona == right.persona
             && left.role == right.role
+            && left.position == right.position
             && left.language == right.language
             && left.system_prompt == right.system_prompt
             && left.skills == right.skills
             && left.memory == right.memory
+            && left.workspace == right.workspace
     }
 
     fn __repr__(&self) -> String {
         format!(
             "Agent(name={}, model={}, reasoning_effort={}, persona={}, role={}, \
-             language={}, system_prompt={})",
+             position={}, language={}, system_prompt={})",
             repr_str(&self.inner.name),
-            repr_str(&self.inner.model),
-            repr_str(self.inner.reasoning_effort.as_str()),
-            repr_str(&self.inner.persona),
-            repr_str(self.inner.role.as_str()),
-            repr_str(&self.inner.language),
-            repr_str(&self.inner.system_prompt),
+            repr_opt(self.inner.model.as_deref()),
+            repr_opt(self.inner.reasoning_effort.map(|level| level.as_str())),
+            repr_opt(self.inner.persona.as_deref()),
+            repr_opt(self.inner.role.as_deref()),
+            repr_str(self.inner.position.as_str()),
+            repr_opt(self.inner.language.as_deref()),
+            repr_opt(self.inner.system_prompt.as_deref()),
         )
     }
 }
@@ -1052,6 +1097,69 @@ impl PyPersonaConfig {
     }
 }
 
+// ----------------------------------------------------------------- RoleConfig
+
+/// A role file: its frontmatter, and the prompt its body is.
+#[pyclass(name = "RoleConfig", module = "kerness._core", get_all, set_all)]
+#[derive(Clone)]
+pub struct PyRoleConfig {
+    pub name: String,
+    /// `"participant"` or `"orchestrator"`, as written in the frontmatter.
+    pub position: String,
+    pub description: String,
+    pub content: String,
+}
+
+impl PyRoleConfig {
+    pub fn adopt(config: RoleConfig) -> Self {
+        PyRoleConfig {
+            name: config.name,
+            position: config.position.as_str().to_string(),
+            description: config.description,
+            content: config.content,
+        }
+    }
+}
+
+#[pymethods]
+impl PyRoleConfig {
+    #[new]
+    #[pyo3(signature = (
+        name=String::new(),
+        position="participant".to_string(),
+        description=String::new(),
+        content=String::new(),
+    ))]
+    fn new(name: String, position: String, description: String, content: String) -> PyResult<Self> {
+        // Parsed and discarded: constructing a `RoleConfig` with a position no
+        // session could seat would be a value that fails only much later.
+        Position::parse(&position).raise()?;
+        Ok(PyRoleConfig {
+            name,
+            position,
+            description,
+            content,
+        })
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other.extract::<PyRoleConfig>().is_ok_and(|other| {
+            other.name == self.name
+                && other.position == self.position
+                && other.description == self.description
+                && other.content == self.content
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RoleConfig(name={}, position={})",
+            repr_str(&self.name),
+            repr_str(&self.position)
+        )
+    }
+}
+
 // ---------------------------------------------------------------- SkillConfig
 
 /// One `SKILL.md` file.
@@ -1069,6 +1177,7 @@ impl PySkillConfig {
         description=String::new(),
         content=String::new(),
         allowed_tools=None,
+        requires_tools=Vec::new(),
         base_dir=None,
         builtin=false,
     ))]
@@ -1077,6 +1186,7 @@ impl PySkillConfig {
         description: String,
         content: String,
         allowed_tools: Option<Vec<String>>,
+        requires_tools: Vec<String>,
         base_dir: Option<PathBuf>,
         builtin: bool,
     ) -> Self {
@@ -1086,6 +1196,7 @@ impl PySkillConfig {
                 description,
                 content,
                 allowed_tools,
+                requires_tools,
                 base_dir,
                 builtin,
             },
@@ -1136,6 +1247,19 @@ impl PySkillConfig {
     #[setter]
     fn set_allowed_tools(&mut self, value: Option<Vec<String>>) {
         self.inner.allowed_tools = value;
+    }
+
+    /// The tools this skill cannot work without, as a tuple. A plain tuple
+    /// rather than an optional one: absent and empty both mean "requires
+    /// nothing", so there is no second state to keep apart.
+    #[getter]
+    fn requires_tools<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.inner.requires_tools)
+    }
+
+    #[setter]
+    fn set_requires_tools(&mut self, value: Vec<String>) {
+        self.inner.requires_tools = value;
     }
 
     #[getter]
@@ -1373,7 +1497,6 @@ impl PyLoopSpec {
         orchestrator_retries=2,
         verdict_rethink=true,
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn new(
         max_turns: i64,
         max_rounds: i64,
@@ -1556,7 +1679,6 @@ impl PyHarnessSpec {
         skills=None,
         result=None,
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         description: String,

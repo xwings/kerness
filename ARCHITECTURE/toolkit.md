@@ -5,7 +5,7 @@
 Tools, end to end: what a tool is (`ToolSpec`), how a call is recognised in a
 model's reply (`parse_tool_calls`), how tools are described to a model that has
 no native tool support (`format_tools_prompt`), and how a call is executed and
-its result shaped (`ToolDispatcher`). Serves **M1**.
+its result shaped (`ToolDispatcher`).
 
 `tooling.rs` owns the data and the text parsing; `toolkit.rs` owns dispatch.
 
@@ -19,8 +19,8 @@ its result shaped (`ToolDispatcher`). Serves **M1**.
 | ---- | ---- |
 | `crates/kerness/src/tooling.rs` | `ToolSpec`, `ToolCall`, `ToolHandler`, parsing, prompt rendering |
 | `crates/kerness/src/toolkit.rs` | `ToolDispatcher`, `ToolResult`, `resolve` |
-| `bindings/python/src/types.rs:65,162,176,291` | `PyToolCall`, `PyToolHandler`, `PyToolSpec`, `PyToolResult` |
-| `bindings/python/src/runtime.rs:172` | `PyToolDispatcher` |
+| `bindings/python/src/types.rs:70,166,180,296` | `PyToolCall`, `PyToolHandler`, `PyToolSpec`, `PyToolResult` |
+| `bindings/python/src/runtime.rs:162` | `PyToolDispatcher` |
 | `bindings/python/kerness/{tooling,toolkit}.py` | re-export shims |
 
 ## Key Types and Entry Points
@@ -37,7 +37,7 @@ its result shaped (`ToolDispatcher`). Serves **M1**.
 - `crates/kerness/src/tooling.rs:161` — `parse_tool_calls(text)` — a single-pass
   fence scanner over the reply; returns every call it finds, including invalid
   ones.
-- `crates/kerness/src/tooling.rs:329` — `format_tools_prompt(tools)` — the tool
+- `crates/kerness/src/tooling.rs:331` — `format_tools_prompt(tools)` — the tool
   instructions for a model without native tool support.
 - `crates/kerness/src/toolkit.rs:54` — `ToolDispatcher` — holds a `ToolsFor`
   closure rather than a tool list, so the available tools can change per turn as
@@ -46,7 +46,7 @@ its result shaped (`ToolDispatcher`). Serves **M1**.
   arguments, calls the handler, and turns any error into a `ToolResult` the model
   can read. It does not propagate: a failing tool is information for the model,
   not a failed session.
-- `crates/kerness/src/toolkit.rs:111` — `resolve(tools, allowed)` — the
+- `crates/kerness/src/toolkit.rs:108` — `resolve(tools, allowed)` — the
   allowed-list narrowing, shared with the skill gate.
 
 `ToolSpec` implements `PartialEq` (`tooling.rs:87`) and `Debug` (`:97`) by hand,
@@ -83,7 +83,7 @@ cargo test -p kerness toolkit                                       # pass = 0 f
 - `bindings/python/tests/test_toolkit.py:93` asserts a handler that raises becomes a `ToolResult`
   carrying the error rather than propagating, and `:38` that the actor reaches
   only the handlers that asked for it.
-- `bindings/python/tests/test_skill_runtime.py:119` calls `spec.handler({"name": "a"})` directly —
+- `bindings/python/tests/test_skill_runtime.py:120` calls `spec.handler({"name": "a"})` directly —
   the `Skill` tool's handler is a Rust closure, so this is what proves
   `PyToolHandler` ([bindings.md](bindings.md)) makes it callable from Python.
 

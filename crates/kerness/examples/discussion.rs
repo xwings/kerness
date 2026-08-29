@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use kerness::agent::{Agent, Role};
+use kerness::agent::Agent;
 use kerness::channel::ConsoleChannel;
 use kerness::error::Result;
 use kerness::provider::{OpenRouterConfig, OpenRouterProvider};
@@ -53,15 +53,16 @@ fn main() -> Result<()> {
             "Academic who studies programming language theory",
         ),
     ] {
-        session.add_participant(Agent {
-            persona: persona.to_string(),
-            ..Agent::new(name, model)
-        });
+        session.add_agent(Agent {
+            persona: Some(persona.to_string()),
+            ..Agent::new(name).with_model(model)
+        })?;
     }
-    session.add_orchestrator(Agent {
-        role: Role::Orchestrator,
-        ..Agent::new("Facilitator", "openai/gpt-4o")
-    })?;
+    session.add_agent(
+        Agent::new("Facilitator")
+            .with_model("openai/gpt-4o")
+            .with_role("orchestrator"),
+    )?;
 
     // The prompt carries one line per skill — the name and the description. The
     // body only arrives if an agent calls the `Skill` tool for it.

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use kerness::agent::{Agent, Role};
+use kerness::agent::Agent;
 use kerness::channel::ConsoleChannel;
 use kerness::error::Result;
 use kerness::provider::{Provider, ProviderBase, ProviderResponse, ReasoningEffort};
@@ -119,12 +119,13 @@ fn main() -> Result<()> {
         ..Default::default()
     })?;
 
-    session.add_participant(Agent::new("Alice", "canned-model"));
-    session.add_participant(Agent::new("Bob", "canned-model"));
-    session.add_orchestrator(Agent {
-        role: Role::Orchestrator,
-        ..Agent::new("Mod", "canned-model")
-    })?;
+    session.add_agent(Agent::new("Alice").with_model("canned-model"))?;
+    session.add_agent(Agent::new("Bob").with_model("canned-model"))?;
+    session.add_agent(
+        Agent::new("Mod")
+            .with_model("canned-model")
+            .with_role("orchestrator"),
+    )?;
 
     let result = session.run()?;
 

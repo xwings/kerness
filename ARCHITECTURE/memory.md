@@ -5,7 +5,7 @@
 A Markdown file agents read at the start of a turn and append to during it. It
 is the only state that outlives a turn without being in the conversation, and it
 is deliberately free-form prose rather than a key-value store: what an agent
-writes there goes into the next agent's prompt verbatim. Serves **M1**.
+writes there goes into the next agent's prompt verbatim.
 
 ## Status
 
@@ -16,7 +16,7 @@ writes there goes into the next agent's prompt verbatim. Serves **M1**.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/memory.rs` | the file and its four operations |
-| `bindings/python/src/types.rs:914` | `PyMemory`, and the owned-vs-session distinction |
+| `bindings/python/src/types.rs:981` | `PyMemory`, and the owned-vs-session distinction |
 | `bindings/python/kerness/memory.py` | re-export shim |
 
 ## Key Types and Entry Points
@@ -30,7 +30,7 @@ writes there goes into the next agent's prompt verbatim. Serves **M1**.
   raw append versus an append that adds the entry separator; the second is what
   the `write_memory` tool calls.
 - `crates/kerness/src/memory.rs:90` — `write(content)` — replaces the file.
-- `bindings/python/src/types.rs:921` — `of_session(memories)` on `PyMemory` — a
+- `bindings/python/src/types.rs:987` — `of_session(memories)` on `PyMemory` — a
   memory handle backed by the session's live store rather than an owned copy.
 
 ### Owned versus session-backed
@@ -45,7 +45,7 @@ not its text, so two agents pointed at one file both see each other's writes.
 ## Interactions
 
 - Rendered into a system prompt by [prompting.md](prompting.md)'s `memory_block`.
-- Owned per session by [session.md](session.md)'s `Memories` (`session.rs:176`).
+- Owned per session by [session.md](session.md)'s `Memories` (`session.rs:193`).
 - Written through the `write_memory` tool registered by [toolkit.md](toolkit.md).
 - Memory markers in a reply are extracted by [utils.md](utils.md)'s
   `parse_memory_markers`.
@@ -60,7 +60,7 @@ cargo test -p kerness memory                                       # pass = 0 fa
 - `bindings/python/tests/test_memory.py:7` — `test_load_reads_what_is_there_and_creates_what_is_not`;
   `:43` `test_an_entry_is_stored_verbatim_one_blank_line_apart`; `:63`
   `test_nothing_reaches_disk_until_there_is_something_to_write`.
-- `bindings/python/tests/test_session.py:1522` — `test_per_agent_memory` — and `:1570`
+- `bindings/python/tests/test_session.py:1742` — `test_per_agent_memory` — and `:1790`
   `test_agent_without_memory_uses_session_memory`: the owned-versus-session
   distinction, observed through a live session.
 

@@ -7,7 +7,6 @@ speaking; this module knows what a system prompt is made of — base prompt,
 persona, skills index, memory block, tool instructions, reasoning note — and in
 what order. `PromptAssembler` takes the parts as callbacks so the session can
 supply per-agent values without this module knowing anything about sessions.
-Serves **M2**.
 
 ## Status
 
@@ -18,29 +17,29 @@ Serves **M2**.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/prompting.rs` | `PromptAssembler`, `memory_block`, the memory constants |
-| `bindings/python/src/runtime.rs:210` | `PyPromptAssembler` |
+| `bindings/python/src/runtime.rs:200` | `PyPromptAssembler` |
 | `bindings/python/kerness/prompting.py` | re-export shim |
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/prompting.rs:53` — `PromptAssembler<'a>` — borrows the three
+- `crates/kerness/src/prompting.rs:52` — `PromptAssembler<'a>` — borrows the three
   callbacks; built per call site, not stored.
-- `crates/kerness/src/prompting.rs:74` — `new(skills_for, memory_for, tools_for, show_reasoning)` —
+- `crates/kerness/src/prompting.rs:73` — `new(skills_for, memory_for, tools_for, show_reasoning)` —
   the required parts.
-- `crates/kerness/src/prompting.rs:91` — `with_dialect(f)` — per-agent tool
+- `crates/kerness/src/prompting.rs:90` — `with_dialect(f)` — per-agent tool
   dialect, which decides whether the tool instructions go into the prompt at all
   or into the provider's native tool field.
-- `crates/kerness/src/prompting.rs:97` — `with_memory_writable(flag)` — appends
+- `crates/kerness/src/prompting.rs:96` — `with_memory_writable(flag)` — appends
   `MEMORY_WRITE_HINT` when the agent may write.
-- `crates/kerness/src/prompting.rs:126` — `orchestrator_system(agent, base)` — the
+- `crates/kerness/src/prompting.rs:125` — `orchestrator_system(agent, base)` — the
   orchestrator's prompt, which differs from a participant's.
-- `crates/kerness/src/prompting.rs:143` — `participant_messages(...)` — a
+- `crates/kerness/src/prompting.rs:141` — `participant_messages(...)` — a
   participant's system prompt plus history.
-- `crates/kerness/src/prompting.rs:167` — `messages_for(...)` — the entry the
+- `crates/kerness/src/prompting.rs:165` — `messages_for(...)` — the entry the
   runtime actually calls; branches on role.
-- `crates/kerness/src/prompting.rs:16` — `MEMORY_HEADER` / `:22`
+- `crates/kerness/src/prompting.rs:16` — `MEMORY_HEADER` / `:21`
   `MEMORY_WRITE_HINT` — the two strings a caller may want to match on.
-- `crates/kerness/src/prompting.rs:30` — `memory_block(content, writable)` — the
+- `crates/kerness/src/prompting.rs:29` — `memory_block(content, writable)` — the
   memory section, or nothing when the memory is empty.
 
 The `memory_for` callback returns the agent's `Memory`, not its text; the

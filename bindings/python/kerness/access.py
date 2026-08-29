@@ -96,6 +96,23 @@ class AccessPolicy:
     approve_prompt: ApprovePrompt | None = None
     auto_approve_prefixes: list[str] = field(default_factory=list)
 
+    #: The directory the session is confined to, or ``None`` for the whole
+    #: filesystem. This is not an allowlist entry and it grants nothing: an
+    #: allowlist answers *may I*, and the workspace answers *is this inside the
+    #: world*. It is checked first and it can only subtract, so a path outside
+    #: it is refused even when an ``allowed_dirs`` entry or an approver would
+    #: have admitted it. It also becomes the working directory a command starts
+    #: in.
+    workspace: str | Path | None = None
+
+    #: Workspaces for named agents, each of which *narrows* :attr:`workspace`.
+    #: The one option that does not simply override the session's: a replaceable
+    #: workspace would let an agent hand itself more of the filesystem than the
+    #: session was given. A workspace outside the session's is refused at
+    #: :meth:`~kerness.session.Session.run`, naming the agent. Usually written
+    #: by passing ``workspace=`` to an agent rather than filled in here.
+    agent_workspaces: dict[str, str | Path] = field(default_factory=dict)
+
     allowed_programs: list[str] = field(default_factory=list)
     allowed_commands: list[str] = field(default_factory=list)
     allowed_prefixes: list[str] = field(default_factory=list)

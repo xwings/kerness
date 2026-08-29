@@ -3,12 +3,12 @@
 use serde_json::{json, Map, Value};
 
 use super::{
-    answering_model, attach_reasoning_effort, attach_tool_schemas, bearer_headers,
-    chat_completions_payload, openai_response, reported_usage, Provider, ProviderBase,
-    ProviderResponse, ReasoningEffort,
+    attach_reasoning_effort, attach_tool_schemas, bearer_headers, chat_completions_payload,
+    post_chat_completions, Provider, ProviderBase, ProviderResponse, ReasoningEffort,
+    DEFAULT_BACKOFF_SEC, DEFAULT_REQUEST_TIMEOUT_SEC, DEFAULT_RETRIES, DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
 };
 use crate::error::{Error, Result};
-use crate::http;
 use crate::jsonschema::ensure_strict;
 use crate::pyfmt;
 use crate::tooling::ToolSpec;
@@ -45,12 +45,12 @@ impl Default for OpenAiConfig {
         OpenAiConfig {
             api_key: String::new(),
             base_url: OPENAI_BASE_URL.to_string(),
-            timeout_sec: 60,
-            retries: 2,
-            backoff_sec: 2.0,
+            timeout_sec: DEFAULT_REQUEST_TIMEOUT_SEC,
+            retries: DEFAULT_RETRIES,
+            backoff_sec: DEFAULT_BACKOFF_SEC,
             interval_sec: None,
-            temperature: 1.0,
-            top_p: 1.0,
+            temperature: DEFAULT_TEMPERATURE,
+            top_p: DEFAULT_TOP_P,
             max_tokens: None,
             output_schema: None,
             strict_json_schema: true,
@@ -140,32 +140,19 @@ impl Provider for OpenAiProvider {
         attach_reasoning_effort(&mut payload, self.effective_effort(effort));
         attach_tool_schemas(&mut payload, self.effective_dialect(), tools);
 
-        let url = format!("{}/chat/completions", self.base_url);
-        let response = http::post_json(
-            &url,
-            &Value::Object(payload),
+        let mut answer = post_chat_completions(
+            &self.base_url,
+            payload,
             &bearer_headers(&self.api_key),
             self.timeout_sec,
+            model,
         )?;
-
-        let (content, tool_calls, stop_reason) = openai_response(&response, model)?;
         // A tool-calling turn has no JSON body to validate; the structured
         // answer comes on the turn after the results are fed back.
-        let structured = if self.response_format.is_some() && tool_calls.is_empty() {
-            Some(decode_structured(&content, &response, model)?)
-        } else {
-            None
-        };
-
-        Ok(ProviderResponse {
-            content,
-            model: answering_model(&response, model),
-            usage: reported_usage(&response),
-            structured,
-            tool_calls,
-            stop_reason,
-            raw: response,
-        })
+        if self.response_format.is_some() && answer.tool_calls.is_empty() {
+            answer.structured = Some(decode_structured(&answer.content, &answer.raw, model)?);
+        }
+        Ok(answer)
     }
 }
 

@@ -5,7 +5,17 @@
 A persona is a Markdown file describing who an agent is — its voice, priorities,
 and constraints. This module loads one, from the built-ins or from a path
 searched relative to the gameplan, and renders it into the block that goes into
-the agent's system prompt. Serves **M2**.
+the agent's system prompt.
+
+A persona and a [role](role.md) coexist and divide cleanly:
+
+| | answers | consumed by |
+| --- | --- | --- |
+| `role` | *what is your position and job in this session* | the loop — dispatch, prompt base, turn order |
+| `persona` | *who are you — background, expertise, voice* | the prompt only |
+
+An agent can be the orchestrator and a devil's advocate at once. Nothing a
+persona says can change where its agent sits.
 
 ## Status
 
@@ -17,7 +27,7 @@ the agent's system prompt. Serves **M2**.
 | ---- | ---- |
 | `crates/kerness/src/persona.rs` | loading, path resolution, and prompt rendering |
 | `crates/kerness/assets/personas/*.md` | the built-in personas |
-| `bindings/python/src/types.rs:973` | `PyPersonaConfig` |
+| `bindings/python/src/types.rs:1041` | `PyPersonaConfig` |
 | `bindings/python/kerness/persona_loader.py` | re-export shim |
 
 ## Key Types and Entry Points
@@ -27,12 +37,12 @@ the agent's system prompt. Serves **M2**.
 - `crates/kerness/src/persona.rs:36` — `load_persona(path, search)` — `search` is
   the ordered list of directories tried before the built-ins, which is how a
   gameplan can ship personas beside it.
-- `crates/kerness/src/persona.rs:89` — `resolve_persona_path(path, search)` —
+- `crates/kerness/src/persona.rs:87` — `resolve_persona_path(path, search)` —
   separated from loading so a caller can report which file would be used without
   reading it, and so path resolution is testable against traversal on its own.
 - `crates/kerness/src/persona.rs:64` — `format_persona_for_prompt(config)` — the
   block as the agent sees it.
-- `crates/kerness/src/persona.rs:79` — `list_builtin_personas()` — enumerated from
+- `crates/kerness/src/persona.rs:82` — `list_builtin_personas()` — enumerated from
   disk, like the other asset lists.
 
 ## Interactions

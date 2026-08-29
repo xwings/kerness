@@ -158,7 +158,7 @@ impl<'a> PromptAssembler<'a> {
         Ok(messages)
     }
 
-    /// Assemble the message list for any agent, by role.
+    /// Assemble the message list for any agent, by position.
     ///
     /// *base_prompt* is the orchestrator's gameplan prompt, or the default
     /// participant prompt.
@@ -185,7 +185,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::agent::Role;
 
     const FILLED: &str = "# Memory\n- a prior note\n";
 
@@ -203,10 +202,7 @@ mod tests {
     }
 
     fn orchestrator() -> Agent {
-        Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "m")
-        }
+        Agent::new("Mod").with_model("m").with_role("orchestrator")
     }
 
     fn index_of(haystack: &str, needle: &str) -> usize {
@@ -276,9 +272,9 @@ mod tests {
     #[test]
     fn a_participants_persona_and_language_survive() {
         let agent = Agent {
-            persona: "Engineer".to_string(),
-            language: "French".to_string(),
-            ..Agent::new("Bob", "m")
+            persona: Some("Engineer".to_string()),
+            language: Some("French".to_string()),
+            ..Agent::new("Bob").with_model("m")
         };
         let messages = assembler()
             .participant_messages(&agent, &[], "BASE")
@@ -298,7 +294,7 @@ mod tests {
             None,
         );
         let messages = assembler
-            .participant_messages(&Agent::new("Bob", "m"), &[], "BASE")
+            .participant_messages(&Agent::new("Bob").with_model("m"), &[], "BASE")
             .unwrap();
         let system = messages[0]["content"].as_str().unwrap();
 
@@ -309,8 +305,8 @@ mod tests {
     #[test]
     fn an_agents_own_system_prompt_overrides_the_default() {
         let agent = Agent {
-            system_prompt: "CUSTOM".to_string(),
-            ..Agent::new("Bob", "m")
+            system_prompt: Some("CUSTOM".to_string()),
+            ..Agent::new("Bob").with_model("m")
         };
         let messages = assembler()
             .participant_messages(&agent, &[], "DEFAULT")
@@ -324,7 +320,7 @@ mod tests {
     #[test]
     fn show_reasoning_reaches_the_participant_prompt() {
         // `None` says nothing at all, which is not the same as saying no.
-        let agent = Agent::new("Bob", "m");
+        let agent = Agent::new("Bob").with_model("m");
         let system = |flag| {
             let assembler =
                 PromptAssembler::new(|_| String::new(), |_| String::new(), Vec::new, flag);
@@ -338,11 +334,11 @@ mod tests {
     }
 
     #[test]
-    fn messages_for_routes_by_role() {
+    fn messages_for_routes_by_position() {
         // The orchestrator's prompt is used verbatim; a participant's is composed.
         let participant = Agent {
-            persona: "Engineer".to_string(),
-            ..Agent::new("Bob", "m")
+            persona: Some("Engineer".to_string()),
+            ..Agent::new("Bob").with_model("m")
         };
         let assembler = assembler();
 
@@ -418,7 +414,7 @@ mod tests {
             None,
         );
         let messages = assembler
-            .participant_messages(&Agent::new("Bob", "m"), &[], "BASE")
+            .participant_messages(&Agent::new("Bob").with_model("m"), &[], "BASE")
             .unwrap();
         assert!(messages[0]["content"]
             .as_str()
@@ -442,10 +438,10 @@ mod tests {
         });
 
         let native = assembler
-            .participant_messages(&Agent::new("Native", "m"), &[], "B")
+            .participant_messages(&Agent::new("Native").with_model("m"), &[], "B")
             .unwrap();
         let fenced = assembler
-            .participant_messages(&Agent::new("Fenced", "m"), &[], "B")
+            .participant_messages(&Agent::new("Fenced").with_model("m"), &[], "B")
             .unwrap();
 
         assert!(!native[0]["content"]

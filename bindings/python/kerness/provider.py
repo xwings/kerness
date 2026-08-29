@@ -20,6 +20,15 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from kerness._core import (
+    CLAUDE_BASE_URL,
+    DEFAULT_BACKOFF_SEC,
+    DEFAULT_CLAUDE_MAX_TOKENS,
+    DEFAULT_REQUEST_TIMEOUT_SEC,
+    DEFAULT_RETRIES,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    OPENAI_BASE_URL,
+    OPENROUTER_BASE_URL,
     ProviderCore,
     ProviderResponse,
     _convert_messages_for_claude,
@@ -32,6 +41,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from kerness.tooling import ToolSpec
 
 __all__ = [
+    "CLAUDE_BASE_URL",
+    "DEFAULT_BACKOFF_SEC",
+    "DEFAULT_CLAUDE_MAX_TOKENS",
+    "DEFAULT_REQUEST_TIMEOUT_SEC",
+    "DEFAULT_RETRIES",
+    "DEFAULT_TEMPERATURE",
+    "DEFAULT_TOP_P",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_BASE_URL",
     "ClaudeOAuthProvider",
     "ClaudeProvider",
     "CustomProvider",
@@ -84,7 +102,7 @@ class Provider(ABC):
     #: Dialect this provider speaks natively.  Subclasses override.
     tool_dialect: ToolDialect = ToolDialect.TEXT
 
-    def __init__(self, retries: int = 2, backoff_sec: float = 2.0,
+    def __init__(self, retries: int = DEFAULT_RETRIES, backoff_sec: float = DEFAULT_BACKOFF_SEC,
                  interval_sec: float | None = None) -> None:
         self._core = ProviderCore(retries, backoff_sec, interval_sec)
 
@@ -201,19 +219,19 @@ class Provider(ABC):
 class OpenRouterProvider(Provider):
     """OpenRouter API provider."""
 
-    DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+    DEFAULT_BASE_URL = OPENROUTER_BASE_URL
     tool_dialect = ToolDialect.OPENAI
 
     def __init__(
         self,
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
         max_tokens: int | None = None,
         app_url: str = "",
         app_name: str = "",
@@ -247,19 +265,19 @@ class OpenAIProvider(Provider):
     checked was JSON, so the caller gets the model instance rather than a dict.
     """
 
-    DEFAULT_BASE_URL = "https://api.openai.com/v1"
+    DEFAULT_BASE_URL = OPENAI_BASE_URL
     tool_dialect = ToolDialect.OPENAI
 
     def __init__(
         self,
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
         max_tokens: int | None = None,
         output_type: type[Any] | None = None,
         strict_json_schema: bool = True,
@@ -320,12 +338,12 @@ class OpenAIOAuthProvider(OpenAIProvider):
         self,
         oauth_token: str,
         base_url: str = OpenAIProvider.DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
         max_tokens: int | None = None,
         output_type: type[Any] | None = None,
         strict_json_schema: bool = True,
@@ -350,19 +368,19 @@ class OpenAIOAuthProvider(OpenAIProvider):
 class ClaudeProvider(Provider):
     """Anthropic Claude API provider."""
 
-    DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
+    DEFAULT_BASE_URL = CLAUDE_BASE_URL
     tool_dialect = ToolDialect.ANTHROPIC
 
     def __init__(
         self,
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        max_tokens: int = 4096,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_CLAUDE_MAX_TOKENS,
     ) -> None:
         self._core = ProviderCore.claude(
             api_key,
@@ -393,12 +411,12 @@ class ClaudeOAuthProvider(ClaudeProvider):
         self,
         oauth_token: str,
         base_url: str = ClaudeProvider.DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        max_tokens: int = 4096,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_CLAUDE_MAX_TOKENS,
     ) -> None:
         self._core = ProviderCore.claude(
             oauth_token,
@@ -451,12 +469,12 @@ class CustomProvider(Provider):
         url: str,
         api_key: str,
         model_config: dict[str, Any] | None = None,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
         max_tokens: int | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,

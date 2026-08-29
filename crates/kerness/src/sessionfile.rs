@@ -66,7 +66,7 @@ impl SessionSnapshot {
 ///
 /// Participants are sorted because registration order is not part of what makes
 /// two runs the same session, and refusing to resume over a reordered
-/// `add_participant` sequence would be a false alarm.
+/// `add_agent` sequence would be a false alarm.
 pub fn identity_for(
     gameplan: &str,
     topic: &str,
@@ -253,33 +253,13 @@ fn message_from_value(data: &Value) -> Message {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
+
     use crate::conversation::Conversation;
+    use crate::testing::TempDir;
 
     /// A directory that removes itself, so these tests leave no trace either.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("kerness-sessionfile-{tag}"));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(path)
-        }
-
-        fn join(&self, name: &str) -> PathBuf {
-            self.0.join(name)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     fn identity() -> Map<String, Value> {
         identity_for(
             "debate",
@@ -422,7 +402,7 @@ mod tests {
 
     #[test]
     fn the_same_run_passes_however_it_was_registered() {
-        // Participants are sorted because add_participant order is not what
+        // Participants are sorted because add_agent order is not what
         // makes two runs the same session. Refusing over it would be a false
         // alarm on a script whose calls were merely reordered.
         check_identity(&identity(), &identity()).expect("the same run");

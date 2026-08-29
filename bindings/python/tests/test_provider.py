@@ -1,5 +1,6 @@
 """Tests for kerness.provider."""
 
+import inspect
 from typing import Literal
 from unittest.mock import patch
 
@@ -8,6 +9,15 @@ from pydantic import BaseModel
 
 from kerness.exceptions import ProviderError, ProviderHTTPError
 from kerness.provider import (
+    CLAUDE_BASE_URL,
+    DEFAULT_BACKOFF_SEC,
+    DEFAULT_CLAUDE_MAX_TOKENS,
+    DEFAULT_REQUEST_TIMEOUT_SEC,
+    DEFAULT_RETRIES,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    OPENAI_BASE_URL,
+    OPENROUTER_BASE_URL,
     ClaudeOAuthProvider,
     ClaudeProvider,
     CustomProvider,
@@ -736,3 +746,52 @@ class TestReasoningEffort:
         EffortUnaware().chat_with_retries("m", [], purpose="turn")
         Aware().chat_with_retries("m", [], purpose="turn", reasoning_effort="low")
         assert seen == ["no kwarg", "low"]
+
+
+class TestSharedDefaults:
+    """The request defaults are declared once, in Rust, and named on both sides.
+
+    Each built-in constructor writes these numbers into its own signature, so
+    without this the wheel could ship a timeout the crate does not use and
+    nothing would say so.
+    """
+
+    def test_the_constants_carry_the_frameworks_values(self):
+        assert DEFAULT_REQUEST_TIMEOUT_SEC == 60
+        assert DEFAULT_RETRIES == 2
+        assert DEFAULT_BACKOFF_SEC == 2.0
+        assert DEFAULT_TEMPERATURE == 1.0
+        assert DEFAULT_TOP_P == 1.0
+        assert DEFAULT_CLAUDE_MAX_TOKENS == 4096
+        assert OPENAI_BASE_URL == "https://api.openai.com/v1"
+        assert OPENROUTER_BASE_URL == "https://openrouter.ai/api/v1"
+        assert CLAUDE_BASE_URL == "https://api.anthropic.com/v1"
+
+    @pytest.mark.parametrize(
+        ("cls", "base_url"),
+        [
+            (OpenAIProvider, OPENAI_BASE_URL),
+            (OpenRouterProvider, OPENROUTER_BASE_URL),
+            (ClaudeProvider, CLAUDE_BASE_URL),
+        ],
+    )
+    def test_every_constructor_defaults_to_the_constants(self, cls, base_url):
+        signature = inspect.signature(cls.__init__).parameters
+        assert signature["base_url"].default == base_url
+        assert signature["timeout_sec"].default == DEFAULT_REQUEST_TIMEOUT_SEC
+        assert signature["retries"].default == DEFAULT_RETRIES
+        assert signature["backoff_sec"].default == DEFAULT_BACKOFF_SEC
+        assert signature["temperature"].default == DEFAULT_TEMPERATURE
+
+    def test_the_two_defaults_only_one_family_takes(self):
+        """``top_p`` is chat-completions only, and the reply ceiling is a
+        constant on exactly one backend: Anthropic requires the field, so there
+        is no "unset" to send, while OpenAI omits it and lets the model decide.
+        """
+        openai = inspect.signature(OpenAIProvider.__init__).parameters
+        assert openai["top_p"].default == DEFAULT_TOP_P
+        assert openai["max_tokens"].default is None
+
+        claude = inspect.signature(ClaudeProvider.__init__).parameters
+        assert claude["max_tokens"].default == DEFAULT_CLAUDE_MAX_TOKENS
+        assert "top_p" not in claude

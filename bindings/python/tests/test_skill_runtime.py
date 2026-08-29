@@ -32,8 +32,9 @@ def activation(*skills, grant=None):
 
 class TestIndex:
     def test_one_line_per_skill_naming_the_body_but_not_carrying_it(self):
-        """Names and descriptions only, plus how to fetch the rest — the whole
-        point of the milestone."""
+        """Names and descriptions only, plus how to fetch the rest. Carrying
+        every body in the index would spend the context the `Skill` tool exists
+        to save."""
         index = format_skills_index([skill("a", "Alpha."), skill("b", "Beta.")])
 
         assert "- a: Alpha." in index

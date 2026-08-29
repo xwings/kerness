@@ -53,24 +53,25 @@ def run_bid_review_session(
         max_turns=12,
     )
 
-    session.add_participant(
+    session.add_agent(
         name="Procurement Lead",
         model=model,
         persona="Procurement manager focused on commercial terms and delivery risk.",
     )
-    session.add_participant(
+    session.add_agent(
         name="Technical Architect",
         model=model,
         persona="Senior architect focused on feasibility, integration, and maintainability.",
     )
-    session.add_participant(
+    session.add_agent(
         name="Finance Analyst",
         model=model,
         persona="Finance analyst focused on cost realism and budget compliance.",
     )
-    session.add_orchestrator(
+    session.add_agent(
         name="Bid Committee Chair",
         model=model,
+        role="orchestrator",
         persona="Neutral facilitator who drives evidence-based conclusions.",
     )
 

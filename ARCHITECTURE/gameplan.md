@@ -6,9 +6,9 @@ A gameplan is a Markdown file whose YAML frontmatter is the harness contract and
 whose body is the orchestrator's prose manual. This module loads one — by
 built-in name or by path — splits it, hands the frontmatter to
 [harness.md](harness.md), and keeps the body as the text the orchestrator is
-given. Serves **M2**.
+given.
 
-`assets.rs` is the other half: the built-in gameplans, personas, and skills that
+`assets.rs` is the other half: the built-in gameplans, roles, personas, and skills that
 ship with the framework, and the three-step resolution of where they live.
 
 ## Status
@@ -22,29 +22,29 @@ ship with the framework, and the three-step resolution of where they live.
 | `crates/kerness/src/gameplan.rs` | loading, splitting, and the built-in list |
 | `crates/kerness/src/assets.rs` | the assets root and Markdown-stem enumeration |
 | `crates/kerness/assets/gameplans/*.md` | the built-in gameplans |
-| `bindings/python/src/types.rs:1673` | `PyGameplanConfig` |
+| `bindings/python/src/types.rs:1819` | `PyGameplanConfig` |
 | `bindings/python/kerness/gameplan_loader.py` | re-export shim |
 
 ## Key Types and Entry Points
 
 - `crates/kerness/src/gameplan.rs:21` — `GameplanConfig` — the parsed harness spec,
   the body text, and the path it came from.
-- `crates/kerness/src/gameplan.rs:65` — `load_gameplan(name_or_path)` — a bare name
+- `crates/kerness/src/gameplan.rs:70` — `load_gameplan(name_or_path)` — a bare name
   resolves against the built-ins; anything with a separator or `.md` is a path.
 - `crates/kerness/src/gameplan.rs:37` — `directory()` — the gameplan's own
   directory, which is how a gameplan can reference personas beside it.
-- `crates/kerness/src/gameplan.rs:45` — `requires_orchestrator()` — whether the
+- `crates/kerness/src/gameplan.rs:50` — `requires_orchestrator()` — whether the
   session must have an orchestrator registered before it can run.
-- `crates/kerness/src/gameplan.rs:50` — `max_rounds()` — the loop bound, read from
+- `crates/kerness/src/gameplan.rs:55` — `max_rounds()` — the loop bound, read from
   the harness spec.
-- `crates/kerness/src/gameplan.rs:105` — `list_builtin_gameplans()` — enumerated
+- `crates/kerness/src/gameplan.rs:113` — `list_builtin_gameplans()` — enumerated
   from disk, not from a literal list, so an added or removed asset cannot escape
   the self-check.
-- `crates/kerness/src/assets.rs:31` — `root()` — resolution order:
+- `crates/kerness/src/assets.rs:38` — `root()` — resolution order:
   `set_root()`, then `$KERNESS_ASSETS`, then `$CARGO_MANIFEST_DIR/assets`. The
   Python package calls `set_root` at import because only it knows where pip put
   the files.
-- `crates/kerness/src/assets.rs:47` — `list_markdown_stems(dir)` — the shared
+- `crates/kerness/src/assets.rs:54` — `list_markdown_stems(dir)` — the shared
   enumeration behind all three `list_builtin_*` functions.
 
 ## Interactions

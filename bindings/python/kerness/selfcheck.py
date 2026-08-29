@@ -24,6 +24,7 @@ _CORE_MODULES: list[tuple[str, str]] = [
     ("kerness.access", "access"),
     ("kerness.memory", "memory"),
     ("kerness.channel", "channel"),
+    ("kerness.role_loader", "role"),
     ("kerness.persona_loader", "persona"),
     ("kerness.skill_loader", "skill-loader"),
     ("kerness.harness", "harness"),
@@ -59,7 +60,7 @@ def _check_imports(failures: list[str]) -> None:
 
 
 def _check_assets(failures: list[str]) -> None:
-    """Built-in gameplans, personas, and skills must load, not merely exist."""
+    """Built-in gameplans, roles, personas, and skills must load, not merely exist."""
     try:
         from kerness.gameplan_loader import (
             list_builtin_gameplans,
@@ -86,6 +87,19 @@ def _check_assets(failures: list[str]) -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"FAIL skills: {type(exc).__name__}: {exc}")
         failures.append("skill-assets")
+
+    try:
+        from kerness.role_loader import list_builtin_roles, load_role
+
+        names = list_builtin_roles()
+        for name in names:
+            role = load_role(f"{name}.md")
+            if not role.content:
+                raise ValueError(f"role '{name}' has no body, so it is no prompt")
+        print(f"PASS roles ({', '.join(names)})")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL roles: {type(exc).__name__}: {exc}")
+        failures.append("roles")
 
     try:
         from kerness.persona_loader import list_builtin_personas, load_persona

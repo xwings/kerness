@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use kerness::agent::Agent;
 use kerness::agent_runtime::AgentRunner;
-use kerness::conversation::{ChatMessage, Conversation};
+use kerness::conversation::Conversation;
 use kerness::orchestrator::{LoopHost, LoopState, OrchestratorLoop};
 use kerness::prompting::PromptAssembler;
 use kerness::provider::Provider;
@@ -28,7 +28,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use serde_json::{Map, Value};
 
-use crate::convert::{map_from_py, map_to_py, value_to_py};
+use crate::convert::{chat_to_py, map_from_py, map_to_py, value_to_py};
 use crate::errors::{Catch, Raise};
 use crate::provider::bind_provider;
 use crate::types::{
@@ -108,7 +108,7 @@ impl PyConversation {
 
     /// The chat messages the model is shown.
     fn render<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        chat_messages(py, &self.inner.render())
+        chat_to_py(py, &self.inner.render())
     }
 
     /// The turns, in order.
@@ -153,17 +153,6 @@ impl PyConversation {
     fn __len__(&self) -> usize {
         self.inner.len()
     }
-}
-
-fn chat_messages<'py>(py: Python<'py>, chat: &[ChatMessage]) -> PyResult<Bound<'py, PyList>> {
-    let list = PyList::empty(py);
-    for message in chat {
-        let dict = PyDict::new(py);
-        dict.set_item("role", &message.role)?;
-        dict.set_item("content", &message.content)?;
-        list.append(dict)?;
-    }
-    Ok(list)
 }
 
 // ------------------------------------------------------------- ToolDispatcher

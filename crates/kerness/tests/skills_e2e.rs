@@ -14,10 +14,10 @@ use std::sync::Arc;
 use kerness::provider::ProviderResponse;
 use kerness::skill::runtime::SKILL_TOOL_NAME;
 use kerness::tooling::Arguments;
-use kerness::{Agent, Provider, Role, Session, ToolDialect};
+use kerness::{Agent, Provider, Session, ToolDialect};
 use serde_json::json;
 
-use common::{config, tool_call_reply, Call, ScriptedProvider, TempDir, ToolProvider};
+use common::{config, refusal, tool_call_reply, Call, ScriptedProvider, TempDir, ToolProvider};
 
 /// Two rounds of one participant, so a turn boundary falls inside the run.
 const SKILLED: &str = r#"---
@@ -59,15 +59,18 @@ fn session(temp: &TempDir, speaker: Arc<dyn Provider>, skills: &[&str]) -> Sessi
     let path = temp.write("skilled.md", SKILLED);
     let mut session =
         Session::new(config(&path.to_string_lossy(), "Ship it?", routing())).expect("it loads");
-    session.add_participant(Agent {
-        provider: Some(speaker),
-        ..Agent::new("P0", "gpt-4o")
-    });
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
+        .add_agent(Agent {
+            provider: Some(speaker),
+            ..Agent::new("P0").with_model("gpt-4o")
         })
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
     session
         .add_tool("echo", "Echo.", json!({"type": "object"}), Arc::new(echo))
@@ -102,8 +105,13 @@ fn load(name: &str, id: &str) -> ProviderResponse {
 /// meaningful.
 fn write_skill(temp: &TempDir, name: &str, allowed: Option<&str>) -> String {
     let allowed = allowed.map_or(String::new(), |list| format!("allowed-tools: {list}\n"));
+    write_skill_keys(temp, name, &allowed)
+}
+
+/// The same, with arbitrary extra frontmatter keys.
+fn write_skill_keys(temp: &TempDir, name: &str, keys: &str) -> String {
     let text = format!(
-        "---\nname: {name}\ndescription: A skill for the tests to load.\n{allowed}---\n\n\
+        "---\nname: {name}\ndescription: A skill for the tests to load.\n{keys}---\n\n\
          Body of {name}.\n"
     );
     temp.write(&format!("{name}/SKILL.md"), &text)
@@ -342,16 +350,19 @@ fn an_agents_own_list_replaces_the_sessions() {
 
     let mut session =
         Session::new(config(&path.to_string_lossy(), "Ship it?", routing())).expect("it loads");
-    session.add_participant(Agent {
-        provider: Some(watcher.clone()),
-        skills: Some(vec!["challenge".to_string()]),
-        ..Agent::new("P0", "gpt-4o")
-    });
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
+        .add_agent(Agent {
+            provider: Some(watcher.clone()),
+            skills: Some(vec!["challenge".to_string()]),
+            ..Agent::new("P0").with_model("gpt-4o")
         })
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
     session.add_skill("fact-check").expect("the skill loads");
     session.run().expect("a scripted run cannot fail");
@@ -385,4 +396,69 @@ fn an_empty_allowed_tools_leaves_only_the_skill_tool() {
         .expect("a scripted run cannot fail");
 
     assert_eq!(offered(&speaker.calls()[1]), vec![SKILL_TOOL_NAME]);
+}
+
+/// A gameplan naming `tools: [echo]` that carries a skill whose instructions
+/// drive `read_file`. `requires-tools` is the one additive direction: without
+/// it the skill is prose about a tool the agent was never offered.
+#[test]
+fn a_required_tool_comes_back_past_the_gameplans_own_list() {
+    let temp = TempDir::new("skills");
+    let path = temp.write(
+        "narrowed.md",
+        &SKILLED.replace("---\n\n# Skilled", "tools: [echo]\n---\n\n# Skilled"),
+    );
+    let reader = write_skill_keys(&temp, "reader", "requires-tools: [read_file]\n");
+
+    let speaker = ToolProvider::new(
+        ToolDialect::Openai,
+        vec![load("reader", "c1"), ProviderResponse::text("Read it.")],
+    )
+    .shared();
+    let mut session =
+        Session::new(config(&path.to_string_lossy(), "Ship it?", routing())).expect("it loads");
+    session
+        .add_agent(Agent {
+            provider: Some(speaker.clone()),
+            ..Agent::new("P0").with_model("gpt-4o")
+        })
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
+        .expect("the roster has no orchestrator yet");
+    session
+        .add_tool("echo", "Echo.", json!({"type": "object"}), Arc::new(echo))
+        .expect("a fresh name is accepted");
+    session.add_skill(&reader).expect("the skill loads");
+    session.run().expect("a scripted run cannot fail");
+
+    let calls = speaker.calls().clone();
+    // Before the load the gameplan's list is the whole story.
+    assert_eq!(offered(&calls[0]), vec!["Skill", "echo"]);
+    assert_eq!(offered(&calls[1]), vec!["Skill", "echo", "read_file"]);
+}
+
+/// The requirement is checked against what the *caller registered*, before the
+/// first provider call. A run that discovers the gap mid-turn spends tokens to
+/// arrive at an agent apologising for a capability nobody shipped.
+#[test]
+fn a_required_tool_nobody_registered_is_refused_before_the_run() {
+    let temp = TempDir::new("skills");
+    let needy = write_skill_keys(&temp, "needy", "requires-tools: [write_file]\n");
+    let speaker = ScriptedProvider::new().fallback(&["DONE"]).shared();
+
+    let mut session = session(&temp, speaker, &[&needy]);
+    let message = refusal(session.run());
+    assert!(
+        message.contains("'needy' requires the tool 'write_file'"),
+        "{message}"
+    );
+    assert!(message.contains("nobody registered"), "{message}");
+    assert!(message.contains("add_tool"), "{message}");
+    // The registered names are listed, so the author can see the near-miss.
+    assert!(message.contains("echo"), "{message}");
 }

@@ -76,6 +76,18 @@ class TestAllowedTools:
         with pytest.raises(ValueError, match="Invalid YAML"):
             self._skill(tmp_path / "b", "allowed-tools: [unclosed\n")
 
+    def test_requires_tools_is_a_plain_tuple_with_no_absent_state(self, tmp_path):
+        """The counterpart key, and the one place the two differ: a skill that
+        named no requirement and one that named an empty list both require
+        nothing, so there is no second state to keep apart."""
+        assert self._skill(tmp_path / "a", "").requires_tools == ()
+        assert self._skill(tmp_path / "b", "requires-tools: []\n").requires_tools == ()
+        assert self._skill(
+            tmp_path / "c", "requires-tools: [cmd]\n"
+        ).requires_tools == ("cmd",)
+        with pytest.raises(ValueError, match="requires-tools must be a list"):
+            self._skill(tmp_path / "d", "requires-tools: {a: b}\n")
+
 
 class TestBundleDiscovery:
     def test_only_builtin_skills_are_marked_builtin(self, tmp_path):

@@ -6,7 +6,7 @@
 //! the run ends and what it returns come from the gameplan's harness contract,
 //! not from here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{json, Map, Value};
 
 use crate::access::{AccessManager, AccessPolicy};
-use crate::agent::{Agent, Role};
+use crate::agent::{Agent, AgentDefaults};
 use crate::agent_runtime::AgentRunner;
 use crate::channel::{Channel, ConsoleChannel};
 use crate::compaction::{compact, estimate_tokens, summary_request};
@@ -28,15 +28,16 @@ use crate::memory::Memory;
 use crate::orchestrator::{LoopHost, OrchestratorLoop};
 use crate::persona::{load_persona, resolve_persona_path};
 use crate::prompting::PromptAssembler;
-use crate::provider::Provider;
+use crate::provider::{Provider, ReasoningEffort};
 use crate::pyfmt;
+use crate::role::{load_role, role_file};
 use crate::sessionfile::{
     check_identity, identity_for, load_snapshot, save_snapshot, SessionSnapshot,
 };
 use crate::skill::loader::{load_skill, SkillConfig};
 use crate::skill::runtime::{
-    apply_gate, format_skills_index, GrantPaths, SkillActivation, SkillRegistry, SkillsFor,
-    SKILL_TOOL_NAME,
+    admit_required, apply_gate, format_skills_index, GrantPaths, SkillActivation, SkillRegistry,
+    SkillsFor, SKILL_TOOL_NAME,
 };
 use crate::tooling::{Arguments, ToolHandler, ToolSpec};
 use crate::toolkit::{resolve, ToolDispatcher, ToolsFor};
@@ -51,9 +52,6 @@ use crate::utils::parse_memory_markers;
 /// shipping a table of context windows that goes stale every release and has no
 /// entry at all for `CustomProvider`.
 pub const DEFAULT_MAX_CONTEXT_TOKENS: usize = 256_000;
-
-/// The default participant system prompt.
-pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a participant in a structured debate. Be concise.";
 
 /// Result of a completed session.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -99,6 +97,18 @@ pub struct SessionConfig {
     pub topic: String,
     /// Backend for agents that bring none of their own.
     pub provider: Option<Arc<dyn Provider>>,
+    /// Model for agents that name none of their own.
+    ///
+    /// Read as a model on [`SessionConfig::provider`], so an agent that brings
+    /// its own provider does not inherit it — that agent must name its own
+    /// model. See [`Agent::inherit`].
+    pub model: Option<String>,
+    /// How hard agents that ask for no level of their own should think.
+    pub reasoning_effort: ReasoningEffort,
+    /// Persona for agents that bring none of their own. `None` pins none.
+    pub persona: Option<String>,
+    /// Language for agents that name none of their own. `None` pins none.
+    pub language: Option<String>,
     /// Where output goes while the run is in progress.
     pub channel: Option<Arc<dyn Channel>>,
     /// Path to the memory `.md` file. The file is yours: it is free-form
@@ -130,8 +140,13 @@ pub struct SessionConfig {
     pub turn_delay: Duration,
     /// Whether agents should show reasoning.
     pub show_reasoning: Option<bool>,
-    /// Default system prompt for participant agents.
-    pub system_prompt: String,
+    /// Base system prompt for participants that name no role of their own.
+    ///
+    /// `None` leaves each agent reading the role it named, or the built-in
+    /// `participant` role when it named none. An agent's own `role` is more
+    /// specific than a session-wide prompt and wins over this; an agent's own
+    /// `system_prompt` wins over both.
+    pub system_prompt: Option<String>,
     /// Retries for unparseable orchestrator output. `None` takes the
     /// gameplan's `loop.orchestrator_retries`.
     pub orchestrator_retries: Option<i64>,
@@ -148,6 +163,10 @@ impl Default for SessionConfig {
             gameplan: "debate".to_string(),
             topic: String::new(),
             provider: None,
+            model: None,
+            reasoning_effort: ReasoningEffort::default(),
+            persona: None,
+            language: None,
             channel: None,
             memory: "memory.md".to_string(),
             memory_write: false,
@@ -159,7 +178,7 @@ impl Default for SessionConfig {
             max_tool_iterations: None,
             turn_delay: Duration::from_secs(1),
             show_reasoning: None,
-            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            system_prompt: None,
             orchestrator_retries: None,
             tool_results_in_history: false,
         }
@@ -257,19 +276,24 @@ impl Shared {
 
     /// The tools callable right now.
     ///
-    /// Three narrowings, applied in order, and the order matters:
+    /// Four steps, applied in order, and the order matters:
     ///
     /// 1. The harness narrows the registered set. Before `run()` resolves it
     ///    this is every registered tool; after, it is the permitted set.
     /// 2. The turn's `Skill` tool is added, built from the agent's own skill
     ///    list so its `enum` names only skills that agent can load.
     /// 3. An active skill's `allowed-tools` narrows further, restrictively.
+    /// 4. An active skill's `requires-tools` adds back, out of the registered
+    ///    set. Last, because a skill that brings instructions for a tool must
+    ///    outrank both narrowings — otherwise a gameplan's `tools:` list turns
+    ///    the skill into prose about something the agent cannot call.
     ///
     /// Both the prompt and the dispatcher read this, so a tool the gameplan
     /// excluded is neither advertised to the model nor callable if it asks
     /// anyway — and the same holds for a tool an active skill gated out.
     fn active_tools(&self) -> Vec<ToolSpec> {
-        let tools = resolve(&lock(&self.tools), lock(&self.allowed_tools).as_deref());
+        let registered = lock(&self.tools);
+        let tools = resolve(&registered, lock(&self.allowed_tools).as_deref());
         let Some(activation) = lock(&self.activation).clone() else {
             return tools;
         };
@@ -277,7 +301,8 @@ impl Shared {
         if let Some(skill_tool) = self.skills_registry.build_tool(&activation) {
             tools.push(skill_tool);
         }
-        apply_gate(&tools, activation.gate().as_ref())
+        let tools = apply_gate(&tools, activation.gate().as_ref());
+        admit_required(tools, &registered, &activation.required())
     }
 
     /// Start a fresh activation for one agent's turn.
@@ -316,7 +341,10 @@ pub struct Session {
     max_tool_iterations: Option<u32>,
     orchestrator_retries: Option<i64>,
     turn_delay: Duration,
-    system_prompt: String,
+    system_prompt: Option<String>,
+    /// What each agent takes for the options it leaves unset. Applied once by
+    /// [`Session::resolve_agents`] at the top of the run.
+    defaults: AgentDefaults,
     tool_results_in_history: bool,
     max_context_tokens: usize,
     session_file: Option<String>,
@@ -356,7 +384,24 @@ impl Session {
             Some(policy) => policy,
             None => AccessPolicy::new(),
         };
-        let access = Arc::new(Mutex::new(AccessManager::new(policy)));
+        let manager = AccessManager::new(policy);
+        // The session's own files are not allowlisted — they are the caller's
+        // choices, not something a model asked for — but a workspace that let them
+        // sit outside it would confine only the half of the run that goes
+        // through a tool. Checked here so a misplaced path fails at
+        // construction rather than on the first write, mid-turn.
+        manager.check_workspace("The memory file", &config.memory, "")?;
+        if let Some(session_file) = &config.session_file {
+            manager.check_workspace("The session file", session_file, "")?;
+        }
+        for path in channel.paths() {
+            manager.check_workspace(
+                &format!("The {} destination", channel.type_name()),
+                &path.display().to_string(),
+                "",
+            )?;
+        }
+        let access = Arc::new(Mutex::new(manager));
         let memories = Arc::new(Mutex::new(Memories {
             session: Memory::new(&config.memory),
             per_agent: HashMap::new(),
@@ -411,6 +456,12 @@ impl Session {
             orchestrator_retries: config.orchestrator_retries,
             turn_delay: config.turn_delay,
             system_prompt: config.system_prompt,
+            defaults: AgentDefaults {
+                model: config.model,
+                reasoning_effort: config.reasoning_effort,
+                persona: config.persona,
+                language: config.language,
+            },
             tool_results_in_history: config.tool_results_in_history,
             max_context_tokens: config.max_context_tokens,
             session_file: config.session_file,
@@ -464,29 +515,53 @@ impl Session {
         &self.agents
     }
 
-    /// Add a participant agent to the session.
-    pub fn add_participant(&mut self, agent: Agent) -> &mut Self {
-        let mut agent = agent;
-        agent.role = Role::Participant;
-        self.agents.push(agent);
-        self
-    }
-
-    /// Add the session's one orchestrator.
+    /// Add an agent to the session, seated by the role it named.
+    ///
+    /// [`Agent::role`] is the whole of the choice: a built-in role name, a path
+    /// to a `.md` role file, or prose. Whichever it is, the file's
+    /// `position:` frontmatter — or `participant`, for prose and for an agent
+    /// that named no role — decides where the agent sits, and that answer is
+    /// written onto [`Agent::position`] here.
+    ///
+    /// Read now rather than at [`Session::run`], unlike every option in
+    /// [`AgentDefaults`], because there is nothing to wait for: role has no
+    /// session-level default to inherit, so a mistyped path or a second
+    /// orchestrator is knowable at the call that made it and reported there.
+    /// A `.md` spec is pinned to an absolute path, resolved against the
+    /// gameplan's own directory, so the same file is read for the rest of the
+    /// run no matter what the working directory does.
     ///
     /// # Errors
     ///
-    /// [`Error::Session`] when the session already has one.
-    pub fn add_orchestrator(&mut self, agent: Agent) -> Result<&mut Self> {
-        if let Some(existing) = self.agents.iter().find(|a| a.is_orchestrator()) {
-            return Err(Error::session(format!(
-                "Session already has an orchestrator: '{}'. Only one \
-                 orchestrator is allowed.",
-                existing.name
-            )));
-        }
+    /// [`Error::NotFound`] when the role names a file that does not resolve,
+    /// and [`Error::Session`] when the role seats a second orchestrator.
+    pub fn add_agent(&mut self, agent: Agent) -> Result<&mut Self> {
         let mut agent = agent;
-        agent.role = Role::Orchestrator;
+        let search: Vec<PathBuf> = self.gameplan.directory().into_iter().collect();
+        if let Some(spec) = agent.role.clone() {
+            // Naming the agent matters — the loader knows the path but not who
+            // asked for it, and "which agent?" is the first question a caller
+            // has.
+            let found = role_file(&spec, &search).map_err(|err| {
+                Error::session(format!(
+                    "Agent '{}' has role '{spec}' which could not be loaded. {err}",
+                    agent.name
+                ))
+            })?;
+            if let Some(path) = found {
+                agent.position = load_role(&path.display().to_string(), &[])?.position;
+                agent.role = Some(absolute(&path).display().to_string());
+            }
+        }
+        if agent.is_orchestrator() {
+            if let Some(existing) = self.agents.iter().find(|a| a.is_orchestrator()) {
+                return Err(Error::session(format!(
+                    "Session already has an orchestrator: '{}'. Only one \
+                     orchestrator is allowed.",
+                    existing.name
+                )));
+            }
+        }
         self.agents.push(agent);
         Ok(self)
     }
@@ -585,6 +660,7 @@ impl Session {
         if self.topic.is_empty() {
             return Err(Error::session("No topic set."));
         }
+        self.resolve_agents()?;
         self.check_tool_history_dialect()?;
 
         let participants: Vec<String> = self
@@ -607,8 +683,8 @@ impl Session {
                 return Err(Error::session(
                     "No orchestrator agent added. The session loop is \
                      orchestrator-driven, so one is required even when the \
-                     gameplan declares 'agents.orchestrator: false'. Call \
-                     add_orchestrator(...).",
+                     gameplan declares 'agents.orchestrator: false'. Add an \
+                     agent whose role is 'orchestrator'.",
                 ))
             }
         };
@@ -639,6 +715,7 @@ impl Session {
         for agent in &self.agents {
             cache.insert(agent.name.clone(), self.resolve_agent_skills(agent)?);
         }
+        check_required_tools(&cache, &registered)?;
         *lock(&self.shared.skills_cache) = cache;
 
         let orch_prompt = self.build_orchestrator_prompt(&participants)?;
@@ -650,6 +727,11 @@ impl Session {
             memories.per_agent.clear();
             for agent in &self.agents {
                 let Some(path) = &agent.memory else { continue };
+                lock(&self.shared.access).check_workspace(
+                    &format!("The memory file for {}", agent.name),
+                    path,
+                    &agent.name,
+                )?;
                 let mut memory = Memory::new(path);
                 memory.load()?;
                 memories.per_agent.insert(agent.name.clone(), memory);
@@ -776,6 +858,26 @@ impl Session {
         runner.run(&history, purpose, instruction)
     }
 
+    /// The base system prompt one participant starts from.
+    ///
+    /// Three answers, most specific first. A role the agent named is that
+    /// agent's own job description, so it beats a prompt written once for the
+    /// whole session; `SessionConfig::system_prompt` is the answer for
+    /// everyone who named no role; and the built-in `participant` role is the
+    /// answer when nobody said anything at all.
+    ///
+    /// [`Agent::system_prompt`] sits above all three and is applied later, by
+    /// [`Agent::build_system_prompt`], which is what keeps an agent's own
+    /// prompt beating an agent's own role.
+    fn participant_prompt(&self, agent: &Agent) -> Result<String> {
+        if agent.role.is_none() {
+            if let Some(prompt) = &self.system_prompt {
+                return Ok(prompt.clone());
+            }
+        }
+        agent.resolve_role()
+    }
+
     fn orchestrator_agent(&self) -> Result<Agent> {
         self.agents
             .iter()
@@ -784,7 +886,14 @@ impl Session {
             .ok_or_else(|| Error::session("No orchestrator agent added."))
     }
 
-    /// Construct the orchestrator's system prompt from the gameplan.
+    /// Fill the orchestrator's role template from the gameplan and the harness.
+    ///
+    /// The layout and every literal word belong to the role file — the
+    /// built-in `orchestrator` role, or whichever one the agent named. What
+    /// this builds is the set of values only the harness contract knows: the
+    /// roster, the phase block, the end and flow rules. They are substituted by
+    /// name, which is the same `{topic}`/`{bot_name}` mechanism
+    /// [`Agent::decorate_system_prompt`] already applies to every prompt.
     ///
     /// The harness frontmatter is the machine contract and is *not* shown to
     /// the model — the orchestrator reads the Markdown body, plus the phase
@@ -796,8 +905,8 @@ impl Session {
     fn build_orchestrator_prompt(&self, participants: &[String]) -> Result<String> {
         let orchestrator = self.agents.iter().find(|agent| agent.is_orchestrator());
         if let Some(agent) = orchestrator {
-            if !agent.system_prompt.is_empty() {
-                return Ok(agent.system_prompt.replace("{topic}", &self.topic));
+            if let Some(prompt) = &agent.system_prompt {
+                return Ok(prompt.replace("{topic}", &self.topic));
             }
         }
 
@@ -812,7 +921,7 @@ impl Session {
                 roster.push('\n');
             }
             roster.push_str(&format!("- {}", agent.name));
-            if !agent.persona.is_empty() {
+            if agent.persona.is_some() {
                 roster.push_str(&format!(" ({})", persona_label(agent)?));
             }
         }
@@ -917,23 +1026,31 @@ impl Session {
             format!("\n{}\n", harness.agents.orchestrator.instruction)
         };
 
-        let prompt = format!(
-            "You are the orchestrator of a {} session.{summary}\n\n\
-             Topic: {{topic}}\n\n\
-             Participants:\n{roster}\n\n\
-             {phase_block}\
-             Your gameplan:\n{}\n\n\
-             Rules:\n\
-             - To have a participant speak, mention them with @ (e.g. @{}, \
-             present your opening argument)\n\
-             - You can give them specific instructions after the @ mention\n\
-             - Only call on ONE participant at a time\n\
-             {end_rules}\
-             {flow_rules}\
-             {rounds_rule}\
-             {extra}",
-            self.gameplan.name, self.gameplan.body, participants[0],
-        );
+        let template = match orchestrator {
+            Some(agent) => agent.resolve_role()?,
+            None => return Err(Error::session("No orchestrator agent added.")),
+        };
+        // Ordered, and the gameplan body goes in last of the two that carry
+        // caller text: a body holding `{roster}` is the gameplan's own words
+        // about itself, not a request to be handed the cast list. `{topic}` is
+        // the exception and stays global, because a gameplan writing `{topic}`
+        // into its body is exactly how a gameplan asks for the topic.
+        let prompt = [
+            ("{gameplan}", self.gameplan.name.as_str()),
+            ("{gameplan_description}", summary.as_str()),
+            ("{roster}", roster.as_str()),
+            ("{phases}", phase_block.as_str()),
+            ("{first_participant}", participants[0].as_str()),
+            ("{end_rules}", end_rules.as_str()),
+            ("{flow_rules}", flow_rules),
+            ("{rounds_rule}", rounds_rule.as_str()),
+            ("{orchestrator_instruction}", extra.as_str()),
+            ("{gameplan_body}", self.gameplan.body.as_str()),
+        ]
+        .into_iter()
+        .fold(template, |prompt, (placeholder, replacement)| {
+            prompt.replace(placeholder, replacement)
+        });
         Ok(prompt.replace("{topic}", &self.topic))
     }
 
@@ -967,6 +1084,36 @@ impl Session {
         Ok(resolved)
     }
 
+    /// Settle every agent's options against the session's defaults.
+    ///
+    /// The one place the session-default/agent-override rule is applied. Run
+    /// once at the top of [`Session::run`], before anything reads an agent, so
+    /// the rest of the framework never repeats the fallback and cannot disagree
+    /// with it about what an unset option means.
+    ///
+    /// Deliberately *not* done in [`Session::add_agent`]: an agent added before
+    /// the caller finished configuring the session would otherwise freeze
+    /// defaults that were not written yet. `add_agent` settles only the one
+    /// thing that has no session-level default to wait for — the agent's
+    /// [`Position`](crate::role::Position).
+    fn resolve_agents(&mut self) -> Result<()> {
+        for agent in &mut self.agents {
+            agent.inherit(&self.defaults)?;
+        }
+        // The one option that composes rather than overrides, so it is settled
+        // against the access manager rather than against `defaults`: an agent
+        // workspace has to be *checked* against the session's, not merely
+        // preferred over it.
+        let mut manager = lock(&self.shared.access);
+        for agent in &self.agents {
+            let Some(workspace) = &agent.workspace else {
+                continue;
+            };
+            manager.confine_agent(&agent.name, workspace)?;
+        }
+        Ok(())
+    }
+
     /// Pin every agent's persona to a file that exists, before the run.
     ///
     /// The search path is the session's to own, not the agent's: an [`Agent`]
@@ -980,19 +1127,19 @@ impl Session {
     fn resolve_personas(&mut self) -> Result<()> {
         let search: Vec<PathBuf> = self.gameplan.directory().into_iter().collect();
         for agent in &mut self.agents {
-            if !agent.persona.ends_with(".md") {
+            let Some(persona) = agent.persona.as_deref().filter(|p| p.ends_with(".md")) else {
                 continue;
-            }
+            };
             // Naming the agent matters — the loader knows the path but not who
             // asked for it, and "which agent?" is the first question a caller
             // has.
-            let resolved = resolve_persona_path(&agent.persona, &search).map_err(|err| {
+            let resolved = resolve_persona_path(persona, &search).map_err(|err| {
                 Error::session(format!(
                     "Agent '{}' has persona '{}' which could not be loaded. {err}",
-                    agent.name, agent.persona
+                    agent.name, persona
                 ))
             })?;
-            agent.persona = absolute(&resolved).display().to_string();
+            agent.persona = Some(absolute(&resolved).display().to_string());
         }
         Ok(())
     }
@@ -1228,11 +1375,11 @@ impl Session {
         };
         let messages = as_values(&summary_request(turns));
         match provider.chat_with_retries(
-            &agent.model,
+            agent.model_name(),
             &messages,
             "compaction",
             None,
-            agent.reasoning_effort,
+            agent.effort(),
         ) {
             Ok(response) => Ok(response.content),
             Err(error) if error.is_provider() => {
@@ -1264,7 +1411,7 @@ impl LoopHost for Session {
             .find(|agent| agent.is_participant() && agent.name == name)
             .cloned()
             .ok_or_else(|| Error::session(format!("Unknown participant: {name}")))?;
-        let prompt = self.system_prompt.clone();
+        let prompt = self.participant_prompt(&agent)?;
         self.turn(
             &agent,
             &prompt,
@@ -1315,10 +1462,53 @@ impl LoopHost for Session {
 /// header is what it says. Inline personas are already prose and pass through
 /// untouched.
 fn persona_label(agent: &Agent) -> Result<String> {
-    if !agent.persona.ends_with(".md") {
-        return Ok(agent.persona.clone());
+    let persona = agent.persona.as_deref().unwrap_or_default();
+    if !persona.ends_with(".md") {
+        return Ok(persona.to_string());
     }
-    Ok(load_persona(&agent.persona, &[])?.name)
+    Ok(load_persona(persona, &[])?.name)
+}
+
+/// Refuse a skill that requires a tool nobody registered.
+///
+/// The check is here, before the first provider call, because the alternative
+/// is a skill whose body reads "call `write_file` with…" reaching a model that
+/// has no such tool — a run that burns tokens to arrive at an agent apologising
+/// for a capability the harness author thought they had shipped. The names are
+/// the *registered* ones deliberately: a gameplan narrowing a tool away is not
+/// the failure, since [`admit_required`] gives it back.
+fn check_required_tools(
+    skills: &HashMap<String, Vec<SkillConfig>>,
+    registered: &[String],
+) -> Result<()> {
+    // Keyed by skill and tool rather than by agent: the same skill attached to
+    // every agent is one gap reported once, and the ordering is what makes a
+    // session with several report the same one every run.
+    let mut gaps: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for skills in skills.values() {
+        for skill in skills {
+            for tool in &skill.requires_tools {
+                if !registered.iter().any(|name| name == tool) {
+                    gaps.insert((skill.name.as_str(), tool.as_str()));
+                }
+            }
+        }
+    }
+    let Some((skill, tool)) = gaps.first() else {
+        return Ok(());
+    };
+    let available = if registered.is_empty() {
+        "(none)".to_string()
+    } else {
+        registered.join(", ")
+    };
+    Err(Error::session(format!(
+        "Skill {} requires the tool {}, which nobody registered. Register it \
+         with add_tool(...), or drop it from the skill's requires-tools. \
+         Registered: {available}",
+        pyfmt::repr_str(skill),
+        pyfmt::repr_str(tool),
+    )))
 }
 
 /// Run a command and report the attempt through the channel.
@@ -1336,7 +1526,13 @@ fn run_and_log(
     timeout: Option<Duration>,
     actor: &str,
 ) -> Result<String> {
-    let outcome = exec::run_command(&lock(access), command, cwd, timeout, actor);
+    let manager = lock(access);
+    // A command with no working directory of its own starts at the session
+    // workspace, so a confined session's commands are *in* the confinement
+    // rather than merely unable to name their way out of it.
+    let cwd = cwd.or_else(|| manager.workspace_for(actor));
+    let outcome = exec::run_command(&manager, command, cwd, timeout, actor);
+    drop(manager);
     if actor.is_empty() {
         return outcome;
     }
@@ -1531,30 +1727,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
     use crate::provider::{ProviderBase, ProviderResponse, ReasoningEffort};
+    use crate::testing::TempDir;
 
     /// A scratch directory that removes itself.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("kerness-session-{tag}"));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(path)
-        }
-
-        fn join(&self, name: &str) -> String {
-            self.0.join(name).display().to_string()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     /// Replies in order, repeating the last one, recording every request.
     struct SequenceProvider {
         base: ProviderBase,
@@ -1677,15 +1854,19 @@ mod tests {
             topic: topic.to_string(),
             provider: Some(provider),
             channel: Some(channel),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
         let mut session = Session::new(config).expect("the debate gameplan loads");
-        session.add_participant(Agent::new("Alice", "m"));
-        session.add_participant(Agent::new("Bob", "m"));
         session
-            .add_orchestrator(Agent::new("Mod", "m"))
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Bob").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
             .expect("the first orchestrator is accepted");
         session
     }
@@ -1841,11 +2022,11 @@ mod tests {
         })
         .expect("the debate gameplan loads");
         session
-            .add_orchestrator(Agent::new("Mod1", "m"))
+            .add_agent(Agent::new("Mod1").with_model("m").with_role("orchestrator"))
             .expect("the first is accepted");
 
         let error = session
-            .add_orchestrator(Agent::new("Mod2", "m"))
+            .add_agent(Agent::new("Mod2").with_model("m").with_role("orchestrator"))
             .map(|_| ())
             .expect_err("the second is refused");
 
@@ -1858,7 +2039,7 @@ mod tests {
         let base = || SessionConfig {
             topic: "T".to_string(),
             channel: Some(Arc::new(CaptureChannel::default())),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -1869,7 +2050,9 @@ mod tests {
             ..base()
         })
         .expect("loads");
-        session.add_participant(Agent::new("Alice", "m"));
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
         let error = error_text(&session.run().expect_err("no provider"));
         assert!(error.contains("No provider configured"));
         assert!(error.contains("Missing: Alice"));
@@ -1881,7 +2064,9 @@ mod tests {
             ..base()
         })
         .expect("loads");
-        session.add_participant(Agent::new("Alice", "m"));
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
         assert!(error_text(&session.run().expect_err("no topic")).contains("No topic set."));
 
         // No participants.
@@ -1891,7 +2076,7 @@ mod tests {
         })
         .expect("loads");
         session
-            .add_orchestrator(Agent::new("Mod", "m"))
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
             .expect("accepted");
         assert!(error_text(&session.run().expect_err("no participants"))
             .contains("No participant agents added."));
@@ -1902,11 +2087,15 @@ mod tests {
             ..base()
         })
         .expect("loads");
-        session.add_participant(Agent::new("Alice", "m"));
-        session.add_participant(Agent::new("Bob", "m"));
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Bob").with_model("m"))
+            .expect("add agent");
         let error = error_text(&session.run().expect_err("no orchestrator"));
         assert!(error.contains("No orchestrator agent added."));
-        assert!(error.contains("add_orchestrator"));
+        assert!(error.contains("role is 'orchestrator'"));
     }
 
     #[test]
@@ -1914,7 +2103,7 @@ mod tests {
         let temp = TempDir::new("add-tool");
         let mut session = Session::new(SessionConfig {
             topic: "T".to_string(),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             ..SessionConfig::default()
         })
         .expect("loads");
@@ -2013,7 +2202,7 @@ mod tests {
         let temp = TempDir::new("prompt-flow");
         let provider = Arc::new(SequenceProvider::new(&["END_SESSION", "Done."]));
         let channel = Arc::new(CaptureChannel::default());
-        let path = temp.join("flat.md");
+        let path = temp.child("flat.md");
         std::fs::write(
             &path,
             "---\nname: flat\nagents:\n  orchestrator:\n    required: true\n\
@@ -2025,15 +2214,19 @@ mod tests {
             topic: "Anything".to_string(),
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(channel),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
         let mut session = Session::new(config).expect("a session");
-        session.add_participant(Agent::new("Alice", "m"));
-        session.add_participant(Agent::new("Bob", "m"));
         session
-            .add_orchestrator(Agent::new("Mod", "m"))
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Bob").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
             .expect("accepted");
         session.run().expect("a run");
 
@@ -2052,16 +2245,20 @@ mod tests {
             topic: "Rust or Go?".to_string(),
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(channel),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
         let mut session = Session::new(config).expect("loads");
-        session.add_participant(Agent::new("Alice", "m"));
-        session.add_participant(Agent::new("Bob", "m"));
-        let mut orchestrator = Agent::new("Mod", "m");
-        orchestrator.system_prompt = "Judge this: {topic}".to_string();
-        session.add_orchestrator(orchestrator).expect("accepted");
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Bob").with_model("m"))
+            .expect("add agent");
+        let mut orchestrator = Agent::new("Mod").with_model("m").with_role("orchestrator");
+        orchestrator.system_prompt = Some("Judge this: {topic}".to_string());
+        session.add_agent(orchestrator).expect("accepted");
 
         session.run().expect("a run");
 
@@ -2083,19 +2280,19 @@ mod tests {
             topic: "T".to_string(),
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(channel),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
         let mut session = Session::new(config).expect("loads");
-        let mut alice = Agent::new("Alice", "m");
-        alice.persona = "pragmatic_engineer.md".to_string();
-        let mut bob = Agent::new("Bob", "m");
-        bob.persona = "A cautious lawyer".to_string();
-        session.add_participant(alice);
-        session.add_participant(bob);
+        let mut alice = Agent::new("Alice").with_model("m");
+        alice.persona = Some("pragmatic_engineer.md".to_string());
+        let mut bob = Agent::new("Bob").with_model("m");
+        bob.persona = Some("A cautious lawyer".to_string());
+        session.add_agent(alice).expect("add agent");
+        session.add_agent(bob).expect("add agent");
         session
-            .add_orchestrator(Agent::new("Mod", "m"))
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
             .expect("accepted");
 
         session.run().expect("a run");
@@ -2114,17 +2311,19 @@ mod tests {
             topic: "T".to_string(),
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(Arc::new(CaptureChannel::default())),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
         let mut session = Session::new(config).expect("loads");
-        let mut alice = Agent::new("Alice", "m");
-        alice.persona = "nope_not_here.md".to_string();
-        session.add_participant(alice);
-        session.add_participant(Agent::new("Bob", "m"));
+        let mut alice = Agent::new("Alice").with_model("m");
+        alice.persona = Some("nope_not_here.md".to_string());
+        session.add_agent(alice).expect("add agent");
         session
-            .add_orchestrator(Agent::new("Mod", "m"))
+            .add_agent(Agent::new("Bob").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
             .expect("accepted");
 
         let error = error_text(&session.run().expect_err("the persona is missing"));
@@ -2294,7 +2493,7 @@ mod tests {
         assert_eq!(spoken, "My view.");
         assert!(!read_only.1.contains("Alice prefers Rust"));
 
-        let memory_path = temp.join("written.md");
+        let memory_path = temp.child("written.md");
         let writing = {
             let provider = Arc::new(SequenceProvider::new(&replies));
             let config = SessionConfig {
@@ -2307,10 +2506,14 @@ mod tests {
                 ..SessionConfig::default()
             };
             let mut session = Session::new(config).expect("loads");
-            session.add_participant(Agent::new("Alice", "m"));
-            session.add_participant(Agent::new("Bob", "m"));
             session
-                .add_orchestrator(Agent::new("Mod", "m"))
+                .add_agent(Agent::new("Alice").with_model("m"))
+                .expect("add agent");
+            session
+                .add_agent(Agent::new("Bob").with_model("m"))
+                .expect("add agent");
+            session
+                .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
                 .expect("accepted");
             session.run().expect("a run")
         };
@@ -2332,7 +2535,7 @@ mod tests {
         let temp = TempDir::new("memory-tools");
         let read_only = Session::new(SessionConfig {
             topic: "T".to_string(),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             ..SessionConfig::default()
         })
         .expect("loads");
@@ -2347,7 +2550,7 @@ mod tests {
 
         let writing = Session::new(SessionConfig {
             topic: "T".to_string(),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             memory_write: true,
             ..SessionConfig::default()
         })
@@ -2364,7 +2567,7 @@ mod tests {
     #[test]
     fn read_memory_returns_the_file_or_says_there_is_none() {
         let temp = TempDir::new("read-memory");
-        let path = temp.join("memory.md");
+        let path = temp.child("memory.md");
         let mut session = Session::new(SessionConfig {
             topic: "T".to_string(),
             memory: path.clone(),
@@ -2372,7 +2575,9 @@ mod tests {
             ..SessionConfig::default()
         })
         .expect("loads");
-        session.add_participant(Agent::new("Alice", "m"));
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
 
         let tools = session.shared.active_tools();
         let read = tools
@@ -2410,7 +2615,7 @@ mod tests {
     #[test]
     fn the_tools_key_decides_what_the_prompt_advertises() {
         let temp = TempDir::new("narrowing");
-        let gameplan = temp.join("narrow.md");
+        let gameplan = temp.child("narrow.md");
         std::fs::write(
             &gameplan,
             "---\nname: narrow\nagents:\n  orchestrator:\n    required: true\n  \
@@ -2425,14 +2630,16 @@ mod tests {
             topic: "T".to_string(),
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(Arc::new(CaptureChannel::default())),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
         let mut session = Session::new(config).expect("loads");
-        session.add_participant(Agent::new("Alice", "m"));
         session
-            .add_orchestrator(Agent::new("Mod", "m"))
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
             .expect("accepted");
         session.run().expect("a run");
 
@@ -2444,7 +2651,7 @@ mod tests {
     #[test]
     fn a_gameplan_naming_an_unregistered_tool_fails_the_session() {
         let temp = TempDir::new("unregistered");
-        let gameplan = temp.join("ghost.md");
+        let gameplan = temp.child("ghost.md");
         std::fs::write(
             &gameplan,
             "---\nname: ghost\nagents:\n  orchestrator:\n    required: true\n  \
@@ -2459,14 +2666,16 @@ mod tests {
             topic: "T".to_string(),
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(Arc::new(CaptureChannel::default())),
-            memory: temp.join("memory.md"),
+            memory: temp.child("memory.md"),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
         let mut session = Session::new(config).expect("loads");
-        session.add_participant(Agent::new("Alice", "m"));
         session
-            .add_orchestrator(Agent::new("Mod", "m"))
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
             .expect("accepted");
 
         assert!(session.run().is_err());
@@ -2495,7 +2704,7 @@ mod tests {
     #[test]
     fn a_second_run_picks_up_where_the_first_stopped() {
         let temp = TempDir::new("resume");
-        let path = temp.join("run.json");
+        let path = temp.child("run.json");
 
         let run = |replies: &[&str]| -> SessionResult {
             let provider = Arc::new(SequenceProvider::new(replies));
@@ -2503,16 +2712,20 @@ mod tests {
                 topic: "T".to_string(),
                 provider: Some(provider),
                 channel: Some(Arc::new(CaptureChannel::default())),
-                memory: temp.join("memory.md"),
+                memory: temp.child("memory.md"),
                 session_file: Some(path.clone()),
                 turn_delay: Duration::ZERO,
                 ..SessionConfig::default()
             };
             let mut session = Session::new(config).expect("loads");
-            session.add_participant(Agent::new("Alice", "m"));
-            session.add_participant(Agent::new("Bob", "m"));
             session
-                .add_orchestrator(Agent::new("Mod", "m"))
+                .add_agent(Agent::new("Alice").with_model("m"))
+                .expect("add agent");
+            session
+                .add_agent(Agent::new("Bob").with_model("m"))
+                .expect("add agent");
+            session
+                .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
                 .expect("accepted");
             session.run().expect("a run")
         };
@@ -2537,23 +2750,27 @@ mod tests {
         // Resume is automatic, so this check is what stands between a stale
         // file and a run that silently inherits an unrelated conversation.
         let temp = TempDir::new("identity");
-        let path = temp.join("run.json");
+        let path = temp.child("run.json");
         let run = |topic: &str| -> Result<SessionResult> {
             let provider = Arc::new(SequenceProvider::new(&["END_SESSION", "Done."]));
             let config = SessionConfig {
                 topic: topic.to_string(),
                 provider: Some(provider),
                 channel: Some(Arc::new(CaptureChannel::default())),
-                memory: temp.join("memory.md"),
+                memory: temp.child("memory.md"),
                 session_file: Some(path.clone()),
                 turn_delay: Duration::ZERO,
                 ..SessionConfig::default()
             };
             let mut session = Session::new(config).expect("loads");
-            session.add_participant(Agent::new("Alice", "m"));
-            session.add_participant(Agent::new("Bob", "m"));
             session
-                .add_orchestrator(Agent::new("Mod", "m"))
+                .add_agent(Agent::new("Alice").with_model("m"))
+                .expect("add agent");
+            session
+                .add_agent(Agent::new("Bob").with_model("m"))
+                .expect("add agent");
+            session
+                .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
                 .expect("accepted");
             session.run()
         };

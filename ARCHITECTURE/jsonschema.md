@@ -7,7 +7,7 @@ into the shape providers require for strict function calling — every property
 required, no additional properties, recursively. `validate_arguments` checks a
 model's actual arguments against that schema and returns a list of human-readable
 problems, which is what the dispatcher feeds back to the model when a call is
-malformed. Serves **M1**.
+malformed.
 
 ## Status
 
@@ -18,7 +18,7 @@ malformed. Serves **M1**.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/jsonschema.rs` | both functions |
-| `bindings/python/src/funcs.rs:202,214` | the two pyfunctions |
+| `bindings/python/src/funcs.rs:205,217` | the two pyfunctions |
 | `bindings/python/kerness/jsonschema.py` | re-export shim |
 
 ## Key Types and Entry Points

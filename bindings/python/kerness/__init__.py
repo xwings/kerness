@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path as _Path
 
 from kerness import _core, _enums, exceptions
 
 # The extension module needs three things it cannot declare itself: the
-# exception classes, the dialect enum, and where the bundled gameplans,
+# exception classes, the dialect enum, and where the bundled gameplans, roles,
 # personas, and skills were installed. This is the only place that knows.
-_core.bootstrap(exceptions, _enums.ToolDialect, str(Path(__file__).resolve().parent))
+_core.bootstrap(exceptions, _enums.ToolDialect, str(_Path(__file__).resolve().parent))
 
 __version__ = _core.__version__
 
@@ -55,6 +55,11 @@ from kerness.provider import (
     Provider,
     ProviderResponse,
 )
+from kerness.role_loader import (
+    RoleConfig,
+    list_builtin_roles,
+    load_role,
+)
 from kerness.session import Message, Session, SessionResult
 from kerness.skill_loader import (
     SkillConfig,
@@ -95,6 +100,10 @@ __all__ = [
     # Gameplan
     "GameplanConfig",
     "load_gameplan",
+    # Role
+    "RoleConfig",
+    "load_role",
+    "list_builtin_roles",
     # Persona
     "PersonaConfig",
     "load_persona",

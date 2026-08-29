@@ -6,8 +6,7 @@ When a gameplan declares an orchestrator, the orchestrator runs the session: it
 decides who speaks next, tracks which phase the harness is in, watches for the
 termination keyword, and at the end produces the named result fields the contract
 demands. This module is that loop, and it is separable — a harness that wants a
-different control flow implements `LoopHost` and keeps everything else. Serves
-**M2**.
+different control flow implements `LoopHost` and keeps everything else.
 
 ## Status
 
@@ -18,33 +17,33 @@ different control flow implements `LoopHost` and keeps everything else. Serves
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/orchestrator.rs` | `LoopHost`, `LoopState`, `PhaseTracker`, `OrchestratorLoop`, result parsing |
-| `bindings/python/src/runtime.rs:499,619` | `PyLoopState`, `PyOrchestratorLoop` |
+| `bindings/python/src/runtime.rs:493,619` | `PyLoopState`, `PyOrchestratorLoop` |
 | `bindings/python/kerness/loop.py` | re-export shim |
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/orchestrator.rs:47` — `LoopHost` — what the loop needs from
+- `crates/kerness/src/orchestrator.rs:49` — `LoopHost` — what the loop needs from
   whatever is running it: run an agent turn, deliver a message, read the roster.
-  `Session` implements it at `session.rs:1208`.
-- `crates/kerness/src/orchestrator.rs:381` — `OrchestratorLoop` — the loop itself,
-  built with `new` (`:400`) and the `with_*` options at `:420`–`:438`.
-- `crates/kerness/src/orchestrator.rs:447` — `run(host)` — one call, returns the
+  `Session` implements it at `session.rs:1400`.
+- `crates/kerness/src/orchestrator.rs:396` — `OrchestratorLoop` — the loop itself,
+  built with `new` (`:415`) and the `with_*` options at `:435`–`:453`.
+- `crates/kerness/src/orchestrator.rs:462` — `run(host)` — one call, returns the
   final `LoopState`.
-- `crates/kerness/src/orchestrator.rs:114` — `LoopState` — round, phase, turns
+- `crates/kerness/src/orchestrator.rs:120` — `LoopState` — round, phase, turns
   taken, end reason, and the accumulated result fields.
-- `crates/kerness/src/orchestrator.rs:84` — `EndReason` — why the loop stopped:
+- `crates/kerness/src/orchestrator.rs:90` — `EndReason` — why the loop stopped:
   consensus, exhausted rounds, forced end, or an explicit terminator.
-- `crates/kerness/src/orchestrator.rs:179` — `PhaseTracker` — advances through the
+- `crates/kerness/src/orchestrator.rs:173` — `PhaseTracker` — advances through the
   declared phases and decides when each is satisfied.
-- `crates/kerness/src/orchestrator.rs:249` — `PhaseTracker::briefing()` — the
+- `crates/kerness/src/orchestrator.rs:253` — `PhaseTracker::briefing()` — the
   active phase, the round, and who has yet to speak in it.
-- `crates/kerness/src/orchestrator.rs:473` — `snapshot()` — the resumable state,
+- `crates/kerness/src/orchestrator.rs:488` — `snapshot()` — the resumable state,
   handed to [sessionfile.md](sessionfile.md).
-- `crates/kerness/src/orchestrator.rs:704` — `closing_prompt(fields)` — asks the
-  orchestrator for the result block; `:734` `verdict_rethink_prompt` asks it to
+- `crates/kerness/src/orchestrator.rs:762` — `closing_prompt(fields)` — asks the
+  orchestrator for the result block; `:792` `verdict_rethink_prompt` asks it to
   reconsider a draft.
-- `crates/kerness/src/orchestrator.rs:761` — `parse_result_fields(text, fields)` —
-  pulls the declared fields out of the reply; `:780` `strip_result_block` removes
+- `crates/kerness/src/orchestrator.rs:819` — `parse_result_fields(text, fields)` —
+  pulls the declared fields out of the reply; `:838` `strip_result_block` removes
   that block from what goes into the transcript.
 - `crates/kerness/src/orchestrator.rs:29` — `FORCED_END_NOTE` — what the transcript
   records when the orchestrator's output stayed unparseable through its retries.
@@ -100,7 +99,7 @@ cargo test -p kerness orchestrator                               # pass = 0 fail
 .venv/bin/python -m pytest bindings/python/tests/test_loop.py -q # pass = 0 failed
 ```
 
-- The Rust tests drive a `StubHost` (`orchestrator.rs:909`) through fixed
+- The Rust tests drive a `StubHost` (`orchestrator.rs:943`) through fixed
   orchestrator replies, which is how phase advance, forced end, and each
   `EndReason` are covered without a provider.
 

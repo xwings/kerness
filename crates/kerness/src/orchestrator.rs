@@ -1130,7 +1130,7 @@ mod tests {
     // ---- Termination comes from the harness -------------------------------
 
     #[test]
-    fn the_declared_keyword_ends_it_and_the_old_literal_does_not() {
+    fn the_declared_keyword_ends_it_and_an_undeclared_one_does_not() {
         let spec = LoopSpec {
             terminate_on: vec!["ALL_DONE".to_string()],
             ..LoopSpec::default()

@@ -23,7 +23,8 @@ use kerness::provider::{
     supplied_note_reasoning_effort_rejected, ClaudeConfig, ClaudeCredential, ClaudeProvider,
     CustomConfig, CustomProvider, OpenAiConfig, OpenAiProvider, OpenRouterConfig,
     OpenRouterProvider, Provider, ProviderBase, ProviderResponse, ReasoningEffort, CLAUDE_BASE_URL,
-    OPENAI_BASE_URL, OPENROUTER_BASE_URL,
+    DEFAULT_BACKOFF_SEC, DEFAULT_CLAUDE_MAX_TOKENS, DEFAULT_REQUEST_TIMEOUT_SEC, DEFAULT_RETRIES,
+    DEFAULT_TEMPERATURE, DEFAULT_TOP_P, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
 };
 use kerness::tooling::ToolSpec;
 use kerness::toolschema::ToolDialect;
@@ -73,6 +74,17 @@ fn effort_from_py(value: Option<&str>) -> PyResult<ReasoningEffort> {
     }
 }
 
+/// The failure a degrade latch was handed, as the crate's own error.
+///
+/// `None` for anything that is not an exception: the latches are public methods
+/// a subclass may call with whatever it caught, and a non-exception argument
+/// means "nothing to read a status code out of" rather than an error of its own.
+fn raised_error(py: Python<'_>, error: &Bound<'_, PyAny>) -> Option<Error> {
+    error
+        .is_instance_of::<PyBaseException>()
+        .then(|| from_py(py, &PyErr::from_value(error.clone())))
+}
+
 /// The Rust half of a `kerness.provider.Provider`.
 #[pyclass(name = "ProviderCore", module = "kerness._core", frozen)]
 pub struct PyProviderCore {
@@ -108,7 +120,7 @@ impl PyProviderCore {
     /// A core with no backend, for a provider whose `chat` is written in
     /// Python.
     #[new]
-    #[pyo3(signature = (retries=2, backoff_sec=2.0, interval_sec=None))]
+    #[pyo3(signature = (retries=DEFAULT_RETRIES, backoff_sec=DEFAULT_BACKOFF_SEC, interval_sec=None))]
     fn new(retries: u32, backoff_sec: f64, interval_sec: Option<f64>) -> Self {
         PyProviderCore {
             backing: Backing::Standalone(Arc::new(ProviderBase::new(
@@ -123,12 +135,12 @@ impl PyProviderCore {
     #[pyo3(signature = (
         api_key,
         base_url=OPENROUTER_BASE_URL.to_string(),
-        timeout_sec=60,
-        retries=2,
-        backoff_sec=2.0,
+        timeout_sec=DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries=DEFAULT_RETRIES,
+        backoff_sec=DEFAULT_BACKOFF_SEC,
         interval_sec=None,
-        temperature=1.0,
-        top_p=1.0,
+        temperature=DEFAULT_TEMPERATURE,
+        top_p=DEFAULT_TOP_P,
         max_tokens=None,
         app_url=String::new(),
         app_name=String::new(),
@@ -166,12 +178,12 @@ impl PyProviderCore {
     #[pyo3(signature = (
         api_key,
         base_url=OPENAI_BASE_URL.to_string(),
-        timeout_sec=60,
-        retries=2,
-        backoff_sec=2.0,
+        timeout_sec=DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries=DEFAULT_RETRIES,
+        backoff_sec=DEFAULT_BACKOFF_SEC,
         interval_sec=None,
-        temperature=1.0,
-        top_p=1.0,
+        temperature=DEFAULT_TEMPERATURE,
+        top_p=DEFAULT_TOP_P,
         max_tokens=None,
         output_schema=None,
         strict_json_schema=true,
@@ -221,12 +233,12 @@ impl PyProviderCore {
     #[pyo3(signature = (
         api_key,
         base_url=CLAUDE_BASE_URL.to_string(),
-        timeout_sec=60,
-        retries=2,
-        backoff_sec=2.0,
+        timeout_sec=DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries=DEFAULT_RETRIES,
+        backoff_sec=DEFAULT_BACKOFF_SEC,
         interval_sec=None,
-        temperature=1.0,
-        max_tokens=4096,
+        temperature=DEFAULT_TEMPERATURE,
+        max_tokens=DEFAULT_CLAUDE_MAX_TOKENS,
         oauth=false,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -263,12 +275,12 @@ impl PyProviderCore {
         url,
         api_key,
         model_config=None,
-        timeout_sec=60,
-        retries=2,
-        backoff_sec=2.0,
+        timeout_sec=DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries=DEFAULT_RETRIES,
+        backoff_sec=DEFAULT_BACKOFF_SEC,
         interval_sec=None,
-        temperature=1.0,
-        top_p=1.0,
+        temperature=DEFAULT_TEMPERATURE,
+        top_p=DEFAULT_TOP_P,
         max_tokens=None,
         extra_headers=None,
         extra_body=None,
@@ -351,13 +363,12 @@ impl PyProviderCore {
         owner: &Bound<'_, PyAny>,
         error: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
-        if !error.is_instance_of::<PyBaseException>() {
+        let Some(raised) = raised_error(py, error) else {
             return Ok(false);
-        }
-        let raised = PyErr::from_value(error.clone());
+        };
         Ok(supplied_note_native_tools_rejected(
             &self.view(owner)?,
-            &from_py(py, &raised),
+            &raised,
         ))
     }
 
@@ -368,19 +379,17 @@ impl PyProviderCore {
         owner: &Bound<'_, PyAny>,
         error: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
-        if !error.is_instance_of::<PyBaseException>() {
+        let Some(raised) = raised_error(py, error) else {
             return Ok(false);
-        }
-        let raised = PyErr::from_value(error.clone());
+        };
         Ok(supplied_note_reasoning_effort_rejected(
             &self.view(owner)?,
-            &from_py(py, &raised),
+            &raised,
         ))
     }
 
     /// Send a request through *owner*, retrying on failure.
     #[pyo3(signature = (owner, model, messages, purpose="", tools=None, reasoning_effort=None))]
-    #[allow(clippy::too_many_arguments)]
     fn chat_with_retries(
         &self,
         owner: &Bound<'_, PyAny>,
@@ -680,7 +689,7 @@ pub fn install_transport() {
 /// calling the default transport directly — going back through the installed
 /// one would be this function calling itself.
 #[pyfunction]
-#[pyo3(signature = (url, payload, headers=None, timeout=60))]
+#[pyo3(signature = (url, payload, headers=None, timeout=DEFAULT_REQUEST_TIMEOUT_SEC))]
 pub fn http_post_json<'py>(
     py: Python<'py>,
     url: &str,
