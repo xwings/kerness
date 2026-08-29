@@ -61,7 +61,7 @@ Neither surface is a wrapper around the other's use case, and neither is the
 | --- | --- |
 | Provider transport, retries, backoff | Which models each agent uses |
 | Tool dialects (OpenAI / Anthropic / text-fence) | Which tools exist and what they do |
-| Prompt assembly and ordering | Personas, system prompts, language |
+| Prompt assembly and ordering | Roles, personas, system prompts, language |
 | The orchestrator loop, phases, turn counting | Phase names, round counts, instructions |
 | Termination detection | Which tokens end a run |
 | Access decisions on commands and paths | The policy those decisions are made against |
@@ -83,9 +83,10 @@ swap in your own — the rest of the kernel does not notice.
 | **Channel** | `ConsoleChannel`, `FileChannel`, `LogChannel`, `MultiChannel` | implementing `Channel` — one required method, `send` |
 | **Tools** | `cmd`, `read_file`, `list_dir`, `write_memory` | `session.add_tool(name, description, parameters, handler)` |
 | **Skills** | `challenge`, `fact-check`, `summarize`, `agent-browser` | dropping a `SKILL.md` directory on disk |
+| **Roles** | `participant`, `orchestrator` | a `.md` file whose frontmatter declares a `position:`, or inline prose |
 | **Personas** | `pragmatic_engineer`, `devils_advocate` | a `.md` file, or inline prose |
 | **Gameplans** | `debate`, `discussion`, `research` | a new Markdown file — see below |
-| **Access** | closed by default; allow-lists for programs, patterns, directories | an `AccessPolicy`, plus an approval callback |
+| **Access** | closed by default; allow-lists for programs, patterns, directories, and a workspace nothing widens | an `AccessPolicy`, plus an approval callback |
 | **Memory** | a plain `.md` file, read-only unless asked | point `memory` anywhere; per-agent scopes supported |
 | **Session file** | JSON snapshot after every turn | `session_file` — absent means persist nothing |
 
@@ -176,42 +177,86 @@ cd bindings/python && maturin develop            # the binding
 python -m kerness.selfcheck                      # pass = "OK: all core checks passed"
 ```
 
+## Set it once on the session, override it per agent
+
+The session is configured before any agent exists, and everything it carries —
+provider, model, reasoning effort, persona, language, system prompt, memory
+scope, workspace — is a **default**. An agent that names none of them inherits
+every one; an agent that names one overrides it, for itself alone. That is the
+whole rule, and it has two deliberate exceptions.
+
+**Provider and model inherit as a pair.** A model name only means something on
+the backend it was written for, so an agent that brings its own provider must
+name its own model; inheriting the session's would silently ask one vendor for
+another's model. It is an error at `run()`, naming the agent.
+
+**The workspace only ever narrows.** An `AccessPolicy` has two different
+mechanisms: the allow-lists answer *may I run this program, read this
+directory*, and the workspace answers *is this path inside the world at all*.
+The workspace is checked first, an approval callback cannot widen it, and it is
+the working directory a command starts in. An agent may set a workspace of its
+own, and it is intersected with the session's rather than replacing it —
+otherwise an agent stanza would be a way to hand itself more of the filesystem
+than the session was given.
+
+One further asymmetry, and it is not about inheritance: **`role` has no session
+default at all.** A session-wide role would make every agent the orchestrator at
+once. `role` is what an agent *is* in the session — its position and its job —
+and it is a built-in name, a path to a `.md` role file, or that job written out
+as prose. `persona` is a different question, *who* the agent is, and it reaches
+the prompt and nothing else. Unset, `role` seats a participant, and prose seats a
+participant too: only a role file declaring `position: orchestrator` in its
+frontmatter can seat the chair, so privilege comes from a declaration and never
+from a substring somebody wrote.
+
 ## A run, in Rust
+
+Two providers, four agents, a tool, and two skills — the whole configuration
+contract in one file.
 
 ```rust
 use std::sync::Arc;
-use kerness::{Agent, ConsoleChannel, Role, Session, SessionConfig};
-use kerness::provider::{OpenAiConfig, OpenAiProvider};
 
-let provider = Arc::new(OpenAiProvider::new(OpenAiConfig {
+use kerness::access::AccessPolicy;
+use kerness::provider::{
+    ClaudeConfig, ClaudeCredential, ClaudeProvider, OpenAiConfig, OpenAiProvider,
+};
+use kerness::tooling::Arguments;
+use kerness::{Agent, ConsoleChannel, Provider, ReasoningEffort, Session, SessionConfig};
+use serde_json::{json, Value};
+
+let openai: Arc<dyn Provider> = Arc::new(OpenAiProvider::new(OpenAiConfig {
     api_key: std::env::var("OPENAI_API_KEY")?,
     ..Default::default()
 })?);
+let claude: Arc<dyn Provider> = Arc::new(ClaudeProvider::new(ClaudeConfig {
+    credential: ClaudeCredential::ApiKey(std::env::var("ANTHROPIC_API_KEY")?),
+    ..Default::default()
+}));
 
+// Everything on the config is a default. Agents fill in from it at `run()`.
 let mut session = Session::new(SessionConfig {
-    gameplan: "debate".to_string(),
+    gameplan: "research".to_string(),
     topic: "Should the cache be write-through?".to_string(),
-    provider: Some(provider),
+    provider: Some(openai),
+    model: Some("gpt-4o".to_string()),
+    reasoning_effort: ReasoningEffort::High,
     channel: Some(Arc::new(ConsoleChannel::default())),
+    memory: "notes.md".to_string(),               // the shared file agents read
+    memory_write: true,                           // ...and, here, may append to
     session_file: Some("run.json".to_string()),   // resumable; None persists nothing
+    access_policy: Some(AccessPolicy {
+        workspace: Some("/srv/work".to_string()),  // nothing outside this, ever
+        allowed_dirs: vec!["/srv/work/data".to_string()],
+        allowed_programs: vec!["rg".to_string()],
+        ..AccessPolicy::new()
+    }),
     ..Default::default()
 })?;
 
-session.add_participant(Agent { persona: "pragmatic_engineer.md".into(), ..Agent::new("Alice", "gpt-4o") });
-session.add_participant(Agent { persona: "devils_advocate.md".into(), ..Agent::new("Bob", "gpt-4o") });
-session.add_orchestrator(Agent { role: Role::Orchestrator, ..Agent::new("Mod", "gpt-4o") })?;
-
-let result = session.run()?;
-println!("{}", result.summary());          // the gameplan's declared `summary` field
-println!("{} {} {}", result.consensus_reached, result.rounds_run, result.end_reason);
-```
-
-Handing the agents a tool of your own is one call. The handler is a closure:
-
-```rust
-use kerness::tooling::Arguments;
-use serde_json::{json, Value};
-
+// A tool of your own. The handler is a closure; the kernel translates the
+// schema into whichever dialect each agent's provider speaks, parses the call
+// back out, feeds the result in, and stops a model that loops on bad calls.
 session.add_tool(
     "lookup_price",
     "Look up the current price of a ticker.",
@@ -223,18 +268,48 @@ session.add_tool(
         Ok(format!("{ticker} is at 41.20"))
     }),
 )?;
-```
+session.add_skill("fact-check")?;
+session.add_skill("summarize")?;
 
-The kernel handles schema translation into whichever dialect the agent's
-provider speaks, parsing the call back out, feeding the result in, and stopping
-a model that loops on malformed calls.
+// Alice names nothing but a persona, so she takes every default above.
+session.add_agent(Agent {
+    persona: Some("pragmatic_engineer.md".to_string()),
+    ..Agent::new("Alice")
+})?;
+
+// Bob overrides one thing — a cheaper model on the same backend — and confines
+// himself to a directory inside the session's workspace.
+session.add_agent(Agent {
+    persona: Some("devils_advocate.md".to_string()),
+    workspace: Some("/srv/work/scratch".to_string()),
+    ..Agent::new("Bob").with_model("gpt-4o-mini")
+})?;
+
+// Carol brings her own vendor, so she must name her own model: "gpt-4o" means
+// nothing to Anthropic, and inheriting it silently would be the wrong answer.
+// `with_provider` takes both for that reason. Effort is portable, so it
+// inherits or overrides on its own.
+session.add_agent(Agent {
+    reasoning_effort: Some(ReasoningEffort::Medium),
+    skills: Some(vec!["fact-check".to_string()]),   // Alice and Bob get both
+    ..Agent::new("Carol").with_provider(claude, "claude-sonnet-4-5")
+})?;
+
+// The chair, seated by a role file that declares `position: orchestrator`.
+session.add_agent(Agent::new("Mod").with_role("orchestrator"))?;
+
+let result = session.run()?;
+println!("{}", result.summary());
+println!("{:?}", result.fields.get("findings"));   // the gameplan's declared fields
+println!("{} rounds, ended on {}", result.rounds_run, result.end_reason);
+```
 
 Full file: [`crates/kerness/examples/debate.rs`](crates/kerness/examples/debate.rs) —
 `cargo run -p kerness --example debate`.
 
 To watch a session run without an API key, use
 [`offline_debate`](crates/kerness/examples/offline_debate.rs), which drives the
-same `debate` gameplan against a scripted provider:
+`debate` gameplan against a scripted provider:
 
 ```sh
 cargo run -p kerness --example offline_debate    # no key, no network
@@ -246,39 +321,65 @@ program.
 
 ## The same run, in Python
 
-The binding mirrors the crate, in the shapes Python callers expect: a keyword
-constructor instead of a config struct, a plain callable instead of a closure in
-an `Arc`.
+The binding mirrors the crate, in the shapes Python callers expect: keyword
+arguments instead of a config struct, a plain callable instead of a closure in
+an `Arc`, a dataclass instead of an `AccessPolicy` literal. Same kernel, same
+resolution rules, same errors.
 
 ```python
-from kerness import ConsoleChannel, OpenAIProvider, Session
+import os
+
+from kerness import (
+    AccessPolicy, ClaudeProvider, ConsoleChannel, OpenAIProvider, Session,
+)
+
+openai = OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"])
+claude = ClaudeProvider(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 session = Session(
-    gameplan="debate",
+    gameplan="research",
     topic="Should the cache be write-through?",
-    provider=OpenAIProvider(api_key="..."),
+    provider=openai,
+    model="gpt-4o",
+    reasoning_effort="high",
     channel=ConsoleChannel(),
-    session_file="run.json",     # resumable; omit to persist nothing
+    memory="notes.md",
+    memory_write=True,
+    session_file="run.json",       # resumable; omit to persist nothing
+    access_policy=AccessPolicy(
+        workspace="/srv/work",      # nothing outside this, ever
+        allowed_dirs=["/srv/work/data"],
+        allowed_programs=["rg"],
+    ),
 )
-session.add_participant("Alice", model="gpt-4o", persona="pragmatic_engineer.md")
-session.add_participant("Bob", model="gpt-4o", persona="devils_advocate.md")
-session.add_orchestrator("Mod", model="gpt-4o")
 
-result = session.run()
-print(result.summary)        # the gameplan's declared `summary` field
-print(result.consensus_reached, result.rounds_run, result.end_reason)
-```
-
-```python
+prices = {"KRN": "41.20"}
 session.add_tool(
     "lookup_price",
     "Look up the current price of a ticker.",
     {"type": "object",
      "properties": {"ticker": {"type": "string"}},
      "required": ["ticker"]},
-    lambda args: str(prices[args["ticker"]]),
+    lambda args: prices.get(args["ticker"], "unknown"),
 )
+session.add_skill("fact-check")
+session.add_skill("summarize")
+
+session.add_agent("Alice", persona="pragmatic_engineer.md")
+session.add_agent("Bob", persona="devils_advocate.md",
+                  model="gpt-4o-mini", workspace="/srv/work/scratch")
+session.add_agent("Carol", provider=claude, model="claude-sonnet-4-5",
+                  reasoning_effort="medium", skills=["fact-check"])
+session.add_agent("Mod", role="orchestrator")
+
+result = session.run()
+print(result.summary)
+print(result.fields["findings"])   # the gameplan's declared fields
+print(result.rounds_run, result.end_reason)
 ```
+
+The `add_*` calls return the session, so registration chains if you would rather
+write it that way.
 
 ## What the kernel does while it runs
 
@@ -286,8 +387,11 @@ Neither of the above is a different runtime, so the following holds for both.
 
 Skills use progressive disclosure: prompts carry only names and descriptions,
 and the full instructions load on demand through a turn-local `Skill` tool. A
-skill may also narrow the tools available for that turn, and — when the policy
-trusts bundles — grant read access to its own directory.
+skill also says which tools the turn should hold: `allowed-tools:` narrows it,
+`requires-tools:` adds back what the skill cannot work without, out of whatever
+the session registered. A skill requiring a tool nobody registered is refused
+before the first call rather than quietly doing nothing. When the policy trusts
+bundles, loading a skill also grants read access to its own directory.
 
 There is no daemon and no server. A run given a session file writes its state to
 disk after every turn and continues from that file the next time the same
@@ -299,10 +403,10 @@ or a different agent roster is refused, not half-applied.
 ```text
 Cargo.toml       # the only manifest at the root
 crates/kerness/  # the kernel, pure Rust — no PyO3, no Python
-  src/           #   24 modules, 305 unit tests inline
-  tests/         #   88 integration tests, over the public API only
+  src/           #   29 modules, 337 unit tests inline
+  tests/         #   101 integration tests, over the public API only
   examples/      #   8 runnable Rust harnesses, one needing no key
-  assets/        #   bundled gameplans, personas, skills
+  assets/        #   bundled gameplans, roles, personas, skills
 bindings/python/ # everything the wheel is built from
   pyproject.toml #   the wheel's manifest — `pip install .` runs here
   src/           #   the PyO3 extension module, kerness._core
@@ -325,11 +429,11 @@ carries the kernel's behaviour across the FFI boundary intact.
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 305 unit + 88 integration
+cargo test --workspace                     # 337 unit + 101 integration
 cargo build -p kerness --examples          # every example still compiles
 cargo run -p kerness --example offline_debate   # a whole session, no key
 
-python -m pytest bindings/python/tests -q      # 394 tests
+python -m pytest bindings/python/tests -q      # 442 tests
 python -m kerness.selfcheck                    # exit 0
 ruff check bindings/python
 ```

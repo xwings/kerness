@@ -188,8 +188,13 @@ impl<'a> AgentRunner<'a> {
             (true, Some(tools_for)) => Some(tools_for()),
             _ => None,
         };
-        self.provider
-            .chat_with_retries(&self.agent.model, &messages, purpose, tools.as_deref())
+        self.provider.chat_with_retries(
+            self.agent.model_name(),
+            &messages,
+            purpose,
+            tools.as_deref(),
+            self.agent.effort(),
+        )
     }
 }
 
@@ -221,7 +226,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::provider::ProviderBase;
+    use crate::provider::{ProviderBase, ReasoningEffort};
     use crate::tooling::Arguments;
 
     fn call_block(name: &str) -> String {
@@ -252,7 +257,7 @@ mod tests {
     /// to outlive it in the test's own scope.
     fn fixture(tools: Vec<ToolSpec>) -> (Agent, ToolDispatcher) {
         (
-            Agent::new("Alice", "m"),
+            Agent::new("Alice").with_model("m"),
             ToolDispatcher::new(Arc::new(move || tools.clone())),
         )
     }
@@ -277,6 +282,7 @@ mod tests {
         messages: Vec<Value>,
         tools: Option<Vec<ToolSpec>>,
         purpose: String,
+        effort: ReasoningEffort,
     }
 
     /// Replies in order, repeating the last one, and records every call.
@@ -338,6 +344,7 @@ mod tests {
             _model: &str,
             _messages: &[Value],
             _tools: Option<&[ToolSpec]>,
+            _effort: ReasoningEffort,
         ) -> Result<ProviderResponse> {
             unreachable!("the runner goes through chat_with_retries")
         }
@@ -348,12 +355,14 @@ mod tests {
             messages: &[Value],
             purpose: &str,
             tools: Option<&[ToolSpec]>,
+            effort: ReasoningEffort,
         ) -> Result<ProviderResponse> {
             let mut calls = self.calls.lock().expect("lock");
             calls.push(Recorded {
                 messages: messages.to_vec(),
                 tools: tools.map(<[ToolSpec]>::to_vec),
                 purpose: purpose.to_string(),
+                effort,
             });
             let index = (calls.len() - 1).min(self.replies.len() - 1);
             self.replies[index]
@@ -369,6 +378,23 @@ mod tests {
         let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
 
         assert_eq!(runner.run(&[], "turn", None).expect("a turn"), "My view.");
+    }
+
+    /// The level is configured on the agent and read on every call the agent
+    /// makes, follow-ups included — a turn that thinks hard until it uses a
+    /// tool and then coasts would be the wrong shape.
+    #[test]
+    fn the_agents_own_effort_rides_along_on_every_call_of_the_turn() {
+        let provider = MockProvider::text(&[call_block("ping").as_str(), "Got pong."]);
+        let (mut agent, dispatcher) = fixture(ping());
+        agent.reasoning_effort = Some(ReasoningEffort::Low);
+        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
+
+        runner.run(&[], "turn", None).expect("a turn");
+
+        assert_eq!(provider.call_count(), 2);
+        assert_eq!(provider.call(0).effort, ReasoningEffort::Low);
+        assert_eq!(provider.call(1).effort, ReasoningEffort::Low);
     }
 
     #[test]

@@ -7,7 +7,7 @@ loop runs, what phases exist, which tools and skills are available, and what
 fields the result must contain. This module parses that into typed specs,
 validates it against what the session actually registered, and resolves the two
 lists — tools and skills — that the declaration and the registration have to
-agree on. Serves **M2**.
+agree on.
 
 The project rule that shapes this module: **dead configuration keys are
 defects.** Every field the parser accepts is validated, rendered into a prompt,

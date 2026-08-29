@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use kerness::channel::Channel;
 use kerness::sessionfile::SCHEMA_VERSION;
-use kerness::{Agent, Role, Session, SessionResult};
+use kerness::{Agent, Session, SessionResult};
 use serde_json::Value;
 
 use common::{config, refusal, RecordingChannel, ScriptedProvider, TempDir};
@@ -59,12 +59,15 @@ fn run(
     settings.channel = channel;
 
     let mut session = Session::new(settings).expect("the gameplan loads");
-    session.add_participant(Agent::new("P0", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("P0").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
     session.run().expect("a scripted run cannot fail")
 }
@@ -177,12 +180,15 @@ fn a_session_without_a_file_persists_nothing() {
     settings.session_file = None;
 
     let mut session = Session::new(settings).expect("the gameplan loads");
-    session.add_participant(Agent::new("P0", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("P0").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
     session.run().expect("a scripted run cannot fail");
 
@@ -253,12 +259,15 @@ fn a_file_written_for_a_different_run_is_refused_by_name() {
     let mut settings = config(&path.to_string_lossy(), "Ship something else?", provider());
     settings.session_file = Some(temp.str_join("run.json"));
     let mut session = Session::new(settings).expect("the gameplan loads");
-    session.add_participant(Agent::new("P0", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("P0").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
 
     let message = refusal(session.run());
@@ -277,12 +286,15 @@ fn a_file_written_for_a_different_roster_is_refused() {
     let mut settings = config(&path.to_string_lossy(), "Ship it?", provider());
     settings.session_file = Some(temp.str_join("run.json"));
     let mut session = Session::new(settings).expect("the gameplan loads");
-    session.add_participant(Agent::new("Someone else", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("Someone else").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
 
     let message = refusal(session.run());
@@ -307,12 +319,15 @@ fn a_file_that_is_not_a_snapshot_is_refused_with_a_reason() {
         let mut settings = config(&path.to_string_lossy(), "Ship it?", provider());
         settings.session_file = Some(temp.str_join("run.json"));
         let mut session = Session::new(settings).expect("the gameplan loads");
-        session.add_participant(Agent::new("P0", "gpt-4o"));
         session
-            .add_orchestrator(Agent {
-                role: Role::Orchestrator,
-                ..Agent::new("Mod", "gpt-4o")
-            })
+            .add_agent(Agent::new("P0").with_model("gpt-4o"))
+            .expect("add agent");
+        session
+            .add_agent(
+                Agent::new("Mod")
+                    .with_model("gpt-4o")
+                    .with_role("orchestrator"),
+            )
             .expect("the roster has no orchestrator yet");
 
         let message = refusal(session.run());

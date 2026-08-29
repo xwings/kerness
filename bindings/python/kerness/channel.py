@@ -25,6 +25,19 @@ class Channel(ABC):
     def send_system(self, message: str) -> None:
         """Send a system-level message."""
 
+    def paths(self) -> list[Path]:
+        """Files this channel writes, for the session workspace to confine.
+
+        Concrete rather than abstract because most channels write no file at
+        all — a console prints, and a caller's remote channel posts.
+        Overriding it is how a file-backed channel opts into the containment
+        check the memory file and the session file already go through.
+
+        Read once, when the session binds the channel, so a channel that picks
+        its destination later is not confined by the workspace.
+        """
+        return []
+
 
 class ConsoleChannel(Channel):
     """Prints messages to stdout."""
@@ -59,6 +72,11 @@ class MultiChannel(Channel):
     def send_system(self, message: str) -> None:
         self._fan_out(lambda ch: ch.send_system(message))
 
+    def paths(self) -> list[Path]:
+        """Every path its members write, so wrapping a channel does not hide it
+        from the session workspace."""
+        return [path for ch in self._channels for path in ch.paths()]
+
     def _fan_out(self, deliver) -> None:
         for ch in self._channels:
             try:
@@ -85,6 +103,9 @@ class LogChannel(Channel):
     def send_system(self, message: str) -> None:
         self._write_event({"role": "system", "sender": "system", "content": message})
 
+    def paths(self) -> list[Path]:
+        return [self._log_path]
+
     def _write_event(self, payload: dict) -> None:
         payload["ts"] = datetime.now(timezone.utc).isoformat()
         with self._log_path.open("a", encoding="utf-8") as f:
@@ -104,6 +125,9 @@ class FileChannel(Channel):
     def send_system(self, message: str) -> None:
         with self._filepath.open("a", encoding="utf-8") as f:
             f.write(f"[System] {message}\n")
+
+    def paths(self) -> list[Path]:
+        return [self._filepath]
 
 
 __all__ = [

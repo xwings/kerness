@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use kerness::agent::{Agent, Role};
+use kerness::agent::Agent;
 use kerness::channel::ConsoleChannel;
 use kerness::error::{Error, Result};
 use kerness::provider::{OpenAiConfig, OpenAiProvider};
@@ -97,18 +97,19 @@ fn main() -> Result<()> {
         Arc::new(quote),
     )?;
 
-    session.add_participant(Agent {
-        persona: "Value investor who checks every number".to_string(),
-        ..Agent::new("Alice", "gpt-4o")
-    });
-    session.add_participant(Agent {
-        persona: "Momentum trader who distrusts fundamentals".to_string(),
-        ..Agent::new("Bob", "gpt-4o")
-    });
-    session.add_orchestrator(Agent {
-        role: Role::Orchestrator,
-        ..Agent::new("Mod", "gpt-4o")
+    session.add_agent(Agent {
+        persona: Some("Value investor who checks every number".to_string()),
+        ..Agent::new("Alice").with_model("gpt-4o")
     })?;
+    session.add_agent(Agent {
+        persona: Some("Momentum trader who distrusts fundamentals".to_string()),
+        ..Agent::new("Bob").with_model("gpt-4o")
+    })?;
+    session.add_agent(
+        Agent::new("Mod")
+            .with_model("gpt-4o")
+            .with_role("orchestrator"),
+    )?;
 
     let result = session.run()?;
     println!("\nSummary: {}", result.summary());

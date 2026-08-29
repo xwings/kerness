@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use kerness::agent::{Agent, Role};
+use kerness::agent::Agent;
 use kerness::channel::ConsoleChannel;
 use kerness::error::Result;
 use kerness::provider::{OpenAiConfig, OpenAiProvider};
@@ -53,15 +53,16 @@ fn main() -> Result<()> {
         ("Bo", "AI product analyst"),
         ("Chen", "ML engineer"),
     ] {
-        session.add_participant(Agent {
-            persona: persona.to_string(),
-            ..Agent::new(name, "gpt-4o")
-        });
+        session.add_agent(Agent {
+            persona: Some(persona.to_string()),
+            ..Agent::new(name).with_model("gpt-4o")
+        })?;
     }
-    session.add_orchestrator(Agent {
-        role: Role::Orchestrator,
-        ..Agent::new("Lead", "gpt-4o")
-    })?;
+    session.add_agent(
+        Agent::new("Lead")
+            .with_model("gpt-4o")
+            .with_role("orchestrator"),
+    )?;
 
     session.add_skill("agent-browser")?;
     session.add_skill("fact-check")?;

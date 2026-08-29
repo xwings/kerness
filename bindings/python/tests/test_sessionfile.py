@@ -121,7 +121,7 @@ class TestMissingAndMalformed:
 
 class TestIdentity:
     def test_the_same_run_passes_however_it_was_registered(self):
-        """Participants are sorted because add_participant order is not what
+        """Participants are sorted because add_agent order is not what
         makes two runs the same session. Refusing over it would be a false
         alarm on a script whose calls were merely reordered."""
         check_identity(IDENTITY, dict(IDENTITY))

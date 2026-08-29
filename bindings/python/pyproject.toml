@@ -51,6 +51,7 @@ features = ["pyo3/extension-module"]
 include = [
     { path = "LICENSE", format = "sdist" },
     { path = "kerness/gameplans/*.md", format = "sdist" },
+    { path = "kerness/roles/*.md", format = "sdist" },
     { path = "kerness/personas/*.md", format = "sdist" },
     { path = "kerness/skills/*/SKILL.md", format = "sdist" },
 ]

@@ -6,7 +6,7 @@ Saving a run so it can be resumed. A snapshot holds the conversation's turns and
 transcript, the orchestrator's loop state, the compaction count, and an identity
 block describing the session it came from. On resume, the identity is checked
 first: a snapshot from a different gameplan or a different agent roster is
-refused rather than half-applied. Serves **M2**.
+refused rather than half-applied.
 
 ## Status
 

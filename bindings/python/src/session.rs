@@ -7,16 +7,18 @@
 //!
 //! The `add_*` methods return the session itself, so that registration chains.
 //! In Rust that is `&mut Self`; here it is the same Python object handed back,
-//! so `Session(...).add_participant(...)` builds one session rather than
+//! so `Session(...).add_agent(...)` builds one session rather than
 //! dropping it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kerness::agent::Role;
+use kerness::exec::DEFAULT_TIMEOUT;
+use kerness::provider::ReasoningEffort;
 use kerness::pyfmt::repr_str;
-use kerness::session::{Session, SessionConfig, SessionResult};
+use kerness::role::Position;
+use kerness::session::{Session, SessionConfig, SessionResult, DEFAULT_MAX_CONTEXT_TOKENS};
 use kerness::tooling::{Arguments, ToolHandler};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -174,25 +176,31 @@ pub struct PySession {
 }
 
 impl PySession {
-    /// Build an agent from the keywords `add_participant` and
-    /// `add_orchestrator` share, and give it *role*.
+    /// Build an agent from `add_agent`'s keywords.
     #[allow(clippy::too_many_arguments)]
     fn agent(
         name: String,
-        model: String,
-        persona: String,
-        role: Role,
-        language: String,
-        system_prompt: String,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        persona: Option<String>,
+        role: Option<String>,
+        language: Option<String>,
+        system_prompt: Option<String>,
         provider: Option<Bound<'_, PyAny>>,
         skills: Option<Vec<String>>,
         memory: Option<String>,
+        workspace: Option<String>,
     ) -> PyResult<kerness::Agent> {
         Ok(kerness::Agent {
             name,
             model,
+            reasoning_effort: match reasoning_effort {
+                Some(level) => Some(ReasoningEffort::parse(&level).raise()?),
+                None => None,
+            },
             persona,
             role,
+            position: Position::Participant,
             language,
             system_prompt,
             provider: match provider.filter(|object| !object.is_none()) {
@@ -201,6 +209,7 @@ impl PySession {
             },
             skills,
             memory,
+            workspace,
         })
     }
 }
@@ -212,18 +221,22 @@ impl PySession {
         gameplan="debate".to_string(),
         topic=String::new(),
         provider=None,
+        model=None,
+        reasoning_effort="high".to_string(),
+        persona=None,
+        language=None,
         channel=None,
         memory="memory.md".to_string(),
         memory_write=false,
         session_file=None,
-        max_context_tokens=256_000,
+        max_context_tokens=DEFAULT_MAX_CONTEXT_TOKENS,
         access_policy=None,
         max_rounds=None,
         max_turns=None,
         max_tool_iterations=None,
         turn_delay_sec=1.0,
         show_reasoning=None,
-        system_prompt="You are a participant in a structured debate. Be concise.".to_string(),
+        system_prompt=None,
         orchestrator_retries=None,
         tool_results_in_history=false,
     ))]
@@ -232,6 +245,10 @@ impl PySession {
         gameplan: String,
         topic: String,
         provider: Option<Bound<'_, PyAny>>,
+        model: Option<String>,
+        reasoning_effort: String,
+        persona: Option<String>,
+        language: Option<String>,
         channel: Option<Bound<'_, PyAny>>,
         memory: String,
         memory_write: bool,
@@ -243,7 +260,7 @@ impl PySession {
         max_tool_iterations: Option<u32>,
         turn_delay_sec: f64,
         show_reasoning: Option<bool>,
-        system_prompt: String,
+        system_prompt: Option<String>,
         orchestrator_retries: Option<i64>,
         tool_results_in_history: bool,
     ) -> PyResult<Self> {
@@ -258,6 +275,10 @@ impl PySession {
                 Some(object) => bind_provider(&object)?,
                 None => None,
             },
+            model,
+            reasoning_effort: ReasoningEffort::parse(&reasoning_effort).raise()?,
+            persona,
+            language,
             channel: bound_channel.clone().map(|channel| channel as _),
             memory,
             memory_write,
@@ -319,79 +340,59 @@ impl PySession {
         self.inner.set_exec(patterns);
     }
 
-    /// Add a participant agent to the session.
+    /// Add an agent to the session.
+    ///
+    /// Every keyword defaults to `None`, meaning *unset*: the session's value
+    /// fills it at `run()`. An empty string is a value, not an absence.
+    ///
+    /// `role` is the exception — it has no session-level default, because a
+    /// session-wide role would make every agent the orchestrator at once.
+    /// Unset seats a participant. A built-in name or a path to a `.md` role
+    /// file is read here and now, so a typo raises at this call; anything else
+    /// is that agent's job written out as prose, and prose always seats a
+    /// participant.
     #[pyo3(signature = (
         name,
-        model=String::new(),
-        persona=String::new(),
-        language=String::new(),
-        system_prompt=String::new(),
+        model=None,
+        reasoning_effort=None,
+        persona=None,
+        role=None,
+        language=None,
+        system_prompt=None,
         provider=None,
         skills=None,
         memory=None,
+        workspace=None,
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn add_participant<'py>(
+    fn add_agent<'py>(
         mut slf: PyRefMut<'py, Self>,
         name: String,
-        model: String,
-        persona: String,
-        language: String,
-        system_prompt: String,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        persona: Option<String>,
+        role: Option<String>,
+        language: Option<String>,
+        system_prompt: Option<String>,
         provider: Option<Bound<'_, PyAny>>,
         skills: Option<Vec<String>>,
         memory: Option<String>,
+        workspace: Option<String>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let agent = PySession::agent(
             name,
             model,
+            reasoning_effort,
             persona,
-            Role::Participant,
+            role,
             language,
             system_prompt,
             provider,
             skills,
             memory,
+            workspace,
         )?;
-        slf.inner.add_participant(agent);
-        Ok(slf)
-    }
-
-    /// Add the session's one orchestrator.
-    #[pyo3(signature = (
-        name,
-        model=String::new(),
-        persona=String::new(),
-        language=String::new(),
-        system_prompt=String::new(),
-        provider=None,
-        skills=None,
-        memory=None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn add_orchestrator<'py>(
-        mut slf: PyRefMut<'py, Self>,
-        name: String,
-        model: String,
-        persona: String,
-        language: String,
-        system_prompt: String,
-        provider: Option<Bound<'_, PyAny>>,
-        skills: Option<Vec<String>>,
-        memory: Option<String>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
-        let agent = PySession::agent(
-            name,
-            model,
-            persona,
-            Role::Orchestrator,
-            language,
-            system_prompt,
-            provider,
-            skills,
-            memory,
-        )?;
-        slf.inner.add_orchestrator(agent).raise()?;
+        slf.inner.add_agent(agent).raise()?;
         Ok(slf)
     }
 
@@ -422,7 +423,7 @@ impl PySession {
     }
 
     /// Run an external command with access control.
-    #[pyo3(signature = (command, *, cwd=None, timeout_sec=60.0, actor=""))]
+    #[pyo3(signature = (command, *, cwd=None, timeout_sec=DEFAULT_TIMEOUT.as_secs_f64(), actor=""))]
     fn run_command(
         &self,
         command: &str,

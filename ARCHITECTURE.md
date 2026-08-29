@@ -59,9 +59,9 @@ root carries one manifest — `Cargo.toml`. A Python build starts from
 Cargo.toml                  workspace root, shared dependency versions
 crates/
   kerness/                  the framework — pure Rust, links no Python
-    src/                    24 modules (see the Index)
-    assets/                 built-in gameplans, personas, skills
-    tests/                  88 integration tests over the crate's public surface
+    src/                    29 modules, documented by subsystem in the Index
+    assets/                 built-in gameplans, roles, personas, skills
+    tests/                  101 integration tests over the crate's public surface
     examples/               8 harnesses driven from Rust alone
 bindings/
   python/                   everything the wheel is built from
@@ -75,7 +75,7 @@ bindings/
       provider.py           deliberate Python (see ARCHITECTURE/provider.md)
       access.py             deliberate Python (console prompt)
       selfcheck.py          deliberate Python (import health)
-      gameplans/ personas/ skills/   the same assets, installed
+      gameplans/ roles/ personas/ skills/   the same assets, installed
     tests/                  26 pytest modules over the Python surface
     examples/               runnable harnesses, walked by test_examples.py above
 .github/workflows/          CI on every push; release builds wheels and an sdist
@@ -104,10 +104,10 @@ The version is declared once, as `[workspace.package] version` in the root
 that as `kerness.__version__`. A release bumps one number.
 
 `crates/kerness/assets/` and
-`bindings/python/kerness/{gameplans,personas,skills}/` hold byte-identical
+`bindings/python/kerness/{gameplans,roles,personas,skills}/` hold byte-identical
 copies. Both must exist: the crate cannot read the package's copy when used from
 Rust alone, and the wheel cannot ship the crate's. Nothing in the build keeps
-them in step, so `bindings/python/tests/test_packaging.py:30` asserts it
+them in step, so `bindings/python/tests/test_packaging.py:40` asserts it
 directly.
 
 ## Boot and Entry Flow
@@ -121,25 +121,25 @@ directly.
    express), the `ToolDialect` enum (callers compare members with `is`, so it
    must be a real `enum.Enum`), and the assets root (only the package knows where
    pip put it). `bootstrap` also installs the HTTP transport seam and the logger
-   — `bindings/python/src/lib.rs:33`.
+   — `bindings/python/src/lib.rs:34`.
 3. The remaining imports pull the public names out of the per-subsystem shims.
-4. The caller builds a `Session(...)`, registers participants, tools, and skills,
+4. The caller builds a `Session(...)`, registers agents, tools, and skills,
    and calls `run()`.
 
 ### From Rust
 
 1. The caller sets `kerness::assets::set_root(...)` if the built-in gameplans are
    wanted from outside the crate directory, otherwise `$KERNESS_ASSETS` or
-   `$CARGO_MANIFEST_DIR/assets` resolves it — `crates/kerness/src/assets.rs:31`.
-2. `SessionConfig { .. }` → `Session::new` → `add_participant` → `run`.
+   `$CARGO_MANIFEST_DIR/assets` resolves it — `crates/kerness/src/assets.rs:38`.
+2. `SessionConfig { .. }` → `Session::new` → `add_agent` → `run`.
 
 ### Inside `run()`
 
-`Session::run` (`crates/kerness/src/session.rs:566`) is the whole harness:
+`Session::run` (`crates/kerness/src/session.rs:646`) is the whole harness:
 it resolves the gameplan's harness spec against what was registered, builds the
 skill registry and access manager, seeds the `Conversation`, then either runs the
 round-robin participant loop or hands control to `OrchestratorLoop::run`
-(`crates/kerness/src/orchestrator.rs:447`) when the gameplan declares an
+(`crates/kerness/src/orchestrator.rs:462`) when the gameplan declares an
 orchestrator. Each agent turn goes through `AgentRunner::run`
 (`crates/kerness/src/agent_runtime.rs:110`), which is the provider-call /
 tool-call / feed-results cycle. A `SessionResult` comes back with the transcript,
@@ -157,23 +157,39 @@ Python package as well as the crate.
 | `CHARS_PER_TOKEN` | `4` | `crates/kerness/src/compaction.rs:33` |
 | `COMPACT_TO_FRACTION` | `0.5` | `crates/kerness/src/compaction.rs:40` |
 | `MAX_INVALID_CALLS` | `3` | `crates/kerness/src/agent_runtime.rs:33` |
+| `DEFAULT_ROLE_FILE` | `participant.md` | `crates/kerness/src/role.rs:66` |
 | `DEFAULT_TERMINATORS` | `CONSENSUS_REACHED`, `END_SESSION` | `crates/kerness/src/utils.rs:12` |
 | `RESERVED_TOOL_NAMES` | `["Skill"]` | `crates/kerness/src/harness.rs:25` |
 | `DEFAULT_TIMEOUT` | 60s | `crates/kerness/src/exec.rs:18` |
-| Provider base URLs | OpenAI, OpenRouter, Anthropic | `crates/kerness/src/provider/{openai,openrouter,claude}.rs:17,15,15` |
+| `ReasoningEffort::default()` | `high` | `crates/kerness/src/provider/mod.rs:63` |
+| `DEFAULT_REQUEST_TIMEOUT_SEC` | `60` | `crates/kerness/src/provider/mod.rs:39` |
+| `DEFAULT_RETRIES` | `2` | `crates/kerness/src/provider/mod.rs:41` |
+| `DEFAULT_BACKOFF_SEC` | `2.0` | `crates/kerness/src/provider/mod.rs:43` |
+| `DEFAULT_TEMPERATURE` | `1.0` | `crates/kerness/src/provider/mod.rs:45` |
+| `DEFAULT_TOP_P` | `1.0` | `crates/kerness/src/provider/mod.rs:47` |
+| `DEFAULT_CLAUDE_MAX_TOKENS` | `4096` | `crates/kerness/src/provider/claude.rs:26` |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | `crates/kerness/src/provider/openai.rs:18` |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | `crates/kerness/src/provider/openrouter.rs:15` |
+| `CLAUDE_BASE_URL` | `https://api.anthropic.com/v1` | `crates/kerness/src/provider/claude.rs:16` |
+
+The request defaults below `ReasoningEffort` are declared once and named twice:
+the crate's four backends build their `Default` impls from them, and the Python
+constructors write the same constants into their own signatures. A value spelled
+out in both languages drifts silently; one both sides import cannot.
+`crates/kerness/tests/public_api.rs` and
+`bindings/python/tests/test_provider.py` each assert them.
 
 ## Roadmap
 
-| | Milestone | Status |
-| --- | --- | --- |
-| **M1** | Core primitives: errors, utils, HTTP, JSON Schema, tooling, tool schemas, toolkit, conversation, memory, compaction, personas, channels | done |
-| **M2** | Contract and runtime: harness, gameplans, access, exec, skills, agents, prompting, session files, providers, agent runtime, orchestrator loop, session | done |
-| **M3** | Python surface: the extension module, the base classes Python subclasses, the patchable transport seam, the package and its assets | done |
-| **M4** | Test suite and examples: 26 pytest modules over the Python surface, runnable example harnesses | done |
-| **M5** | Surface sweep: no unused dependency, no unreferenced `pub` item, clippy clean at `-D warnings`, every framework constant reachable from Python | done |
-| **M6** | This architecture doc set, and the public introduction: `README.md`, project marks, MIT licence | done |
-| **M7** | Release verification: full test matrix green, wheel and sdist build, the sdist installs into a clean interpreter and its self-check exits 0 | done |
-| **M8** | The Rust surface proving itself: 88 integration tests over the public API, an example per capability including one that needs no key, and CI running both suites on every push | done |
+Framework work that is not built yet. Everything else this document describes
+exists and is tested; the [Verification](#verification) gate runs green at the
+end of each of these, not only at the end of the list.
+
+| Planned | |
+| --- | --- |
+| **Runtime events and a step machine** | A typed synchronous `EventSink` threaded through session, loop, and agent runtime, `Session::step()` so a caller drives the run rather than blocking on `run()`, cancellation between steps, approval as a resumable event rather than a console read, and a defaulted `Provider::chat_streaming` each backend opts into. `Channel` becomes an adapter over the sink. The event protocol and the step machine are one change: an approval-requested event is meaningless if the caller cannot answer it. |
+| **Content parts, a session store, and lifecycle hooks** | `Message.content` becomes typed parts — text, images, structured tool output — which moves `SCHEMA_VERSION` to `2` with a migration, and changes what `CHARS_PER_TOKEN` can claim. A `SessionStore` adds IDs, listing, forking, and replay over today's single-file snapshot. Hooks arrive as an `EventSink` whose handlers can veto, rather than as a second interception mechanism beside the first. |
+| **MCP, subagents, budgets, and bundle-defined tools** | An MCP client as an adapter into the existing tool registry, stdio first because it is synchronous. A sequential subagent primitive — parallel fan-out would be the first breach of *no hidden concurrency* and would need that invariant amended deliberately. Usage and cost aggregated into enforceable budgets that stop a run with a named end reason. And a skill directory that defines its own tools over `run_command`, gated on `trust_skill_bundles`, so a skill ships capability rather than only prose. |
 
 ## Verification
 
@@ -182,11 +198,11 @@ its own status.
 
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
-cargo test --workspace -q                             # pass = 305 unit + 88 integration, 0 failed
+cargo test --workspace -q                             # pass = 337 unit + 101 integration, 0 failed
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key, no network
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 394 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 442 passed
 .venv/bin/python -m kerness.selfcheck                 # pass = "OK: all core checks passed", exit 0
 .venv/bin/ruff check bindings/python                  # pass = "All checks passed!"
 ```
@@ -320,6 +336,7 @@ before implementation rather than after mistakes.
 - [persona.md](ARCHITECTURE/persona.md) — loading a persona file into prompt text.
 - [prompting.md](ARCHITECTURE/prompting.md) — assembling a system prompt from its parts.
 - [provider.md](ARCHITECTURE/provider.md) — talking to a model, and the four built-in backends.
+- [role.md](ARCHITECTURE/role.md) — what an agent is in a session, and the chair it takes.
 - [selfcheck.md](ARCHITECTURE/selfcheck.md) — `python -m kerness.selfcheck`, the installation health check.
 - [session.md](ARCHITECTURE/session.md) — the top-level object that assembles and runs everything.
 - [sessionfile.md](ARCHITECTURE/sessionfile.md) — saving and resuming a run.

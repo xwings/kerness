@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from kerness.access import AccessPolicy
+from kerness.channel import ConsoleChannel, FileChannel, MultiChannel
 from kerness.exceptions import AccessDeniedError, SessionError
 from kerness.gameplan_loader import list_builtin_gameplans
 from kerness.session import Session, SessionResult
@@ -27,9 +28,9 @@ class TestOrchestratorDrivenFlow:
             memory=str(tmp_path / "memory.md"),
             **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session.run()
 
     def test_the_closing_keyword_decides_how_the_session_ends(self, tmp_path):
@@ -114,18 +115,18 @@ class TestOrchestratorDrivenFlow:
         assert result.final_summary
 
 
-class TestAddParticipantOrchestrator:
-    def test_both_kinds_are_added_by_their_own_method_and_the_calls_chain(self):
+class TestAddAgent:
+    def test_one_method_seats_both_kinds_and_the_calls_chain(self):
         """Chaining is the documented way to configure a session, so it is
         asserted on the same object that proves each seat landed in the role
-        its method names — a builder that returns None is a builder nobody can
+        its call named — a builder that returns None is a builder nobody can
         use as documented."""
         session = Session(gameplan="debate", topic="Test")
         returned = (
             session
-            .add_participant("Alice", model="m", persona="Engineer")
-            .add_participant("Bob", model="m")
-            .add_orchestrator("Mod", model="m")
+            .add_agent("Alice", model="m", persona="Engineer")
+            .add_agent("Bob", model="m")
+            .add_agent("Mod", model="m", role="orchestrator")
         )
 
         assert returned is session
@@ -135,9 +136,58 @@ class TestAddParticipantOrchestrator:
 
     def test_duplicate_orchestrator_raises(self):
         session = Session(gameplan="debate", topic="Test")
-        session.add_orchestrator("Mod1", model="m")
+        session.add_agent("Mod1", model="m", role="orchestrator")
         with pytest.raises(SessionError, match="already has an orchestrator"):
-            session.add_orchestrator("Mod2", model="m")
+            session.add_agent("Mod2", model="m", role="orchestrator")
+
+    def test_an_unnamed_role_seats_a_participant(self):
+        """The default has to fall this way. The orchestrator is a privileged
+        singleton that conducts the run, so an agent that named nothing must
+        join the conversation rather than take it over."""
+        session = Session(gameplan="debate", topic="Test")
+        session.add_agent("Alice", model="m")
+
+        assert session._agents[0].role is None
+        assert session._agents[0].position == "participant"
+
+    def test_prose_never_reaches_the_orchestrators_seat(self):
+        """The security-relevant case: prose that reads like the built-in name
+        is still prose. Privilege comes from a file declaring
+        ``position: orchestrator``, never from a substring a caller wrote."""
+        session = Session(gameplan="debate", topic="Test")
+        session.add_agent("Prose", model="m", role="orchestrator, but sceptical")
+
+        assert session._agents[0].position == "participant"
+        assert session._agents[0].role == "orchestrator, but sceptical"
+
+    def test_a_role_file_seats_by_its_frontmatter(self, tmp_path):
+        path = tmp_path / "chair.md"
+        path.write_text(
+            "---\nname: chair\nposition: orchestrator\n---\n\nYou chair.\n",
+            encoding="utf-8",
+        )
+        session = Session(gameplan="debate", topic="Test")
+        session.add_agent("Filed", model="m", role=str(path))
+
+        assert session._agents[0].position == "orchestrator"
+        # Pinned to an absolute path at add time, so a later chdir cannot make
+        # the file unfindable halfway through a run.
+        assert Path(session._agents[0].role).is_absolute()
+
+    def test_a_builtin_name_seats_by_its_frontmatter(self):
+        session = Session(gameplan="debate", topic="Test")
+        session.add_agent("Named", model="m", role="orchestrator")
+
+        assert session._agents[0].position == "orchestrator"
+
+    def test_a_role_file_that_is_not_there_raises_where_it_was_named(self):
+        """At the call, not at ``run()``: a typo is knowable the moment it is
+        written, and nothing about it waits on the rest of the session."""
+        session = Session(gameplan="debate", topic="Test")
+        with pytest.raises(SessionError, match="nonexistent.md"):
+            session.add_agent("Alice", model="m", role="roles/nonexistent.md")
+
+        assert session._agents == []
 
 
 class TestAccessControl:
@@ -264,9 +314,9 @@ class TestToolCalls:
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.add_tool(
             name="ping",
             description="Ping tool",
@@ -358,9 +408,9 @@ class TestADenialCostsATurnNotTheSession:
             memory=str(tmp_path / "memory.md"),
             # No access_policy at all — the shipped default is what is on trial.
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session.run(), provider, channel
 
     def test_the_refusal_is_explained_and_the_session_carries_on(
@@ -421,9 +471,9 @@ class TestToolExchangePrivacy:
             memory=str(tmp_path / "memory.md"),
             **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.add_tool(
             name="ping",
             description="Ping tool",
@@ -466,9 +516,9 @@ class TestToolExchangePrivacy:
             gameplan="debate", topic="T", provider=provider, turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"), tool_results_in_history=True,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.add_tool(
             name="ping", description="Ping tool",
             parameters={"type": "object", "properties": {}},
@@ -503,9 +553,9 @@ class TestNativeDialectGuard:
             gameplan="debate", topic="T", provider=provider, turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"), **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session
 
     def test_the_rejection_names_the_dialect_that_caused_it(self, tmp_path):
@@ -558,8 +608,8 @@ class TestHarnessToolNarrowing:
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session
 
     def _prompt(self, tmp_path, tools_line):
@@ -638,13 +688,13 @@ class TestPerAgentProviders:
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="gpt-4o", provider=alice_provider)
+        session.add_agent("Alice", model="gpt-4o", provider=alice_provider)
         # Bob satisfies the debate harness's 2-participant minimum; he needs
         # his own provider because this session deliberately has none.
-        session.add_participant("Bob", model="m", provider=SequenceMockProvider(
+        session.add_agent("Bob", model="m", provider=SequenceMockProvider(
             responses=["Bob's view."]
         ))
-        session.add_orchestrator("Mod", model="claude-sonnet-4", provider=orch_provider)
+        session.add_agent("Mod", model="claude-sonnet-4", provider=orch_provider, role="orchestrator")
 
         result = session.run()
 
@@ -671,9 +721,9 @@ class TestPerAgentProviders:
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="gpt-4o", provider=alice_provider)
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="gpt-4o")
+        session.add_agent("Alice", model="gpt-4o", provider=alice_provider)
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="gpt-4o", role="orchestrator")
 
         session.run()
 
@@ -685,11 +735,158 @@ class TestPerAgentProviders:
         """If no session provider and some agents lack provider, raises error."""
         alice_provider = SequenceMockProvider(responses=["ok"])
         session = Session(gameplan="debate", topic="Test")
-        session.add_participant("Alice", model="m", provider=alice_provider)
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m", provider=alice_provider)
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         with pytest.raises(SessionError, match="Missing.*Bob.*Mod"):
             session.run()
+
+
+class TestSessionDefaults:
+    """A value written once on the session fills every agent that named none."""
+
+    def test_the_session_model_fills_the_agents_that_named_none(self, tmp_path):
+        provider = SequenceMockProvider(responses=[
+            "@Alice, speak.",
+            "Alice's view.",
+            "@Bob, answer that.",
+            "Bob's view.",
+            "END_SESSION",
+            "Summary.",
+        ])
+        session = Session(
+            gameplan="debate",
+            topic="Test",
+            provider=provider,
+            model="house/model",
+            channel=CaptureChannel(),
+            turn_delay_sec=0,
+            memory=str(tmp_path / "memory.md"),
+        )
+        session.add_agent("Alice")
+        session.add_agent("Bob", model="own/model")
+        session.add_agent("Mod", role="orchestrator")
+
+        session.run()
+
+        models = {call["model"] for call in provider.calls}
+        assert "house/model" in models
+        assert "own/model" in models
+
+    def test_an_agent_on_its_own_provider_must_name_its_own_model(self):
+        """A model name belongs to the backend it was written for, so it is the
+        one thing that does not cross a provider boundary."""
+        session = Session(
+            gameplan="debate",
+            topic="Test",
+            provider=SequenceMockProvider(responses=["END_SESSION"]),
+            model="house/model",
+        )
+        session.add_agent("Alice", provider=SequenceMockProvider(responses=["ok"]))
+        session.add_agent("Bob")
+        session.add_agent("Mod", role="orchestrator")
+
+        with pytest.raises(SessionError, match="not inherited across providers"):
+            session.run()
+
+    def test_a_model_named_nowhere_says_both_places_to_write_one(self):
+        session = Session(
+            gameplan="debate",
+            topic="Test",
+            provider=SequenceMockProvider(responses=["END_SESSION"]),
+        )
+        session.add_agent("Alice")
+        session.add_agent("Bob")
+        session.add_agent("Mod", role="orchestrator")
+
+        with pytest.raises(SessionError, match="'Alice' has no model"):
+            session.run()
+
+
+class TestSessionContainment:
+    """The one option that composes rather than overrides."""
+
+    def confined(self, tmp_path, workspace, agent_workspace):
+        session = Session(
+            gameplan="debate",
+            topic="Test",
+            provider=SequenceMockProvider(responses=["END_SESSION", "Summary."]),
+            model="house/model",
+            channel=CaptureChannel(),
+            turn_delay_sec=0,
+            memory=str(workspace / "memory.md"),
+            access_policy=AccessPolicy(allowed_dirs=[workspace], workspace=workspace),
+        )
+        session.add_agent("Alice", workspace=str(agent_workspace))
+        session.add_agent("Bob")
+        session.add_agent("Mod", role="orchestrator")
+        return session
+
+    def test_a_workspace_confines_a_read_the_allowlist_would_have_allowed(self, tmp_path):
+        workspace = tmp_path / "work"
+        (workspace / "alice").mkdir(parents=True)
+        (workspace / "shared.txt").write_text("shared")
+
+        session = self.confined(tmp_path, workspace, workspace / "alice")
+        session.run()
+
+        shared = str(workspace / "shared.txt")
+        assert session.read_file(shared, actor="Bob") == "shared"
+        with pytest.raises(AccessDeniedError, match="outside the workspace"):
+            session.read_file(shared, actor="Alice")
+        with pytest.raises(AccessDeniedError, match="outside the workspace"):
+            session.read_file(str(tmp_path / "escape.txt"), actor="Bob")
+
+    def test_an_agent_workspace_outside_the_sessions_names_the_agent(self, tmp_path):
+        """An agent workspace narrows and never widens: without the refusal, an agent
+        stanza would be a way to hand itself more of the filesystem than the
+        session was given."""
+        workspace = tmp_path / "work"
+        workspace.mkdir()
+
+        session = self.confined(tmp_path, workspace, tmp_path)
+        with pytest.raises(AccessDeniedError, match="never widens it"):
+            session.run()
+
+    def test_a_memory_file_outside_the_workspace_fails_at_construction(self, tmp_path):
+        """The session's own write paths go through the workspace too, and a
+        misplaced one is caught before the run rather than mid-turn."""
+        workspace = tmp_path / "work"
+        workspace.mkdir()
+        with pytest.raises(AccessDeniedError, match="The memory file resolves to"):
+            Session(
+                gameplan="debate",
+                topic="Test",
+                provider=SequenceMockProvider(responses=["END_SESSION"]),
+                memory=str(tmp_path / "memory.md"),
+                access_policy=AccessPolicy(workspace=workspace),
+            )
+
+    def test_a_channel_writing_outside_the_workspace_fails_at_construction(self, tmp_path):
+        """A channel names its destinations through `paths()`, so a file-backed
+        one is confined like the memory file. Wrapping it in a fan-out does not
+        hide it."""
+        workspace = tmp_path / "work"
+        workspace.mkdir()
+
+        def build(channel):
+            return Session(
+                gameplan="debate",
+                topic="Test",
+                provider=SequenceMockProvider(responses=["END_SESSION"]),
+                memory=str(workspace / "memory.md"),
+                channel=channel,
+                access_policy=AccessPolicy(workspace=workspace),
+            )
+
+        assert build(FileChannel(str(workspace / "log.txt"))) is not None
+        assert build(ConsoleChannel()) is not None
+        for channel in (
+            FileChannel(str(tmp_path / "escape.txt")),
+            MultiChannel(ConsoleChannel(), FileChannel(str(tmp_path / "escape.txt"))),
+        ):
+            with pytest.raises(AccessDeniedError, match="destination resolves to"):
+                build(channel)
 
 
 class TestSessionErrors:
@@ -699,15 +896,15 @@ class TestSessionErrors:
         "cannot run" would satisfy all three while telling the caller nothing
         about which one they actually left out."""
         no_provider = Session(gameplan="debate", topic="Test")
-        no_provider.add_participant("Alice", model="m")
-        no_provider.add_orchestrator("Mod", model="m")
+        no_provider.add_agent("Alice", model="m")
+        no_provider.add_agent("Mod", model="m", role="orchestrator")
         with pytest.raises(SessionError, match="No provider|Missing"):
             no_provider.run()
 
         no_topic = Session(
             gameplan="debate", topic="", provider=MockProvider(responses=["ok"])
         )
-        no_topic.add_participant("Alice", model="m")
+        no_topic.add_agent("Alice", model="m")
         with pytest.raises(SessionError, match="No topic"):
             no_topic.run()
 
@@ -715,7 +912,7 @@ class TestSessionErrors:
             gameplan="debate", topic="Test",
             provider=MockProvider(responses=["ok"]),
         )
-        no_agents.add_orchestrator("Mod", model="m")
+        no_agents.add_agent("Mod", model="m", role="orchestrator")
         with pytest.raises(SessionError, match="No participant"):
             no_agents.run()
 
@@ -725,8 +922,8 @@ class TestSessionErrors:
         for name in list_builtin_gameplans():
             provider = MockProvider(responses=["ok"])
             session = Session(gameplan=name, topic="Test", provider=provider)
-            session.add_participant("Alice", model="m")
-            session.add_participant("Bob", model="m")
+            session.add_agent("Alice", model="m")
+            session.add_agent("Bob", model="m")
             with pytest.raises(SessionError, match="orchestrator"):
                 session.run()
 
@@ -752,9 +949,9 @@ class TestSessionResult:
             gameplan="debate", topic="Test", provider=provider,
             turn_delay_sec=0, memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
 
         result = session.run()
 
@@ -778,9 +975,9 @@ class TestSessionResult:
             memory=str(tmp_path / "memory.md"),
             **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.run()
         return session
 
@@ -830,9 +1027,9 @@ class TestSkillInjection:
         exactly how an agent configured to carry nothing carries everything.
         """
         def configure(session):
-            session.add_participant("Alice", model="m", skills=[])
-            session.add_participant("Bob", model="m")
-            session.add_orchestrator("Mod", model="m")
+            session.add_agent("Alice", model="m", skills=[])
+            session.add_agent("Bob", model="m")
+            session.add_agent("Mod", model="m", role="orchestrator")
             session.add_skill("summarize")
 
         provider = self._run(tmp_path, configure)
@@ -849,9 +1046,9 @@ class TestSkillInjection:
         """The defining assertion of progressive disclosure: descriptions
         travel, bodies do not."""
         def configure(session):
-            session.add_participant("Alice", model="m")
-            session.add_participant("Bob", model="m")
-            session.add_orchestrator("Mod", model="m")
+            session.add_agent("Alice", model="m")
+            session.add_agent("Bob", model="m")
+            session.add_agent("Mod", model="m", role="orchestrator")
             session.add_skill("agent-browser")
 
         provider = self._run(tmp_path, configure)
@@ -863,9 +1060,9 @@ class TestSkillInjection:
     def test_per_agent_specific_skills(self, tmp_path):
         """Agent with skills=["challenge"] only gets that skill."""
         def configure(session):
-            session.add_participant("Alice", model="m", skills=["challenge"])
-            session.add_participant("Bob", model="m")
-            session.add_orchestrator("Mod", model="m", skills=["summarize"])
+            session.add_agent("Alice", model="m", skills=["challenge"])
+            session.add_agent("Bob", model="m")
+            session.add_agent("Mod", model="m", skills=["summarize"], role="orchestrator")
             session.add_skill("fact-check")
 
         provider = self._run(tmp_path, configure)
@@ -890,14 +1087,37 @@ class TestSkillInjection:
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.add_skill("summarize")
         session.run()
 
         system = self._system_for(provider, "orchestrator")
         assert "- summarize:" in system
         assert "- challenge:" in system
+
+    def test_a_skill_requiring_a_tool_nobody_registered_is_refused(self, tmp_path):
+        """Before the first provider call, so a skill whose body reads "call
+        ``write_file`` with..." does not reach a model that has no such tool."""
+        base = tmp_path / "needy"
+        base.mkdir()
+        (base / "SKILL.md").write_text(
+            "---\nname: needy\ndescription: Wants a tool.\n"
+            "requires-tools: [write_file]\n---\n\nBody.\n"
+        )
+        session = Session(
+            gameplan="debate", topic="Test",
+            provider=SequenceMockProvider(responses=["END_SESSION"]),
+            channel=CaptureChannel(), turn_delay_sec=0,
+            memory=str(tmp_path / "memory.md"),
+        )
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
+        session.add_skill(str(base / "SKILL.md"))
+
+        with pytest.raises(SessionError, match="requires the tool 'write_file'"):
+            session.run()
 
 
 class TestSkillToolEndToEnd:
@@ -910,9 +1130,9 @@ class TestSkillToolEndToEnd:
             gameplan="debate", topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"), **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session
 
     def test_a_loaded_body_reaches_that_turn_and_no_later_one(self, tmp_path):
@@ -1002,9 +1222,9 @@ class TestSkillToolEndToEnd:
             gameplan="debate", topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m", skills=[str(base / "SKILL.md")])
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m", skills=[str(base / "SKILL.md")])
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.add_tool(
             name="ping", description="Ping",
             parameters={"type": "object", "properties": {}},
@@ -1030,9 +1250,9 @@ class TestResultShaping:
             gameplan=gameplan, topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session
 
     def test_the_declared_fields_are_lifted_out_of_the_summary(self, tmp_path):
@@ -1096,8 +1316,8 @@ class TestResultShaping:
 
 
 class TestOrchestratorPromptOverride:
-    """add_orchestrator(system_prompt=...) replaces the gameplan-derived
-    base rather than being stored and ignored."""
+    """add_agent(role="orchestrator", system_prompt=...) replaces the
+    gameplan-derived base rather than being stored and ignored."""
 
     def _run(self, tmp_path, provider, **kwargs):
         session = Session(
@@ -1105,9 +1325,9 @@ class TestOrchestratorPromptOverride:
             turn_delay_sec=0, channel=CaptureChannel(),
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m", **kwargs)
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", **kwargs, role="orchestrator")
         session.run()
         return "\n".join(
             m["content"] for m in provider.calls[0]["messages"]
@@ -1171,8 +1391,8 @@ class TestHarnessDrivenLimits:
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"),
             **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session.run()
 
     def test_only_the_declared_terminator_ends_the_session(self, tmp_path):
@@ -1322,7 +1542,7 @@ class TestOrchestratorIsRequiredToRun:
             turn_delay_sec=0, channel=CaptureChannel(),
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
+        session.add_agent("Alice", model="m")
         return session
 
     def test_the_missing_agent_is_the_problem_and_the_error_says_so(
@@ -1337,10 +1557,10 @@ class TestOrchestratorIsRequiredToRun:
             self._session(tmp_path).run()
 
         assert "orchestrator-driven" in str(exc.value)
-        assert "add_orchestrator" in str(exc.value)
+        assert "role is 'orchestrator'" in str(exc.value)
 
         fixed = self._session(tmp_path)
-        fixed.add_orchestrator("Mod", model="m")
+        fixed.add_agent("Mod", model="m", role="orchestrator")
         assert fixed.run().turns_completed == 1
 
 
@@ -1360,8 +1580,8 @@ class TestDeclaredKeysReachTheOrchestrator:
             gameplan=str(path), topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.run()
         return "\n".join(
             m["content"] for m in provider.calls[0]["messages"]
@@ -1450,9 +1670,9 @@ class TestMemoryMarkers:
             memory=str(memory),
             **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.run()
         return session, channel
 
@@ -1505,9 +1725,9 @@ class TestMemoryMarkers:
             memory=str(path),
             memory_write=True,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
 
         session.run()
 
@@ -1542,9 +1762,9 @@ class TestMemoryMarkers:
             memory=str(session_mem),
             memory_write=True,
         )
-        session.add_participant("Alice", model="m", memory=str(alice_mem))
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m", memory=str(alice_mem))
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
 
         session.run()
 
@@ -1587,9 +1807,9 @@ class TestMemoryMarkers:
             turn_delay_sec=0,
             memory=str(session_mem),
         )
-        session.add_participant("Bob", model="m")  # no per-agent memory
-        session.add_participant("Carol", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Bob", model="m")  # no per-agent memory
+        session.add_agent("Carol", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
 
         session.run()
 
@@ -1630,9 +1850,9 @@ class TestMemoryTools:
             memory=str(memory),
             **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session
 
     def test_write_memory_is_offered_only_to_a_writing_session(self, tmp_path):
@@ -1736,9 +1956,9 @@ class TestMemoryTools:
             memory=str(session_mem),
             memory_write=True,
         )
-        session.add_participant("Alice", model="m", memory=str(alice_mem))
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m", memory=str(alice_mem))
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.run()
 
         assert "a private note" in alice_mem.read_text(encoding="utf-8")
@@ -1766,8 +1986,8 @@ class TestMemoryTools:
             memory=str(tmp_path / "memory.md"),
             memory_write=True,
         )
-        session.add_participant("Alice", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.run()
 
         prompt = provider.calls[0]["messages"][0]["content"]
@@ -1797,8 +2017,8 @@ class TestParticipantCountIsEnforcedAtRun:
             memory=str(tmp_path / "memory.md"),
         )
         for name in seats:
-            session.add_participant(name, model="m")
-        session.add_orchestrator("Mod", model="m")
+            session.add_agent(name, model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session, provider
 
     def test_too_few_is_refused_before_any_turn_and_the_minimum_runs(
@@ -1831,9 +2051,9 @@ class TestTheDraftVerdictStaysPrivate:
             gameplan="debate", topic="T", provider=provider, channel=channel,
             turn_delay_sec=0, memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session.run(), channel, provider
 
     RESPONSES = [
@@ -1878,9 +2098,9 @@ class TestTheDraftVerdictStaysPrivate:
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "m2.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         result = session.run()
 
         assert result.final_summary == "DRAFTVERDICT Alice won."
@@ -1902,9 +2122,9 @@ class TestPersonasResolveBeforeTheRun:
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m", persona=persona)
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m", persona=persona)
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session, provider
 
     def test_a_missing_persona_stops_the_run_before_it_costs_anything(
@@ -1986,9 +2206,9 @@ class TestTheRosterNamesTheCharacter:
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m", persona=persona)
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m", persona=persona)
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.run()
         return provider.calls[0]["messages"][0]["content"]
 
@@ -2026,16 +2246,16 @@ class TestSessionFileIsOptOut:
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
         )
-        session.add_participant("Alice", model="m")
-        session.add_participant("Bob", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         session.run()
 
         assert not list(tmp_path.glob("*.json"))
 
 
 class TestResumingFromASessionFile:
-    """M10: a second run over the same path continues the first.
+    """A second run over the same path continues the first.
 
     Resume is automatic — no `resume=True` — so these tests carry more weight
     than usual. Everything that distinguishes "continued" from "started over"
@@ -2065,8 +2285,8 @@ class TestResumingFromASessionFile:
             memory=str(tmp_path / "memory.md"),
             session_file=str(tmp_path / "run.json"), max_turns=max_turns,
         )
-        session.add_participant("Alice", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session.run(), session, provider
 
     def test_the_file_holds_the_phase_position_not_just_a_transcript(
@@ -2167,8 +2387,8 @@ class TestContextLimitKeepsTheConversationSendable:
             gameplan=str(path), topic="T", provider=provider, channel=channel,
             turn_delay_sec=0, memory=str(tmp_path / "memory.md"), **kwargs,
         )
-        session.add_participant("Alice", model="m")
-        session.add_orchestrator("Mod", model="m")
+        session.add_agent("Alice", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
         return session.run(), channel
 
     def test_a_long_run_compacts_the_prompt_and_only_the_prompt(self, tmp_path):

@@ -311,7 +311,7 @@ pub fn validate_harness(
     if spec.agents.orchestrator.required && orchestrator.is_none_or(|name| name.is_empty()) {
         problems.push(format!(
             "gameplan '{}' requires an orchestrator; \
-             add one with session.add_orchestrator(...)",
+             add one with session.add_agent(...)",
             spec.name
         ));
     }
@@ -408,16 +408,18 @@ fn parse_agents(raw: Option<&Value>, source: &str) -> Result<AgentsSpec> {
     let participants = match get(raw, "participants") {
         None => ParticipantSpec::default(),
         Some(Value::Object(participants)) => {
-            let minimum = parse_positive_int(
+            let minimum = parse_int_at_least(
                 participants.get("min"),
+                1,
                 1,
                 "agents.participants.min",
                 source,
             )?;
             let maximum = match get(participants, "max") {
                 None => None,
-                Some(value) => Some(parse_positive_int(
+                Some(value) => Some(parse_int_at_least(
                     Some(value),
+                    1,
                     1,
                     "agents.participants.max",
                     source,
@@ -487,8 +489,8 @@ fn parse_loop(raw: Option<&Value>, source: &str) -> Result<LoopSpec> {
     }
 
     Ok(LoopSpec {
-        max_turns: parse_positive_int(raw.get("max_turns"), 50, "loop.max_turns", source)?,
-        max_rounds: parse_positive_int(raw.get("max_rounds"), 3, "loop.max_rounds", source)?,
+        max_turns: parse_int_at_least(raw.get("max_turns"), 50, 1, "loop.max_turns", source)?,
+        max_rounds: parse_int_at_least(raw.get("max_rounds"), 3, 1, "loop.max_rounds", source)?,
         terminate_on: terminate,
         phases: parse_phases(get(raw, "phases"), source)?,
         advance_on: raw
@@ -498,9 +500,10 @@ fn parse_loop(raw: Option<&Value>, source: &str) -> Result<LoopSpec> {
                 || "NEXT_PHASE".to_string(),
                 |value| pyfmt::str(value).trim().to_string(),
             ),
-        orchestrator_retries: parse_count(
+        orchestrator_retries: parse_int_at_least(
             raw.get("orchestrator_retries"),
             2,
+            0,
             "loop.orchestrator_retries",
             source,
         )?,
@@ -548,8 +551,9 @@ fn parse_phases(raw: Option<&Value>, source: &str) -> Result<Vec<PhaseSpec>> {
         }
         phases.push(PhaseSpec {
             instruction: text(entry, "instruction"),
-            rounds: parse_positive_int(
+            rounds: parse_int_at_least(
                 entry.get("rounds"),
+                1,
                 1,
                 &format!("loop.phases[{name}].rounds"),
                 source,
@@ -651,29 +655,19 @@ fn parse_result(raw: Option<&Value>, source: &str) -> Result<Vec<ResultField>> {
     Ok(fields)
 }
 
-fn parse_positive_int(raw: Option<&Value>, default: i64, key: &str, source: &str) -> Result<i64> {
-    let Some(value) = raw else {
-        return Ok(default);
-    };
-    let parsed = coerce_int(value).ok_or_else(|| {
-        Error::GameplanLoad(format!(
-            "'{key}' in {source} must be an integer, got {}.",
-            pyfmt::repr(value)
-        ))
-    })?;
-    if parsed < 1 {
-        return Err(Error::GameplanLoad(format!(
-            "'{key}' in {source} must be >= 1, got {parsed}."
-        )));
-    }
-    Ok(parsed)
-}
-
-/// Like [`parse_positive_int`], but zero is a legitimate answer.
+/// An integer key with a floor, or *default* when the key is absent.
 ///
+/// *minimum* is the only thing that varies across the callers: a bound is `1`
+/// because a loop that may run zero rounds is not a session, while
 /// `orchestrator_retries: 0` means "do not re-ask", which is a real choice for
 /// a harness that would rather end than nag.
-fn parse_count(raw: Option<&Value>, default: i64, key: &str, source: &str) -> Result<i64> {
+fn parse_int_at_least(
+    raw: Option<&Value>,
+    default: i64,
+    minimum: i64,
+    key: &str,
+    source: &str,
+) -> Result<i64> {
     let Some(value) = raw else {
         return Ok(default);
     };
@@ -683,9 +677,9 @@ fn parse_count(raw: Option<&Value>, default: i64, key: &str, source: &str) -> Re
             pyfmt::repr(value)
         ))
     })?;
-    if parsed < 0 {
+    if parsed < minimum {
         return Err(Error::GameplanLoad(format!(
-            "'{key}' in {source} must be >= 0, got {parsed}."
+            "'{key}' in {source} must be >= {minimum}, got {parsed}."
         )));
     }
     Ok(parsed)

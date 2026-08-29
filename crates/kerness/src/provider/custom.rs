@@ -3,11 +3,13 @@
 use serde_json::{Map, Value};
 
 use super::{
-    answering_model, attach_tool_schemas, bearer_headers, chat_completions_payload,
-    openai_response, reported_usage, Provider, ProviderBase, ProviderResponse,
+    attach_reasoning_effort, attach_tool_schemas, bearer_headers, chat_completions_payload,
+    post_chat_completions, Provider, ProviderBase, ProviderResponse, ReasoningEffort,
+    DEFAULT_BACKOFF_SEC, DEFAULT_REQUEST_TIMEOUT_SEC, DEFAULT_RETRIES, DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
 };
 use crate::error::Result;
-use crate::http::{self, Headers};
+use crate::http::Headers;
 use crate::tooling::ToolSpec;
 use crate::toolschema::ToolDialect;
 
@@ -40,12 +42,12 @@ impl Default for CustomConfig {
             url: String::new(),
             api_key: String::new(),
             model_config: Map::new(),
-            timeout_sec: 60,
-            retries: 2,
-            backoff_sec: 2.0,
+            timeout_sec: DEFAULT_REQUEST_TIMEOUT_SEC,
+            retries: DEFAULT_RETRIES,
+            backoff_sec: DEFAULT_BACKOFF_SEC,
             interval_sec: None,
-            temperature: 1.0,
-            top_p: 1.0,
+            temperature: DEFAULT_TEMPERATURE,
+            top_p: DEFAULT_TOP_P,
             max_tokens: None,
             extra_headers: Vec::new(),
             extra_body: Map::new(),
@@ -118,6 +120,7 @@ impl Provider for CustomProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         let mut headers = bearer_headers(&self.api_key);
         for (name, value) in &self.extra_headers {
@@ -134,6 +137,9 @@ impl Provider for CustomProvider {
             self.top_p,
             self.max_tokens,
         );
+        // Before the extra body, unlike the tool schemas: a vendor that spells
+        // the level its own way needs to be able to overwrite this key.
+        attach_reasoning_effort(&mut payload, self.effective_effort(effort));
         for (key, value) in &self.extra_body {
             payload.insert(key.clone(), value.clone());
         }
@@ -141,18 +147,6 @@ impl Provider for CustomProvider {
         // framework needs the model to see.
         attach_tool_schemas(&mut payload, self.effective_dialect(), tools);
 
-        let url = format!("{}/chat/completions", self.base_url);
-        let response = http::post_json(&url, &Value::Object(payload), &headers, self.timeout_sec)?;
-
-        let (content, tool_calls, stop_reason) = openai_response(&response, model)?;
-        Ok(ProviderResponse {
-            content,
-            model: answering_model(&response, model),
-            usage: reported_usage(&response),
-            structured: None,
-            tool_calls,
-            stop_reason,
-            raw: response,
-        })
+        post_chat_completions(&self.base_url, payload, &headers, self.timeout_sec, model)
     }
 }

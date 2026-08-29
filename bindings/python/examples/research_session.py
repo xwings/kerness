@@ -20,10 +20,10 @@ def main() -> None:
         channel=kerness.ConsoleChannel(),
     )
 
-    session.add_participant("Dr. Chen", model="openai/gpt-4o", persona="Quantum computing researcher")
-    session.add_participant("Prof. Smith", model="anthropic/claude-sonnet-4", persona="Cryptography expert")
-    session.add_participant("Dr. Patel", model="openai/gpt-4o", persona="Cybersecurity policy analyst")
-    session.add_orchestrator("Lead Researcher", model="openai/gpt-4o")
+    session.add_agent("Dr. Chen", model="openai/gpt-4o", persona="Quantum computing researcher")
+    session.add_agent("Prof. Smith", model="anthropic/claude-sonnet-4", persona="Cryptography expert")
+    session.add_agent("Dr. Patel", model="openai/gpt-4o", persona="Cybersecurity policy analyst")
+    session.add_agent("Lead Researcher", model="openai/gpt-4o", role="orchestrator")
 
     session.add_skill("summarize")
     session.add_skill("fact-check")

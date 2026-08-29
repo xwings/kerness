@@ -3,7 +3,7 @@
 ## Goal
 
 Three suites, each proving something the other two cannot, and a CI that runs
-all of them on every push. Serves **M8**.
+all of them on every push.
 
 The framework ships as two artifacts, so it can fail in three distinct ways: the
 logic can be wrong, the Rust surface can be unusable, or the boundary to Python
@@ -30,9 +30,9 @@ the pure-Rust caller the crate exists for unrepresented.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/tests/common/mod.rs` | the doubles all eight files share |
-| `crates/kerness/tests/*.rs` | one file per behaviour cluster, 88 tests |
+| `crates/kerness/tests/*.rs` | one file per behaviour cluster, 101 tests |
 | `bindings/python/tests/conftest.py` | the Python suite's equivalent doubles |
-| `bindings/python/tests/test_*.py` | 26 modules, 394 tests |
+| `bindings/python/tests/test_*.py` | 26 modules, 442 tests |
 | `crates/kerness/examples/*.rs` | 8 examples, compiled by CI |
 | `bindings/python/examples/` | 7 Python examples, walked by `bindings/python/tests/test_examples.py` |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
@@ -42,26 +42,34 @@ No test dependency was added. `common/mod.rs` carries its own temp directory
 rather than pulling in `tempfile`, which keeps the "no runtime deps beyond the
 Cargo dependencies" posture true of the test build as well.
 
+The unit tests have the same need and cannot see that file — an integration test
+is a separate crate, and `common/mod.rs` is compiled into it rather than into
+the library. `crates/kerness/src/testing.rs` is the library-side copy, behind
+`#[cfg(test)]` so it never reaches the public surface, and the eleven modules
+that want a scratch directory share it rather than each writing one. Two copies
+is the floor the crate boundary sets; eleven was drift, and it showed as one
+module canonicalizing its path and another not.
+
 ## Key Types and Entry Points
 
 - `crates/kerness/tests/common/mod.rs:35` — `Call` — one request a double
   received. `system()`, `text()` and `last()` are the three questions tests ask
   of it; `purpose` is how a test tells an orchestrator turn from a participant's.
-- `:94` — `ScriptedProvider` — replies written in advance, keyed by purpose
+- `:96` — `ScriptedProvider` — replies written in advance, keyed by purpose
   substring in declaration order, each key owning a sequence with its own cursor
   and a last entry that repeats. Built on `ProviderBase::new(0, 0.0, None)`: zero
   extra attempts, so a scripted reply means exactly one call and a failure
   surfaces instead of being slept over.
-- `:259` — `ToolProvider` — emits native tool calls under a chosen
+- `:271` — `ToolProvider` — emits native tool calls under a chosen
   `ToolDialect`, which is how the OpenAI and Anthropic wire shapes are exercised
   without a network.
-- `:351` — `RecordingChannel` — what was delivered, as against what the
+- `:365` — `RecordingChannel` — what was delivered, as against what the
   transcript holds. The two differ, and the difference is a tested behaviour.
-- `:407` — `TempDir` — `env::temp_dir()/kerness-test-{pid}-{counter}`, removed on
+- `:421` — `TempDir` — `env::temp_dir()/kerness-test-{pid}-{counter}`, removed on
   `Drop`.
-- `:485` — `refusal<T>(Result<T>) -> String` — `Session` does not implement
+- `:499` — `refusal<T>(Result<T>) -> String` — `Session` does not implement
   `Debug`, so `expect_err` is unusable; this is how a test reads a rejection.
-- `:496` — `config(gameplan, topic, provider)` — a `SessionConfig` with
+- `:510` — `config(gameplan, topic, provider)` — a `SessionConfig` with
   `turn_delay: Duration::ZERO`, because the default one-second pause between
   turns is for humans reading a console.
 
@@ -69,14 +77,14 @@ The eight integration files:
 
 | File | n | What it proves |
 | --- | --- | --- |
-| `session_run.rs` | 16 | A run end to end: turns, `phase_reached`, `end_reason`, parsed result fields, transcript against channel, per-agent providers, `@MEMORY:` stripped from what is delivered |
+| `session_run.rs` | 21 | A run end to end: turns, `phase_reached`, `end_reason`, parsed result fields, transcript against channel, per-agent providers, `@MEMORY:` stripped from what is delivered; session defaults filling an agent's unset options, and an agent with its own provider and no model named as an error; a role seating an agent by declaration and never by prose, and a missing role file refused at the `add_agent` that named it |
 | `harness_contract.rs` | 13 | Participant bounds collected into one error; `tools:` naming nothing registered; `Skill` refused as a tool name; `skills:` unioning; phase rounds clamped; every built-in gameplan declaring `terminate_on` |
 | `tools_e2e.rs` | 13 | The tool loop inside a real turn, in all three dialects; unknown tool, schema violation and failing handler each answered as text rather than raised; `MAX_INVALID_CALLS`; `max_tool_iterations`; `tool_results_in_history` both ways |
-| `access_e2e.rs` | 11 | Default-deny; each allow rule; `set_exec` rebuilding the manager; reads outside `allowed_dirs`; `..` denied after resolution; symlink escape |
-| `skills_e2e.rs` | 11 | Only name and description reach the prompt; the body arrives for one turn; a repeat load says so; `allowed-tools` narrowing and unioning |
+| `access_e2e.rs` | 14 | Default-deny; each allow rule; `set_exec` rebuilding the manager; reads outside `allowed_dirs`; `..` denied after resolution; symlink escape; a root confining a read, a write and a command's working directory; an agent root narrowing the session's, and a wider one refused by name |
+| `skills_e2e.rs` | 13 | Only name and description reach the prompt; the body arrives for one turn; a repeat load says so; `allowed-tools` narrowing and unioning; `requires-tools` adding back past a gameplan's own list, and refused before the run when nobody registered it |
 | `resume.rs` | 9 | A snapshot every turn; a second `run()` continuing; identity mismatch naming the field; bad JSON, wrong version and missing file each handled |
 | `compaction_e2e.rs` | 8 | A small ceiling compacting, the anchor turn kept, the count recorded, and history untouched when the summarizer returns nothing |
-| `public_api.rs` | 7 | The well-known constants, the `lib.rs` re-exports, and every built-in asset loading — the Rust half of what the self-check proves for Python |
+| `public_api.rs` | 9 | The well-known constants, the `lib.rs` re-exports, and every built-in asset loading — gameplans, personas, skills, and every role carrying a position and a prompt — the Rust half of what the self-check proves for Python |
 
 ## Interactions
 
@@ -103,10 +111,10 @@ The eight integration files:
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-cargo test --workspace -q                             # pass = 305 unit + 88 integration, 0 failed
+cargo test --workspace -q                             # pass = 337 unit + 101 integration, 0 failed
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 394 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 442 passed
 ```
 
 The wheel is built from `bindings/python/`, where `pyproject.toml` lives:
@@ -136,5 +144,5 @@ project does not own.
   time and their tests are not run there, so a platform-specific break arrives
   as a bad wheel rather than a red build.
 - Nothing checks that `crates/kerness/assets/` and `bindings/python/kerness/` hold the
-  same asset bytes from the Rust side; `bindings/python/tests/test_packaging.py:30` is the only
+  same asset bytes from the Rust side; `bindings/python/tests/test_packaging.py:40` is the only
   guard, and it needs the Python surface installed to run.

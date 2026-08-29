@@ -98,13 +98,14 @@ def loop(host, spec=None, **kwargs):
 
 
 class TestTerminationComesFromTheHarness:
-    """The milestone: keywords are gameplan data, not Python literals."""
+    """Keywords are gameplan data, not Python literals."""
 
-    def test_the_declared_keyword_ends_it_and_the_old_literal_does_not(self):
-        """Two halves of the same milestone. The gameplan's word has to work,
-        and `END_SESSION` — the literal this replaced — must have no standing
-        left over in a harness that named something else, or the removal was
-        cosmetic."""
+    def test_the_declared_keyword_ends_it_and_an_undeclared_one_does_not(self):
+        """Two halves of one claim. The gameplan's word has to end the run, and
+        a word it did not name has to be ordinary text — including
+        `END_SESSION`, which is only a default because
+        `DEFAULT_TERMINATORS` says so and carries no standing in a harness that
+        named something else."""
         spec = LoopSpec(terminate_on=("ALL_DONE",))
 
         declared = StubHost(["ALL_DONE", "Summary."])

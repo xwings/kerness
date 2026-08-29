@@ -31,6 +31,16 @@ pub trait Channel: Send + Sync {
     /// [`MultiChannel`]'s failure log, and a placeholder there would name
     /// nothing the caller could go and fix.
     fn type_name(&self) -> String;
+
+    /// Files this channel writes, for the session workspace to confine.
+    ///
+    /// Defaulted to nothing because most channels write no file at all — a
+    /// console prints, and a caller's remote channel posts. Overriding it is
+    /// how a file-backed channel opts into the containment check the memory
+    /// file and the session file already go through.
+    fn paths(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// Prints to stdout.
@@ -115,6 +125,15 @@ impl Channel for MultiChannel {
     fn type_name(&self) -> String {
         "MultiChannel".to_string()
     }
+
+    /// Every path its members write, so wrapping a channel does not hide it
+    /// from the session workspace.
+    fn paths(&self) -> Vec<PathBuf> {
+        self.channels
+            .iter()
+            .flat_map(|channel| channel.paths())
+            .collect()
+    }
 }
 
 /// Writes one JSON object per line to a timestamped file.
@@ -161,6 +180,10 @@ impl Channel for LogChannel {
     fn type_name(&self) -> String {
         "LogChannel".to_string()
     }
+
+    fn paths(&self) -> Vec<PathBuf> {
+        vec![self.log_path.clone()]
+    }
 }
 
 /// Appends plain text to a file.
@@ -187,6 +210,10 @@ impl Channel for FileChannel {
 
     fn type_name(&self) -> String {
         "FileChannel".to_string()
+    }
+
+    fn paths(&self) -> Vec<PathBuf> {
+        vec![self.filepath.clone()]
     }
 }
 
@@ -285,6 +312,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TempDir;
     use std::sync::Mutex;
 
     struct CaptureChannel {
@@ -338,23 +366,6 @@ mod tests {
 
         fn type_name(&self) -> String {
             "BrokenChannel".to_string()
-        }
-    }
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("kerness-channel-{tag}"));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

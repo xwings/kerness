@@ -5,7 +5,7 @@
 One error type for the crate and one exception hierarchy for Python, with a
 total map between them. Every function that touches IO returns
 `crate::error::Result`; every pyclass method that can fail converts at the
-boundary and nowhere else. Serves **M1** and **M3**.
+boundary and nowhere else.
 
 The map has to be lossless in the direction that matters: a caller who writes
 `except ProviderHTTPError as e` must be able to read `e.status_code`, which means

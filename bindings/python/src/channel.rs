@@ -10,6 +10,7 @@
 //! by the framework as a [`Channel`], and the framework's diagnostics arriving
 //! in Python's `logging` rather than on stderr.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use kerness::channel::Channel;
@@ -26,6 +27,12 @@ pub struct PyChannel {
     /// read by a failure log, and it has to name something the caller can go
     /// and fix.
     name: String,
+    /// `inner.paths()`, read once: [`Channel::paths`] is read by
+    /// `Session::new` to confine the channel's destination to the access workspace,
+    /// and reading it there instead would leave a `PyErr` nowhere to go —
+    /// `paths` cannot fail, so the extraction has to happen where a raising
+    /// `paths()` can still reach the caller as an exception.
+    paths: Vec<PathBuf>,
     /// A channel that raises is reporting the caller's own bug — a broken
     /// socket, a full disk — and they catch it by class. [`Error`] has no
     /// variant that can carry a Python class, so the exception itself is kept
@@ -73,6 +80,10 @@ impl Channel for PyChannel {
     fn type_name(&self) -> String {
         self.name.clone()
     }
+
+    fn paths(&self) -> Vec<PathBuf> {
+        self.paths.clone()
+    }
 }
 
 /// Wrap a Python channel so the framework can write to it.
@@ -82,9 +93,18 @@ pub fn bind_channel(object: &Bound<'_, PyAny>) -> PyResult<Option<Arc<PyChannel>
     if object.is_none() {
         return Ok(None);
     }
+    // A channel the caller wrote against an older base class, or duck-typed
+    // without inheriting at all, has no `paths` — the same answer the Rust
+    // trait's default gives, and for the same reason: a channel that names no
+    // file has none for the workspace to confine.
+    let paths = match object.getattr("paths") {
+        Ok(paths) => paths.call0()?.extract::<Vec<PathBuf>>()?,
+        Err(_) => Vec::new(),
+    };
     Ok(Some(Arc::new(PyChannel {
         inner: object.clone().unbind(),
         name: object.get_type().name()?.to_string(),
+        paths,
         parked: Mutex::new(None),
     })))
 }

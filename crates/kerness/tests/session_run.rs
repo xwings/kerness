@@ -13,9 +13,10 @@ mod common;
 use std::sync::Arc;
 
 use kerness::orchestrator::FORCED_END_NOTE;
-use kerness::{Agent, Provider, Role, Session, SessionConfig};
+use kerness::provider::ReasoningEffort;
+use kerness::{Agent, Provider, Session, SessionConfig};
 
-use common::{config, RecordingChannel, ScriptedProvider};
+use common::{config, refusal, RecordingChannel, ScriptedProvider};
 
 /// A closing reply carrying both the prose and the declared result block.
 const VERDICT: &str = "They converged on write-through.\n\n\
@@ -29,13 +30,18 @@ fn debate(provider: Arc<dyn Provider>, channel: Arc<RecordingChannel>) -> Sessio
         ..config("debate", "Should the cache be write-through?", provider)
     })
     .expect("the debate gameplan loads");
-    session.add_participant(Agent::new("Alice", "gpt-4o"));
-    session.add_participant(Agent::new("Bob", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("Alice").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(Agent::new("Bob").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
     session
 }
@@ -204,13 +210,18 @@ fn zero_rounds_goes_straight_to_the_closing_turn() {
         ..config("debate", "Ship it?", provider.clone())
     })
     .expect("the debate gameplan loads");
-    session.add_participant(Agent::new("Alice", "gpt-4o"));
-    session.add_participant(Agent::new("Bob", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("Alice").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(Agent::new("Bob").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
 
     let result = session.run().expect("a scripted run cannot fail");
@@ -243,13 +254,18 @@ fn the_turn_budget_stops_the_loop() {
         ..config("debate", "Ship it?", provider)
     })
     .expect("the debate gameplan loads");
-    session.add_participant(Agent::new("Alice", "gpt-4o"));
-    session.add_participant(Agent::new("Bob", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("Alice").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(Agent::new("Bob").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
 
     let result = session.run().expect("a scripted run cannot fail");
@@ -338,16 +354,21 @@ fn an_agent_provider_overrides_the_session_one() {
 
     let mut session = Session::new(config("debate", "Ship it?", session_wide.clone()))
         .expect("the debate gameplan loads");
-    session.add_participant(Agent {
-        provider: Some(alices.clone()),
-        ..Agent::new("Alice", "gpt-4o")
-    });
-    session.add_participant(Agent::new("Bob", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
+        .add_agent(Agent {
+            provider: Some(alices.clone()),
+            ..Agent::new("Alice").with_model("gpt-4o")
         })
+        .expect("add agent");
+    session
+        .add_agent(Agent::new("Bob").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
 
     session.run().expect("a scripted run cannot fail");
@@ -420,8 +441,12 @@ fn a_run_with_no_provider_names_the_agents_that_needed_one() {
         ..Default::default()
     })
     .expect("the debate gameplan loads");
-    session.add_participant(Agent::new("Alice", "gpt-4o"));
-    session.add_participant(Agent::new("Bob", "gpt-4o"));
+    session
+        .add_agent(Agent::new("Alice").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(Agent::new("Bob").with_model("gpt-4o"))
+        .expect("add agent");
 
     let message = session
         .run()
@@ -437,7 +462,9 @@ fn a_run_with_no_topic_no_participants_or_no_orchestrator_is_refused() {
 
     let mut topicless =
         Session::new(config("debate", "", provider.clone())).expect("the gameplan loads");
-    topicless.add_participant(Agent::new("Alice", "gpt-4o"));
+    topicless
+        .add_agent(Agent::new("Alice").with_model("gpt-4o"))
+        .expect("add agent");
     assert!(topicless
         .run()
         .expect_err("no topic is a refusal")
@@ -454,8 +481,12 @@ fn a_run_with_no_topic_no_participants_or_no_orchestrator_is_refused() {
 
     let mut leaderless =
         Session::new(config("debate", "Ship it?", provider)).expect("the gameplan loads");
-    leaderless.add_participant(Agent::new("Alice", "gpt-4o"));
-    leaderless.add_participant(Agent::new("Bob", "gpt-4o"));
+    leaderless
+        .add_agent(Agent::new("Alice").with_model("gpt-4o"))
+        .expect("add agent");
+    leaderless
+        .add_agent(Agent::new("Bob").with_model("gpt-4o"))
+        .expect("add agent");
     assert!(leaderless
         .run()
         .expect_err("the loop is orchestrator-driven")
@@ -469,22 +500,208 @@ fn a_second_orchestrator_is_refused_by_name() {
     let provider = ScriptedProvider::new().fallback(&["END_SESSION"]).shared();
     let mut session = Session::new(config("debate", "Ship it?", provider)).expect("gameplan loads");
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the first is accepted");
 
-    let refusal = session.add_orchestrator(Agent {
-        role: Role::Orchestrator,
-        ..Agent::new("Other", "gpt-4o")
-    });
-    // `add_orchestrator` returns `&mut Session` on success, which is not
-    // `Debug`, so the error comes out by hand rather than through `expect_err`.
+    let refusal = session.add_agent(
+        Agent::new("Other")
+            .with_model("gpt-4o")
+            .with_role("orchestrator"),
+    );
+    // `add_agent` returns `&mut Session` on success, which is not `Debug`, so
+    // the error comes out by hand rather than through `expect_err`.
     let Err(error) = refusal else {
         panic!("a second orchestrator was accepted");
     };
     let message = error.to_string();
     assert!(message.contains("already has an orchestrator"));
     assert!(message.contains("Mod"));
+}
+
+/// The four things `role` can be, and which chair each one seats.
+///
+/// The third case is the security-relevant one: prose that *reads* like the
+/// built-in name is still prose, and prose never confers the orchestrator's
+/// seat. Privilege comes from a file declaring `position: orchestrator`, never
+/// from a substring a caller happened to write.
+#[test]
+fn a_role_seats_an_agent_by_declaration_and_never_by_prose() {
+    let provider = ScriptedProvider::new().fallback(&["END_SESSION"]).shared();
+    let mut session = Session::new(config("debate", "Ship it?", provider)).expect("gameplan loads");
+
+    let orchestrator_file = kerness::assets::root().join("roles/orchestrator.md");
+    session
+        .add_agent(Agent::new("Silent").with_model("gpt-4o"))
+        .expect("an agent that named no role is accepted")
+        .add_agent(
+            Agent::new("Prose")
+                .with_model("gpt-4o")
+                .with_role("orchestrator, but sceptical"),
+        )
+        .expect("prose is accepted")
+        .add_agent(
+            Agent::new("Named")
+                .with_model("gpt-4o")
+                .with_role("participant"),
+        )
+        .expect("a built-in name is accepted")
+        .add_agent(
+            Agent::new("Filed")
+                .with_model("gpt-4o")
+                .with_role(orchestrator_file.display().to_string()),
+        )
+        .expect("a role file is accepted");
+
+    let seated: Vec<(&str, bool)> = session
+        .agents()
+        .iter()
+        .map(|agent| (agent.name.as_str(), agent.is_orchestrator()))
+        .collect();
+    assert_eq!(
+        seated,
+        [
+            ("Silent", false),
+            ("Prose", false),
+            ("Named", false),
+            ("Filed", true),
+        ]
+    );
+
+    // The prose is kept verbatim, because it is that agent's job description
+    // and the prompt is the only thing that reads it.
+    let prose = &session.agents()[1];
+    assert_eq!(prose.role.as_deref(), Some("orchestrator, but sceptical"));
+    assert_eq!(
+        prose.resolve_role().expect("prose is its own prompt"),
+        "orchestrator, but sceptical"
+    );
+}
+
+/// A role naming a file that is not there is refused at the call that named it,
+/// and the refusal lists every directory that was tried.
+#[test]
+fn a_missing_role_file_is_refused_where_it_was_named() {
+    let provider = ScriptedProvider::new().fallback(&["END_SESSION"]).shared();
+    let mut session = Session::new(config("debate", "Ship it?", provider)).expect("gameplan loads");
+
+    let refusal = session.add_agent(
+        Agent::new("Alice")
+            .with_model("gpt-4o")
+            .with_role("roles/nonexistent.md"),
+    );
+    let Err(error) = refusal else {
+        panic!("a role file that is not there was accepted");
+    };
+    let message = error.to_string();
+    assert!(message.contains("Alice"), "{message}");
+    assert!(message.contains("nonexistent.md"), "{message}");
+    assert!(session.agents().is_empty(), "the agent was seated anyway");
+}
+
+/// One model and one effort written on the session reach every agent's calls.
+///
+/// The resolution happens at `run()`, not at `add_agent`, so this writes
+/// the defaults *after* the roster is registered: doing it at registration time
+/// would freeze whatever the config said in that instant and silently ignore a
+/// later change.
+#[test]
+fn a_session_default_fills_every_agent_that_named_nothing() {
+    let provider = ScriptedProvider::new()
+        .on(
+            "orchestrator turn",
+            &[
+                "@Alice, open the case.",
+                "@Bob, answer that.",
+                "CONSENSUS_REACHED",
+            ],
+        )
+        .on("final summary", &[VERDICT])
+        .fallback(&["Write-through, for the invalidation story."])
+        .shared();
+
+    let mut session = Session::new(SessionConfig {
+        model: Some("house/model".to_string()),
+        reasoning_effort: ReasoningEffort::Low,
+        ..config(
+            "debate",
+            "Should the cache be write-through?",
+            provider.clone(),
+        )
+    })
+    .expect("the debate gameplan loads");
+    session.add_agent(Agent::new("Alice")).expect("add agent");
+    session
+        .add_agent(Agent::new("Bob").with_model("own/model"))
+        .expect("add agent");
+    session
+        .add_agent(Agent::new("Mod").with_role("orchestrator"))
+        .expect("the roster has no orchestrator yet");
+
+    session.run().expect("a scripted run cannot fail");
+
+    let models: Vec<String> = provider.calls().iter().map(|c| c.model.clone()).collect();
+    assert!(models.contains(&"house/model".to_string()), "{models:?}");
+    assert!(models.contains(&"own/model".to_string()), "{models:?}");
+    assert!(
+        provider
+            .calls()
+            .iter()
+            .all(|c| c.effort == ReasoningEffort::Low),
+        "the session's level rides on every call"
+    );
+}
+
+/// A backend and a model travel together, so an agent that brings one must
+/// bring both. The session's model names a model on the *session's* provider,
+/// and inheriting it across backends would be a silent wrong answer.
+#[test]
+fn an_agent_on_a_second_provider_must_name_its_own_model() {
+    let house = ScriptedProvider::new().fallback(&["END_SESSION"]).shared();
+    let guest = ScriptedProvider::new()
+        .named("guest")
+        .fallback(&["END_SESSION"])
+        .shared();
+
+    let mut session = Session::new(SessionConfig {
+        model: Some("house/model".to_string()),
+        ..config("debate", "Ship it?", house)
+    })
+    .expect("the gameplan loads");
+    session
+        .add_agent(Agent {
+            provider: Some(guest),
+            ..Agent::new("Alice")
+        })
+        .expect("add agent");
+    session.add_agent(Agent::new("Bob")).expect("add agent");
+    session
+        .add_agent(Agent::new("Mod").with_role("orchestrator"))
+        .expect("the roster has no orchestrator yet");
+
+    let message = refusal(session.run());
+    assert!(message.contains("'Alice'"), "{message}");
+    assert!(
+        message.contains("not inherited across providers"),
+        "{message}"
+    );
+}
+
+/// With no model anywhere, the refusal names both places one could be written.
+#[test]
+fn a_model_named_nowhere_says_where_to_write_one() {
+    let provider = ScriptedProvider::new().fallback(&["END_SESSION"]).shared();
+    let mut session = Session::new(config("debate", "Ship it?", provider)).expect("gameplan loads");
+    session.add_agent(Agent::new("Alice")).expect("add agent");
+    session.add_agent(Agent::new("Bob")).expect("add agent");
+    session
+        .add_agent(Agent::new("Mod").with_role("orchestrator"))
+        .expect("the roster has no orchestrator yet");
+
+    let message = refusal(session.run());
+    assert!(message.contains("'Alice'"), "{message}");
+    assert!(message.contains("SessionConfig"), "{message}");
 }

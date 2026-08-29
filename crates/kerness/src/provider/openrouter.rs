@@ -1,13 +1,13 @@
 //! The OpenRouter backend.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::{
-    answering_model, attach_tool_schemas, bearer_headers, chat_completions_payload,
-    openai_response, reported_usage, Provider, ProviderBase, ProviderResponse,
+    attach_tool_schemas, bearer_headers, chat_completions_payload, post_chat_completions, Provider,
+    ProviderBase, ProviderResponse, ReasoningEffort, DEFAULT_BACKOFF_SEC,
+    DEFAULT_REQUEST_TIMEOUT_SEC, DEFAULT_RETRIES, DEFAULT_TEMPERATURE, DEFAULT_TOP_P,
 };
 use crate::error::Result;
-use crate::http;
 use crate::tooling::ToolSpec;
 use crate::toolschema::ToolDialect;
 
@@ -37,12 +37,12 @@ impl Default for OpenRouterConfig {
         OpenRouterConfig {
             api_key: String::new(),
             base_url: OPENROUTER_BASE_URL.to_string(),
-            timeout_sec: 60,
-            retries: 2,
-            backoff_sec: 2.0,
+            timeout_sec: DEFAULT_REQUEST_TIMEOUT_SEC,
+            retries: DEFAULT_RETRIES,
+            backoff_sec: DEFAULT_BACKOFF_SEC,
             interval_sec: None,
-            temperature: 1.0,
-            top_p: 1.0,
+            temperature: DEFAULT_TEMPERATURE,
+            top_p: DEFAULT_TOP_P,
             max_tokens: None,
             app_url: String::new(),
             app_name: String::new(),
@@ -97,6 +97,7 @@ impl Provider for OpenRouterProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         let mut headers = bearer_headers(&self.api_key);
         if !self.app_url.is_empty() {
@@ -113,20 +114,13 @@ impl Provider for OpenRouterProvider {
             self.top_p,
             self.max_tokens,
         );
+        // OpenRouter nests the level rather than taking OpenAI's flat key, and
+        // normalizes it onward to whatever the routed model actually wants.
+        if let Some(effort) = self.effective_effort(effort) {
+            payload.insert("reasoning".to_string(), json!({"effort": effort.as_str()}));
+        }
         attach_tool_schemas(&mut payload, self.effective_dialect(), tools);
 
-        let url = format!("{}/chat/completions", self.base_url);
-        let response = http::post_json(&url, &Value::Object(payload), &headers, self.timeout_sec)?;
-
-        let (content, tool_calls, stop_reason) = openai_response(&response, model)?;
-        Ok(ProviderResponse {
-            content,
-            model: answering_model(&response, model),
-            usage: reported_usage(&response),
-            structured: None,
-            tool_calls,
-            stop_reason,
-            raw: response,
-        })
+        post_chat_completions(&self.base_url, payload, &headers, self.timeout_sec, model)
     }
 }

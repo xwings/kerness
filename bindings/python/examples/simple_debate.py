@@ -31,24 +31,24 @@ def main() -> None:
 
     # Alice uses OpenAI directly (if key available), otherwise falls back to session provider
     if openai_key:
-        session.add_participant(
+        session.add_agent(
             "Alice", model="gpt-4o", persona="Pragmatic engineer",
             provider=kerness.OpenAIProvider(api_key=openai_key),
         )
     else:
-        session.add_participant("Alice", model="openai/gpt-4o", persona="Pragmatic engineer")
+        session.add_agent("Alice", model="openai/gpt-4o", persona="Pragmatic engineer")
 
     # Bob uses Claude directly (if key available), otherwise falls back to session provider
     if claude_key:
-        session.add_participant(
+        session.add_agent(
             "Bob", model="claude-sonnet-4-20250514", persona="Devil's advocate",
             provider=kerness.ClaudeProvider(api_key=claude_key),
         )
     else:
-        session.add_participant("Bob", model="anthropic/claude-sonnet-4", persona="Devil's advocate")
+        session.add_agent("Bob", model="anthropic/claude-sonnet-4", persona="Devil's advocate")
 
     # Moderator uses session-level OpenRouter provider
-    session.add_orchestrator("Moderator", model="openai/gpt-4o")
+    session.add_agent("Moderator", model="openai/gpt-4o", role="orchestrator")
 
     result = session.run()
 

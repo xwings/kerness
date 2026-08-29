@@ -11,6 +11,7 @@
 //! which is what lets `allow_dirs` write its grant back to the object a later
 //! manager will be rebuilt from.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kerness::access::{AccessManager, AccessPolicy, AccessRequest, ApprovePrompt};
@@ -119,6 +120,8 @@ pub fn policy_from_py(object: &Bound<'_, PyAny>) -> PyResult<AccessPolicy> {
             }) as Arc<dyn ApprovePrompt>
         }),
         auto_approve_prefixes: object.getattr("auto_approve_prefixes")?.extract()?,
+        workspace: path_string(&object.getattr("workspace")?)?,
+        agent_workspaces: agent_workspaces(&object.getattr("agent_workspaces")?)?,
         allowed_programs: object.getattr("allowed_programs")?.extract()?,
         allowed_commands: object.getattr("allowed_commands")?.extract()?,
         allowed_prefixes: object.getattr("allowed_prefixes")?.extract()?,
@@ -127,6 +130,24 @@ pub fn policy_from_py(object: &Bound<'_, PyAny>) -> PyResult<AccessPolicy> {
         allowed_dirs: path_strings(&object.getattr("allowed_dirs")?)?,
         trust_skill_bundles: object.getattr("trust_skill_bundles")?.is_truthy()?,
     })
+}
+
+/// The text of an optional path, which may be `str` or `Path`.
+fn path_string(object: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if object.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(object.str()?.to_string_lossy().into_owned()))
+}
+
+/// The per-agent workspaces, read out of a `dict` of agent name to path.
+fn agent_workspaces(object: &Bound<'_, PyAny>) -> PyResult<BTreeMap<String, String>> {
+    let mut workspaces = BTreeMap::new();
+    for item in object.call_method0("items")?.try_iter()? {
+        let (agent, workspace): (String, Bound<'_, PyAny>) = item?.extract()?;
+        workspaces.insert(agent, workspace.str()?.to_string_lossy().into_owned());
+    }
+    Ok(workspaces)
 }
 
 /// The text of a path list whose entries may be `str` or `Path`.

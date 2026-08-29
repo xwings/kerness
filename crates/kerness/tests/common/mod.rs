@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use kerness::channel::Channel;
 use kerness::error::Result;
-use kerness::provider::{Provider, ProviderBase, ProviderResponse};
+use kerness::provider::{Provider, ProviderBase, ProviderResponse, ReasoningEffort};
 use kerness::session::SessionConfig;
 use kerness::tooling::{ToolCall, ToolSpec};
 use kerness::toolschema::ToolDialect;
@@ -41,6 +41,8 @@ pub struct Call {
     pub purpose: String,
     /// Names of the tool specs offered natively, empty under the text dialect.
     pub tools: Vec<String>,
+    /// How hard the caller asked the model to think.
+    pub effort: ReasoningEffort,
 }
 
 impl Call {
@@ -182,12 +184,20 @@ impl ScriptedProvider {
         take(&mut cursors, "", &self.fallback)
     }
 
-    fn record(&self, model: &str, messages: &[Value], purpose: &str, tools: Option<&[ToolSpec]>) {
+    fn record(
+        &self,
+        model: &str,
+        messages: &[Value],
+        purpose: &str,
+        tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
+    ) {
         self.calls().push(Call {
             model: model.to_string(),
             messages: messages.to_vec(),
             purpose: purpose.to_string(),
             tools: tool_names(tools),
+            effort,
         });
     }
 }
@@ -232,8 +242,9 @@ impl Provider for ScriptedProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
-        self.record(model, messages, "", tools);
+        self.record(model, messages, "", tools, effort);
         Ok(ProviderResponse::text(self.reply_for("")))
     }
 
@@ -245,8 +256,9 @@ impl Provider for ScriptedProvider {
         messages: &[Value],
         purpose: &str,
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
-        self.record(model, messages, purpose, tools);
+        self.record(model, messages, purpose, tools, effort);
         Ok(ProviderResponse::text(self.reply_for(purpose)))
     }
 }
@@ -306,12 +318,14 @@ impl Provider for ToolProvider {
         model: &str,
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
+        effort: ReasoningEffort,
     ) -> Result<ProviderResponse> {
         self.calls().push(Call {
             model: model.to_string(),
             messages: messages.to_vec(),
             purpose: String::new(),
             tools: tool_names(tools),
+            effort,
         });
         let index = self
             .cursor

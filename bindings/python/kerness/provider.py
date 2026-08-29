@@ -20,6 +20,15 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from kerness._core import (
+    CLAUDE_BASE_URL,
+    DEFAULT_BACKOFF_SEC,
+    DEFAULT_CLAUDE_MAX_TOKENS,
+    DEFAULT_REQUEST_TIMEOUT_SEC,
+    DEFAULT_RETRIES,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    OPENAI_BASE_URL,
+    OPENROUTER_BASE_URL,
     ProviderCore,
     ProviderResponse,
     _convert_messages_for_claude,
@@ -32,6 +41,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from kerness.tooling import ToolSpec
 
 __all__ = [
+    "CLAUDE_BASE_URL",
+    "DEFAULT_BACKOFF_SEC",
+    "DEFAULT_CLAUDE_MAX_TOKENS",
+    "DEFAULT_REQUEST_TIMEOUT_SEC",
+    "DEFAULT_RETRIES",
+    "DEFAULT_TEMPERATURE",
+    "DEFAULT_TOP_P",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_BASE_URL",
     "ClaudeOAuthProvider",
     "ClaudeProvider",
     "CustomProvider",
@@ -43,6 +61,23 @@ __all__ = [
     "_convert_messages_for_claude",
     "http_post_json",
 ]
+
+
+def _signature_accepts(func: Any, name: str) -> bool:
+    """Whether *func* can be called with *name* as a keyword.
+
+    The one genuinely introspective step in the framework, and the reason the
+    base class stays Python: the answer is a property of the concrete class's
+    signature, which only ``inspect`` can read.  A ``**kwargs`` catch-all
+    counts, because such a callable can be handed anything.
+    """
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _require_pydantic() -> tuple[Any, Any]:
@@ -67,7 +102,7 @@ class Provider(ABC):
     #: Dialect this provider speaks natively.  Subclasses override.
     tool_dialect: ToolDialect = ToolDialect.TEXT
 
-    def __init__(self, retries: int = 2, backoff_sec: float = 2.0,
+    def __init__(self, retries: int = DEFAULT_RETRIES, backoff_sec: float = DEFAULT_BACKOFF_SEC,
                  interval_sec: float | None = None) -> None:
         self._core = ProviderCore(retries, backoff_sec, interval_sec)
 
@@ -100,19 +135,35 @@ class Provider(ABC):
         return self._core.effective_dialect(self)
 
     def _chat_accepts_tools(self) -> bool:
-        """Whether this subclass's ``chat`` can be offered tools.
+        """Whether this subclass's ``chat`` can be offered tools."""
+        return _signature_accepts(type(self).chat, "tools")
 
-        The one genuinely introspective step in the dialect choice, and the
-        reason it stays Python: the answer is a property of the concrete
-        class's signature, which only ``inspect`` can read.
+    def _chat_accepts_reasoning_effort(self) -> bool:
+        """Whether this subclass's ``chat`` can be offered an effort level.
+
+        The counterpart of :meth:`_chat_accepts_tools`, and asked for the same
+        reason: a ``chat`` written before effort levels existed never declared
+        the parameter, and is never handed one.
         """
-        try:
-            params = inspect.signature(type(self).chat).parameters
-        except (TypeError, ValueError):  # pragma: no cover - exotic callables
-            return False
-        if "tools" in params:
-            return True
-        return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        return _signature_accepts(type(self).chat, "reasoning_effort")
+
+    def _retries_accept_reasoning_effort(self) -> bool:
+        """Whether this subclass's ``chat_with_retries`` takes an effort level.
+
+        Asked separately from :meth:`_chat_accepts_reasoning_effort` because
+        overriding ``chat_with_retries`` replaces the whole loop, ``chat``
+        included, so the two signatures answer independently.
+        """
+        return _signature_accepts(type(self).chat_with_retries, "reasoning_effort")
+
+    def effective_effort(self, reasoning_effort: str = "high") -> str | None:
+        """Return the effort level to actually send, or ``None`` once dropped.
+
+        The counterpart of :meth:`effective_dialect` for the reasoning level:
+        ``None`` means :meth:`note_reasoning_effort_rejected` has latched this
+        provider down, and a hand-written ``chat`` should leave the key off.
+        """
+        return self._core.effective_effort(self, reasoning_effort)
 
     def note_native_tools_rejected(self, exc: Exception) -> bool:
         """Latch this provider down to TEXT if *exc* means "no tool support".
@@ -122,9 +173,19 @@ class Provider(ABC):
         """
         return self._core.note_native_tools_rejected(self, exc)
 
+    def note_reasoning_effort_rejected(self, exc: Exception) -> bool:
+        """Drop the effort level if *exc* means "no such parameter".
+
+        One-way, like :meth:`note_native_tools_rejected`, and False on every
+        call after the first: the retry that follows a True sends the same
+        arguments, so a latch that reported itself twice would loop.
+        """
+        return self._core.note_reasoning_effort_rejected(self, exc)
+
     def chat_with_retries(self, model: str, messages: list[dict[str, str]],
                           purpose: str = "",
-                          tools: list["ToolSpec"] | None = None) -> ProviderResponse:
+                          tools: list["ToolSpec"] | None = None,
+                          reasoning_effort: str = "high") -> ProviderResponse:
         """Send a chat request with automatic retries.
 
         Args:
@@ -133,6 +194,10 @@ class Provider(ABC):
             purpose: Human-readable description for logging.
             tools: Tool specs to advertise natively.  Ignored by providers
                 whose effective dialect is ``TEXT``.
+            reasoning_effort: How hard the model should think — one of
+                ``"minimal"``, ``"low"``, ``"medium"``, ``"high"``,
+                ``"xhigh"``, ``"max"``.  Dropped for the rest of the session
+                by an endpoint that refuses it.
 
         Returns:
             ProviderResponse on success.
@@ -140,30 +205,33 @@ class Provider(ABC):
         Raises:
             ProviderError: If all retries are exhausted.
         """
-        return self._core.chat_with_retries(self, model, messages, purpose, tools)
+        return self._core.chat_with_retries(
+            self, model, messages, purpose, tools, reasoning_effort
+        )
 
     def _chat_dispatch(self, model: str, messages: list[dict[str, str]],
-                       tools: list["ToolSpec"] | None) -> ProviderResponse:
+                       tools: list["ToolSpec"] | None,
+                       reasoning_effort: str = "high") -> ProviderResponse:
         """Call ``chat``, passing ``tools`` only when it can be used."""
-        return self._core.chat_dispatch(self, model, messages, tools)
+        return self._core.chat_dispatch(self, model, messages, tools, reasoning_effort)
 
 
 class OpenRouterProvider(Provider):
     """OpenRouter API provider."""
 
-    DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+    DEFAULT_BASE_URL = OPENROUTER_BASE_URL
     tool_dialect = ToolDialect.OPENAI
 
     def __init__(
         self,
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
         max_tokens: int | None = None,
         app_url: str = "",
         app_name: str = "",
@@ -183,9 +251,10 @@ class OpenRouterProvider(Provider):
         )
 
     def chat(self, model: str, messages: list[dict[str, str]],
-             tools: list["ToolSpec"] | None = None) -> ProviderResponse:
+             tools: list["ToolSpec"] | None = None,
+             reasoning_effort: str | None = None) -> ProviderResponse:
         """Send a chat completion request to OpenRouter."""
-        return self._core.chat(model, messages, tools)
+        return self._core.chat(model, messages, tools, reasoning_effort)
 
 
 class OpenAIProvider(Provider):
@@ -196,19 +265,19 @@ class OpenAIProvider(Provider):
     checked was JSON, so the caller gets the model instance rather than a dict.
     """
 
-    DEFAULT_BASE_URL = "https://api.openai.com/v1"
+    DEFAULT_BASE_URL = OPENAI_BASE_URL
     tool_dialect = ToolDialect.OPENAI
 
     def __init__(
         self,
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
         max_tokens: int | None = None,
         output_type: type[Any] | None = None,
         strict_json_schema: bool = True,
@@ -240,9 +309,10 @@ class OpenAIProvider(Provider):
         )
 
     def chat(self, model: str, messages: list[dict[str, str]],
-             tools: list["ToolSpec"] | None = None) -> ProviderResponse:
+             tools: list["ToolSpec"] | None = None,
+             reasoning_effort: str | None = None) -> ProviderResponse:
         """Send a chat completion request to the OpenAI API."""
-        resp = self._core.chat(model, messages, tools)
+        resp = self._core.chat(model, messages, tools, reasoning_effort)
         # A tool-calling turn has no JSON body to validate; the structured
         # answer comes on the turn after the results are fed back.
         if self._output_type_adapter is not None and not resp.tool_calls:
@@ -268,12 +338,12 @@ class OpenAIOAuthProvider(OpenAIProvider):
         self,
         oauth_token: str,
         base_url: str = OpenAIProvider.DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
         max_tokens: int | None = None,
         output_type: type[Any] | None = None,
         strict_json_schema: bool = True,
@@ -298,19 +368,19 @@ class OpenAIOAuthProvider(OpenAIProvider):
 class ClaudeProvider(Provider):
     """Anthropic Claude API provider."""
 
-    DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
+    DEFAULT_BASE_URL = CLAUDE_BASE_URL
     tool_dialect = ToolDialect.ANTHROPIC
 
     def __init__(
         self,
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        max_tokens: int = 4096,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_CLAUDE_MAX_TOKENS,
     ) -> None:
         self._core = ProviderCore.claude(
             api_key,
@@ -324,9 +394,10 @@ class ClaudeProvider(Provider):
         )
 
     def chat(self, model: str, messages: list[dict[str, str]],
-             tools: list["ToolSpec"] | None = None) -> ProviderResponse:
+             tools: list["ToolSpec"] | None = None,
+             reasoning_effort: str | None = None) -> ProviderResponse:
         """Send a messages request to the Claude API."""
-        return self._core.chat(model, messages, tools)
+        return self._core.chat(model, messages, tools, reasoning_effort)
 
 
 class ClaudeOAuthProvider(ClaudeProvider):
@@ -340,12 +411,12 @@ class ClaudeOAuthProvider(ClaudeProvider):
         self,
         oauth_token: str,
         base_url: str = ClaudeProvider.DEFAULT_BASE_URL,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        max_tokens: int = 4096,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_CLAUDE_MAX_TOKENS,
     ) -> None:
         self._core = ProviderCore.claude(
             oauth_token,
@@ -398,12 +469,12 @@ class CustomProvider(Provider):
         url: str,
         api_key: str,
         model_config: dict[str, Any] | None = None,
-        timeout_sec: int = 60,
-        retries: int = 2,
-        backoff_sec: float = 2.0,
+        timeout_sec: int = DEFAULT_REQUEST_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
+        backoff_sec: float = DEFAULT_BACKOFF_SEC,
         interval_sec: float | None = None,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
         max_tokens: int | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,
@@ -430,6 +501,7 @@ class CustomProvider(Provider):
         return dict(self._model_config)
 
     def chat(self, model: str, messages: list[dict[str, str]],
-             tools: list["ToolSpec"] | None = None) -> ProviderResponse:
+             tools: list["ToolSpec"] | None = None,
+             reasoning_effort: str | None = None) -> ProviderResponse:
         """Send a chat completion request to the custom endpoint."""
-        return self._core.chat(model, messages, tools)
+        return self._core.chat(model, messages, tools, reasoning_effort)

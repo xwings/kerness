@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use kerness::agent::{Agent, Role};
+use kerness::agent::Agent;
 use kerness::channel::ConsoleChannel;
 use kerness::error::Result;
 use kerness::provider::{
@@ -75,35 +75,32 @@ fn main() -> Result<()> {
     })?;
 
     // The model name belongs to whichever provider the agent ends up calling,
-    // so it changes with the backend rather than staying fixed.
-    session.add_participant(Agent {
-        persona: "Pragmatic engineer".to_string(),
+    // so it changes with the backend rather than staying fixed. An agent that
+    // brings its own provider has to name its own model for exactly that
+    // reason: the session's would name a model on the session's backend.
+    session.add_agent(Agent {
+        persona: Some("Pragmatic engineer".to_string()),
         provider: alice.clone(),
-        ..Agent::new(
-            "Alice",
-            if alice.is_some() {
-                "gpt-4o"
-            } else {
-                "openai/gpt-4o"
-            },
-        )
-    });
-    session.add_participant(Agent {
-        persona: "Devil's advocate".to_string(),
-        provider: bob.clone(),
-        ..Agent::new(
-            "Bob",
-            if bob.is_some() {
-                "claude-sonnet-4-20250514"
-            } else {
-                "anthropic/claude-sonnet-4"
-            },
-        )
-    });
-    session.add_orchestrator(Agent {
-        role: Role::Orchestrator,
-        ..Agent::new("Mod", "openai/gpt-4o")
+        ..Agent::new("Alice").with_model(if alice.is_some() {
+            "gpt-4o"
+        } else {
+            "openai/gpt-4o"
+        })
     })?;
+    session.add_agent(Agent {
+        persona: Some("Devil's advocate".to_string()),
+        provider: bob.clone(),
+        ..Agent::new("Bob").with_model(if bob.is_some() {
+            "claude-sonnet-4-20250514"
+        } else {
+            "anthropic/claude-sonnet-4"
+        })
+    })?;
+    session.add_agent(
+        Agent::new("Mod")
+            .with_model("openai/gpt-4o")
+            .with_role("orchestrator"),
+    )?;
 
     let result = session.run()?;
 

@@ -6,19 +6,18 @@
 //! way gameplans do.
 //!
 //! The frontmatter goes through the YAML parser rather than a split on the
-//! first `:`, because `allowed-tools` is a list and a hand-rolled splitter
-//! cannot represent one.
+//! first `:`, because `allowed-tools` and `requires-tools` are lists and a
+//! hand-rolled splitter cannot represent one.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::assets;
 use crate::error::{Error, Result};
 use crate::pyfmt;
-use crate::yaml;
 
 /// Directories a skill may bundle alongside its `SKILL.md`.
 pub const BUNDLE_DIRS: [&str; 2] = ["scripts", "references"];
@@ -36,6 +35,14 @@ pub struct SkillConfig {
     /// the agent's toolkit; an empty list narrows it to nothing. Restrictive
     /// only — see [`crate::skill::runtime`].
     pub allowed_tools: Option<Vec<String>>,
+    /// Tools this skill cannot work without. Additive: loading the skill makes
+    /// each of these callable out of what the session registered, past a
+    /// gameplan's `tools:` list and past another skill's `allowed-tools`. A
+    /// name nobody registered is a session error before the first turn.
+    ///
+    /// A plain list rather than an `Option`, because absent and empty say the
+    /// same thing here — a skill that requires nothing.
+    pub requires_tools: Vec<String>,
     /// The skill's own directory, used to resolve bundled files.
     pub base_dir: Option<PathBuf>,
     /// Whether the skill ships inside the package. Bundled-file access is
@@ -74,10 +81,10 @@ pub fn load_skill(name_or_path: &str) -> Result<SkillConfig> {
 
     let text =
         std::fs::read_to_string(&path).map_err(|err| Error::Io(format!("{source}: {err}")))?;
-    let (meta, body) = parse_frontmatter(&text)?;
+    let (meta, body) = assets::split_frontmatter(&text, "Skill", &source)?;
 
-    let name = text_field(&meta, "name");
-    let description = text_field(&meta, "description");
+    let name = assets::text_field(&meta, "name");
+    let description = assets::text_field(&meta, "description");
     if name.is_empty() || description.is_empty() {
         return Err(Error::Value(format!(
             "Skill file missing required frontmatter: {source}"
@@ -94,7 +101,9 @@ pub fn load_skill(name_or_path: &str) -> Result<SkillConfig> {
         name,
         description,
         content: body.trim().to_string(),
-        allowed_tools: parse_allowed_tools(meta.get("allowed-tools"), &source)?,
+        allowed_tools: parse_tool_list(meta.get("allowed-tools"), "allowed-tools", &source)?,
+        requires_tools: parse_tool_list(meta.get("requires-tools"), "requires-tools", &source)?
+            .unwrap_or_default(),
         base_dir,
         builtin: is_builtin(&path),
     })
@@ -118,15 +127,6 @@ pub fn list_builtin_skills() -> Vec<String> {
     names
 }
 
-/// `str(meta.get(key, "")).strip()`.
-fn text_field(meta: &Map<String, Value>, key: &str) -> String {
-    meta.get(key)
-        .map(pyfmt::str)
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
 /// Whether *path* lives inside the package's own skills directory.
 ///
 /// The flag decides whether activating the skill grants read access to the
@@ -146,11 +146,14 @@ fn is_skill_md(path: &Path) -> bool {
         .is_some_and(|name| name.to_string_lossy().to_lowercase() == "skill.md")
 }
 
-/// Normalize the `allowed-tools` key.
+/// Normalize a frontmatter key holding tool names, written either as a YAML
+/// list or as one comma-separated string.
 ///
-/// Absent means "does not narrow"; an explicit empty list means "no tools",
-/// which is a legitimate thing for a pure-instruction skill to declare.
-fn parse_allowed_tools(value: Option<&Value>, source: &str) -> Result<Option<Vec<String>>> {
+/// `None` is the key being absent, which the two callers read differently:
+/// `allowed-tools` does not narrow, `requires-tools` requires nothing. An
+/// explicit empty list is a real answer for `allowed-tools` — "no tools", which
+/// a pure-instruction skill may legitimately declare.
+fn parse_tool_list(value: Option<&Value>, key: &str, source: &str) -> Result<Option<Vec<String>>> {
     let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(None);
     };
@@ -168,7 +171,7 @@ fn parse_allowed_tools(value: Option<&Value>, source: &str) -> Result<Option<Vec
         .filter(|items| items.iter().all(Value::is_string))
         .ok_or_else(|| {
             Error::Value(format!(
-                "allowed-tools must be a list of tool names in {source}, got {}",
+                "{key} must be a list of tool names in {source}, got {}",
                 pyfmt::repr(value)
             ))
         })?;
@@ -213,37 +216,6 @@ fn resolve_skill_candidate(candidate: &Path) -> Option<PathBuf> {
     candidate.is_file().then(|| candidate.to_path_buf())
 }
 
-/// Split a skill file into its frontmatter mapping and its body.
-///
-/// Line-based rather than the pattern [`crate::gameplan`] uses: the closing
-/// delimiter is an exact `---` line, so a body containing `---` at the start of
-/// a line with trailing spaces does not end the frontmatter early.
-fn parse_frontmatter(text: &str) -> Result<(Map<String, Value>, String)> {
-    if !text.starts_with("---") {
-        return Ok((Map::new(), text.to_string()));
-    }
-    let parts: Vec<&str> = text.split('\n').collect();
-    if parts.len() < 3 {
-        return Ok((Map::new(), text.to_string()));
-    }
-    let Some(offset) = parts[1..].iter().position(|line| *line == "---") else {
-        return Ok((Map::new(), text.to_string()));
-    };
-    let end = offset + 1;
-    let body = parts[end + 1..]
-        .join("\n")
-        .trim_start_matches('\n')
-        .to_string();
-
-    let meta = yaml::parse(&parts[1..end].join("\n"))
-        .map_err(|err| Error::Value(format!("Invalid YAML in skill frontmatter: {err}")))?;
-    match meta {
-        Value::Null => Ok((Map::new(), body)),
-        Value::Object(map) => Ok((map, body)),
-        _ => Err(Error::Value("Skill frontmatter must be a mapping".into())),
-    }
-}
-
 fn validate_skill_name(name: &str, path: &Path, source: &str) -> Result<()> {
     static NAME_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)*$").expect("static pattern"));
@@ -280,37 +252,16 @@ fn validate_description(description: &str, source: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TempDir;
 
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("kerness-skill-{tag}"));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(path)
-        }
-
-        /// Write a `<name>/SKILL.md` carrying *frontmatter* between the
-        /// required `name` and `description` lines, and load it.
-        fn skill(&self, name: &str, frontmatter: &str) -> Result<SkillConfig> {
-            let base = self.0.join(name);
-            std::fs::create_dir_all(&base).expect("create skill dir");
-            std::fs::write(
-                base.join("SKILL.md"),
-                format!(
-                    "---\nname: {name}\ndescription: A demo skill.\n{frontmatter}---\n\nBody.\n"
-                ),
-            )
-            .expect("write skill");
-            load_skill(&base.join("SKILL.md").display().to_string())
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    /// Write a `<name>/SKILL.md` under *dir*, carrying *frontmatter* between the
+    /// required `name` and `description` lines, and load it.
+    fn skill(dir: &TempDir, name: &str, frontmatter: &str) -> Result<SkillConfig> {
+        let path = dir.write(
+            &format!("{name}/SKILL.md"),
+            &format!("---\nname: {name}\ndescription: A demo skill.\n{frontmatter}---\n\nBody.\n"),
+        );
+        load_skill(&path.display().to_string())
     }
 
     #[test]
@@ -338,7 +289,7 @@ mod tests {
     #[test]
     fn a_custom_skill_loads_from_a_path() {
         let dir = TempDir::new("custom");
-        let skill = dir.skill("custom-skill", "").expect("custom loads");
+        let skill = skill(&dir, "custom-skill", "").expect("custom loads");
         assert_eq!(skill.name, "custom-skill");
         assert_eq!(skill.description, "A demo skill.");
         assert_eq!(skill.content, "Body.");
@@ -360,9 +311,9 @@ mod tests {
         // Collapsing the two would silently grant every tool to a skill that
         // declared it wanted none.
         let dir = TempDir::new("narrowing");
-        assert_eq!(dir.skill("a", "").expect("loads").allowed_tools, None);
+        assert_eq!(skill(&dir, "a", "").expect("loads").allowed_tools, None);
         assert_eq!(
-            dir.skill("b", "allowed-tools: []\n")
+            skill(&dir, "b", "allowed-tools: []\n")
                 .expect("loads")
                 .allowed_tools,
             Some(Vec::new())
@@ -376,13 +327,13 @@ mod tests {
         let dir = TempDir::new("lists");
         let expected = Some(vec!["read_file".to_string(), "cmd".to_string()]);
         assert_eq!(
-            dir.skill("a", "allowed-tools: [read_file, cmd]\n")
+            skill(&dir, "a", "allowed-tools: [read_file, cmd]\n")
                 .expect("loads")
                 .allowed_tools,
             expected
         );
         assert_eq!(
-            dir.skill("b", "allowed-tools:\n  - read_file\n  - cmd\n")
+            skill(&dir, "b", "allowed-tools:\n  - read_file\n  - cmd\n")
                 .expect("loads")
                 .allowed_tools,
             expected
@@ -393,7 +344,7 @@ mod tests {
     fn a_comma_separated_string_is_split() {
         let dir = TempDir::new("commas");
         assert_eq!(
-            dir.skill("a", "allowed-tools: read_file, cmd\n")
+            skill(&dir, "a", "allowed-tools: read_file, cmd\n")
                 .expect("loads")
                 .allowed_tools,
             Some(vec!["read_file".to_string(), "cmd".to_string()])
@@ -401,11 +352,31 @@ mod tests {
     }
 
     #[test]
+    fn requires_tools_reads_the_same_shapes_and_defaults_to_none_required() {
+        // The two keys share a parser, so this asserts the reading of the
+        // second one rather than every shape a second time.
+        let dir = TempDir::new("requires");
+        assert_eq!(
+            skill(&dir, "a", "").expect("loads").requires_tools,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            skill(&dir, "b", "requires-tools: [cmd]\n")
+                .expect("loads")
+                .requires_tools,
+            vec!["cmd".to_string()]
+        );
+        let error = skill(&dir, "c", "requires-tools: {a: b}\n").expect_err("not a list");
+        assert!(
+            error.to_string().contains("requires-tools must be a list"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_non_list_and_malformed_yaml_are_both_reported() {
         let dir = TempDir::new("bad-tools");
-        let error = dir
-            .skill("a", "allowed-tools: {a: b}\n")
-            .expect_err("not a list");
+        let error = skill(&dir, "a", "allowed-tools: {a: b}\n").expect_err("not a list");
         assert!(matches!(error, Error::Value(_)), "{error:?}");
         assert!(
             error.to_string().contains("allowed-tools must be a list"),
@@ -413,9 +384,7 @@ mod tests {
         );
         assert!(error.to_string().ends_with("got {'a': 'b'}"), "{error}");
 
-        let error = dir
-            .skill("b", "allowed-tools: [unclosed\n")
-            .expect_err("broken yaml");
+        let error = skill(&dir, "b", "allowed-tools: [unclosed\n").expect_err("broken yaml");
         assert!(error.to_string().contains("Invalid YAML"), "{error}");
     }
 
@@ -469,14 +438,14 @@ mod tests {
         assert!(load_skill("summarize").expect("built-in loads").builtin);
 
         let dir = TempDir::new("builtin");
-        assert!(!dir.skill("demo", "").expect("loads").builtin);
+        assert!(!skill(&dir, "demo", "").expect("loads").builtin);
     }
 
     #[test]
     fn only_existing_bundle_dirs_are_reported() {
         let dir = TempDir::new("bundles");
         std::fs::create_dir_all(dir.0.join("demo").join("references")).expect("create bundle");
-        let skill = dir.skill("demo", "").expect("loads");
+        let skill = skill(&dir, "demo", "").expect("loads");
 
         let names: Vec<String> = skill
             .bundle_paths()

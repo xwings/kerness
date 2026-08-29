@@ -10,7 +10,7 @@ mod common;
 use std::sync::Arc;
 
 use kerness::tooling::Arguments;
-use kerness::{Agent, Provider, Role, Session, ToolDialect};
+use kerness::{Agent, Provider, Session, ToolDialect};
 use serde_json::json;
 
 use common::{config, refusal, ScriptedProvider, TempDir};
@@ -135,13 +135,16 @@ fn session(gameplan: &str, count: usize, provider: Arc<dyn Provider>) -> Session
     let mut session =
         Session::new(config(gameplan, "Ship it?", provider)).expect("the gameplan loads");
     for index in 0..count {
-        session.add_participant(Agent::new(format!("P{index}"), "gpt-4o"));
+        session
+            .add_agent(Agent::new(format!("P{index}")).with_model("gpt-4o"))
+            .expect("add agent");
     }
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
     session
 }
@@ -162,12 +165,15 @@ fn every_unmet_requirement_is_reported_at_once() {
     let mut session =
         Session::new(config("debate", "Ship it?", provider.clone())).expect("gameplan loads");
     // One participant against `min: 2`, and a name the orchestrator also uses.
-    session.add_participant(Agent::new("Mod", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("Mod").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
 
     let message = session
@@ -200,13 +206,18 @@ fn too_many_participants_is_refused_and_they_are_named() {
 fn duplicate_participant_names_are_refused() {
     let provider = ScriptedProvider::new().fallback(&["END_SESSION"]).shared();
     let mut session = Session::new(config("debate", "Ship it?", provider)).expect("gameplan loads");
-    session.add_participant(Agent::new("Alice", "gpt-4o"));
-    session.add_participant(Agent::new("Alice", "gpt-4o"));
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
-        })
+        .add_agent(Agent::new("Alice").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(Agent::new("Alice").with_model("gpt-4o"))
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
 
     let message = session

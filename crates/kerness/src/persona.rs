@@ -84,42 +84,8 @@ pub fn list_builtin_personas() -> Vec<String> {
 }
 
 /// Resolve a persona path to a file that exists.
-///
-/// Tried in order: the path as written, then relative to each *search*
-/// directory, then relative to the built-ins. The error names every directory
-/// tried, because "persona file not found" without the search path sends the
-/// reader hunting for a resolution order they cannot see.
 pub fn resolve_persona_path(path: &str, search: &[PathBuf]) -> Result<PathBuf> {
-    let mut tried: Vec<String> = Vec::new();
-    for candidate in candidates(path, search) {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        tried.push(candidate.display().to_string());
-    }
-    Err(Error::NotFound(format!(
-        "Persona file not found: {path}. Tried: {}.",
-        tried.join(", ")
-    )))
-}
-
-/// Every location a persona path could mean, in resolution order.
-///
-/// An absolute path means one place. Joining it onto a search directory
-/// already discards that directory, so leaving this branch out would still
-/// resolve correctly — it would just report the same path three times in the
-/// not-found message, which reads as a bug in the search rather than a missing
-/// file.
-fn candidates(path: &str, search: &[PathBuf]) -> Vec<PathBuf> {
-    let given = PathBuf::from(path);
-    if given.is_absolute() {
-        return vec![given];
-    }
-    let mut candidates = Vec::with_capacity(search.len() + 2);
-    candidates.push(given);
-    candidates.extend(search.iter().map(|directory| directory.join(path)));
-    candidates.push(personas_dir().join(path));
-    candidates
+    assets::resolve_path("Persona", path, search, &personas_dir())
 }
 
 /// The content under a `## <heading>` heading, up to the next `## ` or the end.
@@ -144,6 +110,7 @@ fn extract_section(text: &str, heading: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TempDir;
 
     const SAMPLE: &str = concat!(
         "# Persona: Dr. Ada\n",
@@ -157,29 +124,6 @@ mod tests {
         "## Communication Style\n",
         "Direct, and short.\n",
     );
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("kerness-persona-{tag}"));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(path)
-        }
-
-        fn write(&self, name: &str, text: &str) -> PathBuf {
-            let path = self.0.join(name);
-            std::fs::write(&path, text).expect("write persona");
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn every_section_is_parsed_and_the_title_wins_over_the_stem() {

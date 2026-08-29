@@ -9,6 +9,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use serde_json::{Map, Number, Value};
 
+use kerness::conversation::ChatMessage;
+
 /// Render a JSON value as the Python object it stands for.
 pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
     Ok(match value {
@@ -105,4 +107,22 @@ pub fn optional_map(object: Option<&Bound<'_, PyAny>>) -> PyResult<Map<String, V
         Some(object) if object.is_none() => Ok(Map::new()),
         Some(object) => map_from_py(object.downcast::<PyDict>()?),
     }
+}
+
+/// A chat as the list of `{"role": ..., "content": ...}` dicts a `Provider`
+/// receives.
+///
+/// This is the shape the Python side of the boundary agrees on, so it is
+/// written once: a conversation rendered for a turn and a summary request are
+/// the same thing to a provider, and two spellings of it would eventually
+/// disagree on a key name.
+pub fn chat_to_py<'py>(py: Python<'py>, chat: &[ChatMessage]) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for message in chat {
+        let dict = PyDict::new(py);
+        dict.set_item("role", &message.role)?;
+        dict.set_item("content", &message.content)?;
+        list.append(dict)?;
+    }
+    Ok(list)
 }

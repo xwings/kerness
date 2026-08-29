@@ -6,7 +6,7 @@ The Rust/Python boundary. `kerness._core` is a PyO3 extension module in which
 nothing decides anything: every class wraps a type in the `kerness` crate and
 every function forwards. What lives here is the translation — JSON values across
 the boundary, framework errors as exception instances and back, and Python
-callables seen as the traits the framework calls. Serves **M3**.
+callables seen as the traits the framework calls.
 
 Above it sits `bindings/python/kerness/`, the installed package: one shim per
 subsystem that re-exports from `_core`, plus the four modules that are
@@ -23,7 +23,7 @@ deliberately Python and the bundled assets.
 | `bindings/python/src/lib.rs` | the module, `bootstrap`, and the class registry |
 | `bindings/python/src/convert.rs` | `serde_json::Value` ↔ Python objects |
 | `bindings/python/src/errors.rs` | the exception map, both directions |
-| `bindings/python/src/types.rs` | 19 pyclasses: tools, messages, agents, harness specs |
+| `bindings/python/src/types.rs` | 20 pyclasses: tools, messages, agents, roles, harness specs |
 | `bindings/python/src/funcs.rs` | free functions and the framework constants |
 | `bindings/python/src/runtime.rs` | `Conversation`, `ToolDispatcher`, `PromptAssembler`, `AgentRunner`, `OrchestratorLoop` |
 | `bindings/python/src/{provider,session,access,skill,channel}.rs` | one boundary concern each |
@@ -38,22 +38,22 @@ deliberately Python and the bundled assets.
   classes, the dialect enum, the assets root, the HTTP transport, and the logger.
 - `bindings/python/src/lib.rs:48` — `_core(module)` — the `#[pymodule]`; the
   explicit `add_class` list is the extension's whole surface.
-- `bindings/python/src/convert.rs:53` — `value_from_py(object)` — Python to
+- `bindings/python/src/convert.rs:59` — `value_from_py(object)` — Python to
   `Value`; `value_to_py` at `:13` is the inverse. `serde_json` is built with
   `preserve_order`, so a dict's key order survives a round trip.
 - `bindings/python/src/errors.rs:146` — `Raise` / `:157` `Catch` — the two
   extension traits that turn `Result<T>` into `PyResult<T>` and back at every
   call site, so no boundary function hand-rolls the mapping.
-- `bindings/python/src/types.rs:163` — `PyToolHandler` — a Rust closure seen
+- `bindings/python/src/types.rs:166` — `PyToolHandler` — a Rust closure seen
   from Python as an ordinary callable, so `spec.handler(...)` works for the
   built-in tools.
-- `bindings/python/src/funcs.rs:40` onward — the free functions, and the
+- `bindings/python/src/funcs.rs:45` onward — the free functions, and the
   constant block in `register()` that re-exports every framework constant.
-- `bindings/python/src/funcs.rs:616` — `__version__` — `env!("CARGO_PKG_VERSION")`
+- `bindings/python/src/funcs.rs:646` — `__version__` — `env!("CARGO_PKG_VERSION")`
   at the top of that block. `kerness/__init__.py:14` re-exports it, so the
   number a caller reads is the one the binary was compiled at rather than a
   literal that can drift from it.
-- `bindings/python/kerness/__init__.py:68` — `__all__` — the public Python surface.
+- `bindings/python/kerness/__init__.py:73` — `__all__` — the public Python surface.
 
 ### Three patterns the boundary needs
 
@@ -86,7 +86,7 @@ method boundary. See [channel.md](channel.md) for the full account.
 
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 394 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 442 passed
 cd bindings/python && ../../.venv/bin/maturin develop # pass = "Installed kerness-0.1.0"
 ```
 

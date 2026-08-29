@@ -1,5 +1,6 @@
 """Tests for kerness.provider."""
 
+import inspect
 from typing import Literal
 from unittest.mock import patch
 
@@ -8,6 +9,15 @@ from pydantic import BaseModel
 
 from kerness.exceptions import ProviderError, ProviderHTTPError
 from kerness.provider import (
+    CLAUDE_BASE_URL,
+    DEFAULT_BACKOFF_SEC,
+    DEFAULT_CLAUDE_MAX_TOKENS,
+    DEFAULT_REQUEST_TIMEOUT_SEC,
+    DEFAULT_RETRIES,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    OPENAI_BASE_URL,
+    OPENROUTER_BASE_URL,
     ClaudeOAuthProvider,
     ClaudeProvider,
     CustomProvider,
@@ -642,3 +652,146 @@ class TestEmptyResponseGuard:
         resp = provider.chat_with_retries("m", [], purpose="turn", tools=[CMD_SPEC])
         assert resp.content == "plain reply"
         assert "tools" not in mock_post.call_args[0][1]
+
+
+class TestReasoningEffort:
+    """The level is per agent, so it travels per call rather than per provider."""
+
+    @patch("kerness.provider.http_post_json")
+    def test_each_backend_spells_the_level_its_own_way(self, mock_post):
+        """There is no shared key, and nothing normalises between them."""
+        mock_post.return_value = _reply("ok", model="m")
+        OpenAIProvider(api_key="k").chat("m", [], reasoning_effort="low")
+        assert mock_post.call_args[0][1]["reasoning_effort"] == "low"
+
+        CustomProvider(url="https://x/v1", api_key="k").chat(
+            "m", [], reasoning_effort="xhigh"
+        )
+        assert mock_post.call_args[0][1]["reasoning_effort"] == "xhigh"
+
+        OpenRouterProvider(api_key="k").chat("m", [], reasoning_effort="minimal")
+        assert mock_post.call_args[0][1]["reasoning"] == {"effort": "minimal"}
+
+        mock_post.return_value = {"content": [{"text": "ok"}], "model": "m"}
+        ClaudeProvider(api_key="k").chat("m", [], reasoning_effort="max")
+        assert mock_post.call_args[0][1]["output_config"] == {"effort": "max"}
+
+    @patch("kerness.provider.http_post_json")
+    def test_the_level_is_high_when_nobody_names_one(self, mock_post):
+        """``high`` is sent rather than standing in for "unset"."""
+        mock_post.return_value = _reply("ok", model="m")
+        OpenAIProvider(api_key="k").chat("m", [])
+        assert mock_post.call_args[0][1]["reasoning_effort"] == "high"
+
+    def test_an_unknown_level_is_rejected_where_it_was_written(self):
+        provider = OpenAIProvider(api_key="k")
+        with pytest.raises(ValueError, match="Unknown reasoning effort"):
+            provider.chat("m", [], reasoning_effort="thorough")
+
+    def test_a_400_naming_the_parameter_latches_it_off_for_good(self):
+        provider = OpenAIProvider(api_key="k")
+        exc = ProviderHTTPError(400, "https://x", "unknown parameter reasoning_effort")
+
+        assert provider.note_reasoning_effort_rejected(exc) is True
+        assert provider.effective_effort("high") is None
+        assert provider.effective_effort("low") is None
+
+    def test_a_second_refusal_is_reported_rather_than_retried(self):
+        """The retry re-sends identical arguments, so a latch that reported
+        itself twice would never stop."""
+        provider = OpenAIProvider(api_key="k")
+        exc = ProviderHTTPError(400, "https://x", "unsupported: reasoning_effort")
+
+        assert provider.note_reasoning_effort_rejected(exc) is True
+        assert provider.note_reasoning_effort_rejected(exc) is False
+
+    def test_a_failure_that_is_not_about_the_level_does_not_latch(self):
+        provider = OpenAIProvider(api_key="k")
+
+        assert provider.note_reasoning_effort_rejected(
+            ProviderHTTPError(400, "https://x", "invalid api key")
+        ) is False
+        assert provider.note_reasoning_effort_rejected(
+            ProviderHTTPError(500, "https://x", "reasoning_effort broke")
+        ) is False
+        assert provider.effective_effort("high") == "high"
+
+    @patch("kerness.provider.http_post_json")
+    def test_a_rejected_endpoint_retries_once_without_the_level(self, mock_post):
+        mock_post.side_effect = [
+            ProviderHTTPError(400, "https://x", "unrecognised key reasoning_effort"),
+            {"choices": [{"message": {"content": "plain reply"}}], "model": "m"},
+        ]
+        provider = CustomProvider(url="https://x/v1", api_key="k",
+                                  retries=0, backoff_sec=0)
+        resp = provider.chat_with_retries("m", [], purpose="turn")
+        assert resp.content == "plain reply"
+        assert "reasoning_effort" not in mock_post.call_args[0][1]
+
+    def test_a_chat_that_never_declared_the_level_is_never_offered_one(self):
+        """The same courtesy ``tools`` gets: a provider written before the
+        parameter existed keeps working untouched."""
+        seen = []
+
+        class EffortUnaware(Provider):
+            def chat(self, model, messages, tools=None):
+                seen.append("no kwarg")
+                return ProviderResponse(content="hi", model=model)
+
+        class Aware(Provider):
+            def chat(self, model, messages, tools=None, reasoning_effort=None):
+                seen.append(reasoning_effort)
+                return ProviderResponse(content="hi", model=model)
+
+        EffortUnaware().chat_with_retries("m", [], purpose="turn")
+        Aware().chat_with_retries("m", [], purpose="turn", reasoning_effort="low")
+        assert seen == ["no kwarg", "low"]
+
+
+class TestSharedDefaults:
+    """The request defaults are declared once, in Rust, and named on both sides.
+
+    Each built-in constructor writes these numbers into its own signature, so
+    without this the wheel could ship a timeout the crate does not use and
+    nothing would say so.
+    """
+
+    def test_the_constants_carry_the_frameworks_values(self):
+        assert DEFAULT_REQUEST_TIMEOUT_SEC == 60
+        assert DEFAULT_RETRIES == 2
+        assert DEFAULT_BACKOFF_SEC == 2.0
+        assert DEFAULT_TEMPERATURE == 1.0
+        assert DEFAULT_TOP_P == 1.0
+        assert DEFAULT_CLAUDE_MAX_TOKENS == 4096
+        assert OPENAI_BASE_URL == "https://api.openai.com/v1"
+        assert OPENROUTER_BASE_URL == "https://openrouter.ai/api/v1"
+        assert CLAUDE_BASE_URL == "https://api.anthropic.com/v1"
+
+    @pytest.mark.parametrize(
+        ("cls", "base_url"),
+        [
+            (OpenAIProvider, OPENAI_BASE_URL),
+            (OpenRouterProvider, OPENROUTER_BASE_URL),
+            (ClaudeProvider, CLAUDE_BASE_URL),
+        ],
+    )
+    def test_every_constructor_defaults_to_the_constants(self, cls, base_url):
+        signature = inspect.signature(cls.__init__).parameters
+        assert signature["base_url"].default == base_url
+        assert signature["timeout_sec"].default == DEFAULT_REQUEST_TIMEOUT_SEC
+        assert signature["retries"].default == DEFAULT_RETRIES
+        assert signature["backoff_sec"].default == DEFAULT_BACKOFF_SEC
+        assert signature["temperature"].default == DEFAULT_TEMPERATURE
+
+    def test_the_two_defaults_only_one_family_takes(self):
+        """``top_p`` is chat-completions only, and the reply ceiling is a
+        constant on exactly one backend: Anthropic requires the field, so there
+        is no "unset" to send, while OpenAI omits it and lets the model decide.
+        """
+        openai = inspect.signature(OpenAIProvider.__init__).parameters
+        assert openai["top_p"].default == DEFAULT_TOP_P
+        assert openai["max_tokens"].default is None
+
+        claude = inspect.signature(ClaudeProvider.__init__).parameters
+        assert claude["max_tokens"].default == DEFAULT_CLAUDE_MAX_TOKENS
+        assert "top_p" not in claude

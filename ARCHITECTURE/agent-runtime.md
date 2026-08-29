@@ -5,7 +5,7 @@
 One agent turn, from the provider call to the text that goes into the
 transcript. The cycle is: call the provider, parse tool calls out of the reply,
 dispatch them, feed the results back, and call again — until the model stops
-asking for tools or the iteration limit is hit. Serves **M2**.
+asking for tools or the iteration limit is hit.
 
 This is the smallest piece of the framework a caller can reuse on its own: a
 harness that wants a different loop but the same turn mechanics constructs an
@@ -58,7 +58,7 @@ cargo test -p kerness agent_runtime                                       # pass
 .venv/bin/python -m pytest bindings/python/tests/test_agent_runtime.py -q # pass = 0 failed
 ```
 
-- The Rust tests drive a `MockProvider` (`crates/kerness/src/agent_runtime.rs:290`)
+- The Rust tests drive a `MockProvider` (`crates/kerness/src/agent_runtime.rs:292`)
   through a fixed reply sequence, so the cycle is exercised without a network call.
 - `bindings/python/tests/test_agent_runtime.py:128` — `test_a_model_stuck_on_invalid_json_does_not_loop_forever` —
   the `MAX_INVALID_CALLS` cutoff — paired with `:139`

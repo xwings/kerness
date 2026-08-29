@@ -137,34 +137,14 @@ fn decode(bytes: Vec<u8>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::access::AccessPolicy;
-    use std::path::PathBuf;
+    use crate::testing::TempDir;
 
     fn allowing(configure: impl FnOnce(&mut AccessPolicy)) -> AccessManager {
         let mut policy = AccessPolicy::new();
         configure(&mut policy);
         AccessManager::new(policy)
-    }
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("kerness-exec-{tag}"));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(std::fs::canonicalize(&path).expect("canonicalize"))
-        }
-
-        fn text(&self) -> String {
-            self.0.display().to_string()
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
     }
 
     #[test]
@@ -243,7 +223,7 @@ mod tests {
 
     #[test]
     fn cwd_is_where_the_command_runs() {
-        let dir = TempDir::new("cwd");
+        let dir = TempDir::resolved("cwd");
         let access = allowing(|policy| policy.allowed_programs = vec!["pwd".into()]);
         let out = run_command(&access, "pwd", Some(&dir.0), None, "").expect("runs");
         assert_eq!(out.trim(), dir.text());
@@ -251,7 +231,7 @@ mod tests {
 
     #[test]
     fn reads_and_listings_go_through_the_policy() {
-        let dir = TempDir::new("fs");
+        let dir = TempDir::resolved("fs");
         std::fs::write(dir.0.join("b.txt"), "contents").expect("write");
         std::fs::write(dir.0.join("a.txt"), "other").expect("write");
 
@@ -273,7 +253,7 @@ mod tests {
 
     #[test]
     fn listing_a_file_says_so_rather_than_returning_nothing() {
-        let dir = TempDir::new("notadir");
+        let dir = TempDir::resolved("notadir");
         let file = dir.0.join("a.txt");
         std::fs::write(&file, "x").expect("write");
         let access = allowing(|policy| policy.allowed_dirs = vec![dir.text()]);

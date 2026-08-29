@@ -33,13 +33,13 @@ def main() -> None:
         channel=kerness.ConsoleChannel(),
         access_policy=None,
     )
-    
+
     session.exec = ["agent-browser*"]
 
-    session.add_participant("Alex", model="gpt-5.1", persona="Systems researcher")
-    session.add_participant("Bo", model="gpt-5.2", persona="AI product analyst")
-    session.add_participant("Chen", model="gpt-5.1", persona="ML engineer")
-    session.add_orchestrator("Lead", model="gpt-5.2")
+    session.add_agent("Alex", model="gpt-5.1", persona="Systems researcher")
+    session.add_agent("Bo", model="gpt-5.2", persona="AI product analyst")
+    session.add_agent("Chen", model="gpt-5.1", persona="ML engineer")
+    session.add_agent("Lead", model="gpt-5.2", role="orchestrator")
 
     session.add_skill("summarize")
     session.add_skill("fact-check")

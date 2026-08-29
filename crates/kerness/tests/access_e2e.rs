@@ -13,8 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use kerness::access::{AccessPolicy, AccessRequest, ApprovePrompt};
+use kerness::channel::FileChannel;
 use kerness::provider::ProviderResponse;
-use kerness::{Agent, Role, Session, ToolDialect};
+use kerness::{Agent, Session, ToolDialect};
 use serde_json::json;
 
 use common::{
@@ -342,15 +343,18 @@ fn a_denied_tool_call_becomes_a_tool_result_and_a_channel_notice() {
     let mut settings = config(&path.to_string_lossy(), "Check the disk?", orchestrator);
     settings.channel = Some(channel.clone());
     let mut session = Session::new(settings).expect("the gameplan loads");
-    session.add_participant(Agent {
-        provider: Some(speaker.clone()),
-        ..Agent::new("P0", "gpt-4o")
-    });
     session
-        .add_orchestrator(Agent {
-            role: Role::Orchestrator,
-            ..Agent::new("Mod", "gpt-4o")
+        .add_agent(Agent {
+            provider: Some(speaker.clone()),
+            ..Agent::new("P0").with_model("gpt-4o")
         })
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
         .expect("the roster has no orchestrator yet");
 
     let result = session.run().expect("a denial does not end the run");
@@ -372,4 +376,152 @@ fn a_denied_tool_call_becomes_a_tool_result_and_a_channel_notice() {
         "the attempt was not reported: {:?}",
         channel.system()
     );
+}
+
+/// The workspace confines reads, writes, and where a command starts — the three
+/// ways a session touches the filesystem.
+#[test]
+fn a_workspace_confines_a_read_a_write_and_a_commands_working_directory() {
+    let dir = TempDir::new("workspace");
+    let inside = dir.join("work");
+    std::fs::create_dir_all(&inside).expect("create work");
+    std::fs::write(inside.join("ok.txt"), "contents").expect("write inside");
+    dir.write("outside.txt", "secret");
+
+    let mut policy = AccessPolicy::new();
+    // Both the approver and the allowlist say yes to everything under the
+    // temp directory, so only the workspace can be what refuses.
+    policy.approve_prompt = Some(Standing::new(true));
+    policy.allowed_dirs = vec![dir.path().display().to_string()];
+    policy.allowed_programs = vec!["pwd".to_string()];
+    policy.workspace = Some(inside.display().to_string());
+
+    let mut settings = config(
+        "debate",
+        "Ship it?",
+        ScriptedProvider::new().fallback(&["DONE"]).shared(),
+    );
+    settings.access_policy = Some(policy);
+    settings.memory = inside.join("memory.md").display().to_string();
+    let session = Session::new(settings).expect("the memory file is inside the workspace");
+
+    assert_eq!(
+        session
+            .read_file(&inside.join("ok.txt").display().to_string(), "Alice")
+            .expect("inside the workspace"),
+        "contents"
+    );
+    let message = refusal(session.read_file(&dir.str_join("outside.txt"), "Alice"));
+    assert!(message.contains("outside the workspace"), "{message}");
+
+    // A command with no working directory of its own starts at the workspace, so a
+    // confined session's commands are *in* the confinement.
+    let out = session
+        .run_command("pwd", None, None, "Alice")
+        .expect("pwd is allowed");
+    assert_eq!(out.trim(), inside.display().to_string());
+}
+
+/// A session file, a memory file, or a channel log outside the workspace is refused
+/// at construction — before the run reaches its first write.
+#[test]
+fn the_sessions_own_write_paths_are_confined_too() {
+    let dir = TempDir::new("rootwrites");
+    let inside = dir.join("work");
+    std::fs::create_dir_all(&inside).expect("create work");
+
+    let confined = || {
+        let mut policy = AccessPolicy::new();
+        policy.workspace = Some(inside.display().to_string());
+        let mut settings = config(
+            "debate",
+            "Ship it?",
+            ScriptedProvider::new().fallback(&["DONE"]).shared(),
+        );
+        settings.access_policy = Some(policy);
+        settings.memory = inside.join("memory.md").display().to_string();
+        settings
+    };
+
+    Session::new(confined()).expect("everything is inside the workspace");
+
+    let mut escaping_memory = confined();
+    escaping_memory.memory = dir.str_join("memory.md");
+    let message = refusal(Session::new(escaping_memory));
+    assert!(
+        message.starts_with("The memory file resolves to "),
+        "{message}"
+    );
+
+    let mut escaping_state = confined();
+    escaping_state.session_file = Some(dir.str_join("run.json"));
+    let message = refusal(Session::new(escaping_state));
+    assert!(
+        message.starts_with("The session file resolves to "),
+        "{message}"
+    );
+
+    let mut escaping_log = confined();
+    escaping_log.channel = Some(Arc::new(FileChannel::new(dir.join("log.txt"))));
+    let message = refusal(Session::new(escaping_log));
+    assert!(
+        message.starts_with("The FileChannel destination resolves to "),
+        "{message}"
+    );
+}
+
+/// An agent may narrow its own workspace, and only narrow it.
+#[test]
+fn an_agent_workspace_narrows_the_sessions_and_a_wider_one_names_the_agent() {
+    let dir = TempDir::new("agentroot");
+    let session_workspace = dir.join("work");
+    let alices = session_workspace.join("alice");
+    std::fs::create_dir_all(&alices).expect("create alice");
+    std::fs::write(session_workspace.join("shared.txt"), "shared").expect("write shared");
+
+    let confined = |workspace: &str| {
+        let mut policy = AccessPolicy::new();
+        policy.allowed_dirs = vec![session_workspace.display().to_string()];
+        policy.workspace = Some(session_workspace.display().to_string());
+        let mut settings = config(
+            "debate",
+            "Ship it?",
+            ScriptedProvider::new()
+                .on("orchestrator turn", &["DONE"])
+                .fallback(&["DONE"])
+                .shared(),
+        );
+        settings.access_policy = Some(policy);
+        settings.memory = session_workspace.join("memory.md").display().to_string();
+        let mut session = Session::new(settings).expect("the gameplan loads");
+        session
+            .add_agent(Agent {
+                workspace: Some(workspace.to_string()),
+                ..Agent::new("Alice").with_model("gpt-4o")
+            })
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Bob").with_model("gpt-4o"))
+            .expect("add agent");
+        session
+            .add_agent(
+                Agent::new("Mod")
+                    .with_model("gpt-4o")
+                    .with_role("orchestrator"),
+            )
+            .expect("the roster has no orchestrator yet");
+        session
+    };
+
+    let shared = session_workspace.join("shared.txt").display().to_string();
+    let mut narrowed = confined(&alices.display().to_string());
+    narrowed.run().expect("a scripted run cannot fail");
+    // Resolution happens in `run()`, so the narrowing is in force after it.
+    assert!(narrowed.read_file(&shared, "Bob").is_ok());
+    let message = refusal(narrowed.read_file(&shared, "Alice"));
+    assert!(message.contains("outside the workspace"), "{message}");
+
+    let message = refusal(confined(&dir.path().display().to_string()).run());
+    assert!(message.contains("'Alice'"), "{message}");
+    assert!(message.contains("never widens it"), "{message}");
 }
