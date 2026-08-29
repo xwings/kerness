@@ -52,10 +52,10 @@ module canonicalizing its path and another not.
 
 ## Key Types and Entry Points
 
-- `crates/kerness/tests/common/mod.rs:35` — `Call` — one request a double
+- `crates/kerness/tests/common/mod.rs:36` — `Call` — one request a double
   received. `system()`, `text()` and `last()` are the three questions tests ask
   of it; `purpose` is how a test tells an orchestrator turn from a participant's.
-- `:96` — `ScriptedProvider` — replies written in advance, keyed by purpose
+- `:97` — `ScriptedProvider` — replies written in advance, keyed by purpose
   substring in declaration order, each key owning a sequence with its own cursor
   and a last entry that repeats. Built on `ProviderBase::new(0, 0.0, None)`: zero
   extra attempts, so a scripted reply means exactly one call and a failure
@@ -144,5 +144,5 @@ project does not own.
   time and their tests are not run there, so a platform-specific break arrives
   as a bad wheel rather than a red build.
 - Nothing checks that `crates/kerness/assets/` and `bindings/python/kerness/` hold the
-  same asset bytes from the Rust side; `bindings/python/tests/test_packaging.py:40` is the only
+  same asset bytes from the Rust side; `bindings/python/tests/test_packaging.py:42` is the only
   guard, and it needs the Python surface installed to run.

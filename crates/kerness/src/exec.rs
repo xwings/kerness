@@ -36,12 +36,18 @@ pub fn run_command(
 ) -> Result<String> {
     let argv = shell_words::split(command)
         .map_err(|err| Error::session(format!("Invalid command syntax: {err}")))?;
-    let program = argv.first().map(String::as_str).unwrap_or("");
+    // A command that is only a comment or only whitespace splits to nothing,
+    // while still being non-empty for the policy's own empty-command check.
+    let Some((program, args)) = argv.split_first() else {
+        return Err(Error::session(format!(
+            "Command has no program to run: {command}"
+        )));
+    };
     access.check_command(command, actor)?;
 
     let mut builder = Command::new(program);
     builder
-        .args(&argv[1..])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -188,6 +194,20 @@ mod tests {
             error.to_string().contains("Invalid command syntax"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_command_that_splits_to_no_program_is_refused_rather_than_panicking() {
+        // `"*"` admits the string, so the guard in `run_command` is the only
+        // thing standing between these and an index into an empty argv.
+        let access = allowing(|policy| policy.allowed_commands = vec!["*".into()]);
+        for command in ["#comment", "  # spaced", "\t"] {
+            let error = run_command(&access, command, None, None, "").expect_err("no program");
+            assert!(
+                error.to_string().contains("Command has no program to run"),
+                "{command:?}: {error}"
+            );
+        }
     }
 
     #[test]

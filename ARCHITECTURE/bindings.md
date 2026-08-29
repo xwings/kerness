@@ -49,7 +49,7 @@ deliberately Python and the bundled assets.
   built-in tools.
 - `bindings/python/src/funcs.rs:45` onward — the free functions, and the
   constant block in `register()` that re-exports every framework constant.
-- `bindings/python/src/funcs.rs:646` — `__version__` — `env!("CARGO_PKG_VERSION")`
+- `bindings/python/src/funcs.rs:638` — `__version__` — `env!("CARGO_PKG_VERSION")`
   at the top of that block. `kerness/__init__.py:14` re-exports it, so the
   number a caller reads is the one the binary was compiled at rather than a
   literal that can drift from it.
@@ -59,7 +59,7 @@ deliberately Python and the bundled assets.
 
 **Declare the base class in Python, keep the logic in Rust.** `Provider` and
 `Channel` are subclassed by user code, so they are Python classes
-(`bindings/python/kerness/provider.py:64`,
+(`bindings/python/kerness/provider.py:99`,
 `bindings/python/kerness/channel.py:17`). Each instance holds a `_core` handle,
 and the base-class methods forward `self` back down — which means a subclass
 override wins by ordinary Python method resolution, not by anything the binding

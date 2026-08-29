@@ -60,7 +60,7 @@ cargo test -p kerness memory                                       # pass = 0 fa
 - `bindings/python/tests/test_memory.py:7` — `test_load_reads_what_is_there_and_creates_what_is_not`;
   `:43` `test_an_entry_is_stored_verbatim_one_blank_line_apart`; `:63`
   `test_nothing_reaches_disk_until_there_is_something_to_write`.
-- `bindings/python/tests/test_session.py:1742` — `test_per_agent_memory` — and `:1790`
+- `bindings/python/tests/test_session.py:1795` — `test_per_agent_memory` — and `:1844`
   `test_agent_without_memory_uses_session_memory`: the owned-versus-session
   distinction, observed through a live session.
 

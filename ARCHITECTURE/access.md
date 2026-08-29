@@ -59,26 +59,29 @@ after construction still takes effect.
 - `crates/kerness/src/access.rs:112` — `AccessPolicy::allowed_commands` —
   anchored globs over the whole command line; `"*"` allows every command, and a
   pattern with no `*` is exact.
-- `crates/kerness/src/access.rs:172` — `AccessManager` — the policy plus the
+- `crates/kerness/src/access.rs:174` — `AccessManager` — the policy plus the
   directories granted at runtime; owns every decision.
-- `crates/kerness/src/access.rs:249` — `check_command(command, actor)` —
+- `crates/kerness/src/access.rs:251` — `check_command(command, actor)` —
   auto-approve prefixes, then globs, then whole-line patterns, then the prompt.
-- `crates/kerness/src/access.rs:279` — `check_path(purpose, path, actor)` — the
+- `crates/kerness/src/access.rs:281` — `check_path(purpose, path, actor)` — the
   workspace and the path allow-lists, and nothing else; resolves the path and
   returns the canonical `PathBuf`, so the caller cannot re-resolve it
   differently afterwards. *purpose* is a tool's action (`"read"`, `"list"`) or
   the framework's description of a file it writes for its own reasons
   (`"The memory file"`) — the same check either way.
-- `crates/kerness/src/access.rs:217` — `workspace_for(actor)` — the workspace an
+- `crates/kerness/src/access.rs:219` — `workspace_for(actor)` — the workspace an
   actor is held to, and the directory its commands start in.
-- `crates/kerness/src/access.rs:229` — `confine_agent(agent, workspace)` — narrow
+- `crates/kerness/src/access.rs:231` — `confine_agent(agent, workspace)` — narrow
   one agent, refusing a workspace outside the session's.
-- `crates/kerness/src/access.rs:298` — `allow_dirs(paths)` — how a skill grants its
+- `crates/kerness/src/access.rs:300` — `allow_dirs(paths)` — how a skill grants its
   bundle directory at activation time.
 - `crates/kerness/src/access.rs:46` — `ApprovePrompt` — the trait a human-in-the-loop
   prompt implements; `None` means deny. Only ever asked about a command.
 - `crates/kerness/src/exec.rs:30` — `run_command(...)` — the only place a
-  subprocess is spawned, with `DEFAULT_TIMEOUT` at `exec.rs:18`.
+  subprocess is spawned, with `DEFAULT_TIMEOUT` at `exec.rs:18`. A command the
+  splitter cannot turn into an argv is refused before the policy is consulted:
+  unbalanced quoting, and — at `exec.rs:41` — a line that splits to no program
+  at all, which a bare comment does.
 - `bindings/python/kerness/access.py:21` — `prompt_on_console(req)` — deliberately Python:
   it calls `input()`, and tests monkeypatch the module attribute.
 
@@ -89,7 +92,7 @@ after construction still takes effect.
 
 Every other per-agent option in the framework simply overrides the session's:
 an agent naming a model, a persona, or a provider gets the one it named. The
-workspace is the one exception, and `confine_agent` (`access.rs:229`) is where
+workspace is the one exception, and `confine_agent` (`access.rs:231`) is where
 the exception is enforced — a workspace outside the session's is an
 `AccessDenied` naming the agent, at `run()`, before a single provider call.
 
@@ -113,6 +116,7 @@ whatever an agent stanza says, the session workspace is still an upper bound.
 
 ```sh
 cargo test -p kerness access                                       # pass = 0 failed
+cargo test -p kerness exec::                                       # pass = 0 failed
 .venv/bin/python -m pytest bindings/python/tests/test_access.py -q # pass = 0 failed
 ```
 
@@ -157,3 +161,20 @@ cargo test -p kerness access                                       # pass = 0 fa
   its own reach — the same escalation the workspace's intersection rule exists to
   prevent. Outside the workspace, `actor` is carried through for the audit trail
   and the prompt text only.
+- `auto_approve_prefixes` carries no doc comment on either surface
+  (`crates/kerness/src/access.rs:69`, `bindings/python/kerness/access.py:97`),
+  while every field beside it carries several lines. It is the loosest of the
+  three command mechanisms — an unanchored `starts_with` at `access.rs:358`,
+  where `allowed_commands` is an anchored glob — and `check_command` consults it
+  first, at `access.rs:257`. The field a caller is least warned about is the one
+  that admits the most.
+- `check_path` returns the resolved path so the caller cannot re-resolve it
+  differently, but `Session::new` discards all three of the ones it asks for
+  (`crates/kerness/src/session.rs:393-403`) and later writes through the raw
+  string it was given (`session.rs:1261`). No escape follows today, because the
+  path was checked and a session is single-threaded, but the check's contract is
+  documented at `access.rs:269-270` and the framework's own writer does not
+  honour it.
+- `realpath` (`crates/kerness/src/access.rs:473`) builds every resolved path
+  from `/`, so path confinement assumes POSIX paths and the boundary is
+  Linux/macOS. Noted in `ARCHITECTURE.md`'s Target Environment.

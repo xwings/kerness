@@ -97,7 +97,7 @@ the error names the agent that wrote it.
   `{topic}` and `{bot_name}`. The frontmatter is not shown to any model.
 
 Both ship twice, byte-identical, at `crates/kerness/assets/roles/` and
-`bindings/python/kerness/roles/`; `bindings/python/tests/test_packaging.py:40` is
+`bindings/python/kerness/roles/`; `bindings/python/tests/test_packaging.py:42` is
 the only thing keeping the pair in step.
 
 ## Interactions

@@ -120,7 +120,7 @@ cargo test -p kerness skill                                               # pass
 ## Open Gaps / Roadmap
 
 - The gate is a union across active skills
-  (`bindings/python/tests/test_skill_runtime.py:87`), so activating a broad skill widens what a
+  (`bindings/python/tests/test_skill_runtime.py:88`), so activating a broad skill widens what a
   narrow one permitted. Intersection would be the stricter reading but would make
   two useful skills mutually exclusive.
 - Bundle grants are read-only directory grants; a skill cannot ship a script and
