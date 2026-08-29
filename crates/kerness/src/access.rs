@@ -113,7 +113,9 @@ pub struct AccessPolicy {
 
     /// Commands agents may run, as regexes searched anywhere in the line. The
     /// unanchored counterpart to [`AccessPolicy::allowed_commands`], and the
-    /// looser of the two — see [`matches_regex`].
+    /// looser of the two: a pattern is a *search*, so `rm` allows
+    /// `echo x && rm -rf /`. Anchor with `^` and `$` to get the tighter
+    /// reading.
     pub allowed_command_patterns: Vec<String>,
 
     /// Files and directories reachable *in addition to* the workspace.
