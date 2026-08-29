@@ -14,7 +14,7 @@ use kerness::compaction::{estimate_tokens, SUMMARY_PREFIX};
 use kerness::{Agent, Session, SessionConfig, SessionResult};
 use serde_json::Value;
 
-use common::{config, refusal, RecordingChannel, ScriptedProvider, TempDir};
+use common::{config, confine, refusal, RecordingChannel, ScriptedProvider, TempDir};
 
 /// Four rounds of two speakers: enough turns to outgrow a small ceiling.
 const LONG: &str = r#"---
@@ -69,6 +69,7 @@ fn run(
     let mut settings = config(&path.to_string_lossy(), "Ship it?", provider.clone());
     settings.max_context_tokens = ceiling;
     settings.session_file = Some(temp.str_join("run.json"));
+    confine(&mut settings, &temp);
     settings.channel = channel.map(|channel| channel as Arc<dyn kerness::Channel>);
 
     let mut session = Session::new(settings).expect("the gameplan loads");

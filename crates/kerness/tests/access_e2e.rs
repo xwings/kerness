@@ -96,29 +96,29 @@ fn a_command_is_denied_by_default_and_the_refusal_says_how_to_allow_it() {
     assert!(message.contains("approve_prompt"), "{message}");
 }
 
-/// The four command allow-lists, each on its own: the program, the exact
-/// command, the prefix, and the regex.
+/// Every shape a command allow-list takes: the bare wildcard, the program
+/// glob, the exact string, and the regex.
 #[test]
 fn each_command_allow_list_admits_its_own_shape() {
     let cases = [
         (
-            "program",
+            "wildcard",
             AccessPolicy {
-                allowed_programs: vec!["echo".to_string()],
+                allowed_commands: vec!["*".to_string()],
                 ..AccessPolicy::new()
             },
         ),
         (
-            "command",
+            "program glob",
+            AccessPolicy {
+                allowed_commands: vec!["echo *".to_string()],
+                ..AccessPolicy::new()
+            },
+        ),
+        (
+            "exact",
             AccessPolicy {
                 allowed_commands: vec!["echo hello".to_string()],
-                ..AccessPolicy::new()
-            },
-        ),
-        (
-            "prefix",
-            AccessPolicy {
-                allowed_prefixes: vec!["echo ".to_string()],
                 ..AccessPolicy::new()
             },
         ),
@@ -193,7 +193,7 @@ fn an_allowed_dir_covers_its_files_and_nothing_above_them() {
         "readable"
     );
     let message = refusal(session.read_file(&outside.to_string_lossy(), "Alice"));
-    assert!(message.contains("Approval required"), "{message}");
+    assert!(message.contains("outside the workspace"), "{message}");
 }
 
 /// The check resolves before it decides, so climbing out of a granted directory
@@ -211,7 +211,7 @@ fn traversal_out_of_an_allowed_dir_is_denied_after_resolution() {
 
     let climbing = temp.join("inside/../secret.md");
     let message = refusal(session.read_file(&climbing.to_string_lossy(), "Alice"));
-    assert!(message.contains("Approval required"), "{message}");
+    assert!(message.contains("outside the workspace"), "{message}");
     // The refusal names the resolved path, not the one that was typed.
     assert!(message.contains("secret.md"), "{message}");
     assert!(!message.contains(".."), "{message}");
@@ -234,7 +234,7 @@ fn a_symlink_out_of_an_allowed_dir_is_denied() {
 
     let message =
         refusal(session.read_file(&temp.join("inside/link.md").to_string_lossy(), "Alice"));
-    assert!(message.contains("Approval required"), "{message}");
+    assert!(message.contains("outside the workspace"), "{message}");
     assert!(message.contains("secret.md"), "{message}");
 }
 
@@ -257,7 +257,7 @@ fn listing_is_governed_by_the_same_policy_as_reading() {
         "readable"
     );
     let message = refusal(session.list_dir(&temp.join("dir").to_string_lossy(), "Alice"));
-    assert!(message.contains("Approval required"), "{message}");
+    assert!(message.contains("outside the workspace"), "{message}");
 
     let opened = guarded(AccessPolicy {
         allowed_dirs: vec![temp.join("dir").to_string_lossy().into_owned()],
@@ -307,7 +307,7 @@ fn a_listed_command_is_not_put_to_the_approver() {
     let never = Standing::new(false);
     let session = guarded(AccessPolicy {
         approve_prompt: Some(never.clone()),
-        allowed_programs: vec!["echo".to_string()],
+        allowed_commands: vec!["echo *".to_string()],
         ..AccessPolicy::new()
     });
 
@@ -389,11 +389,10 @@ fn a_workspace_confines_a_read_a_write_and_a_commands_working_directory() {
     dir.write("outside.txt", "secret");
 
     let mut policy = AccessPolicy::new();
-    // Both the approver and the allowlist say yes to everything under the
-    // temp directory, so only the workspace can be what refuses.
+    // The approver says yes to everything and nothing outside the workspace is
+    // allowlisted, so only the workspace can be what refuses.
     policy.approve_prompt = Some(Standing::new(true));
-    policy.allowed_dirs = vec![dir.path().display().to_string()];
-    policy.allowed_programs = vec!["pwd".to_string()];
+    policy.allowed_commands = vec!["pwd".to_string()];
     policy.workspace = Some(inside.display().to_string());
 
     let mut settings = config(
@@ -481,7 +480,9 @@ fn an_agent_workspace_narrows_the_sessions_and_a_wider_one_names_the_agent() {
 
     let confined = |workspace: &str| {
         let mut policy = AccessPolicy::new();
-        policy.allowed_dirs = vec![session_workspace.display().to_string()];
+        // No `allowed_dirs`: the workspace grants its own contents, and an
+        // entry naming it would be a session-wide grant that Alice's narrowing
+        // could not take back.
         policy.workspace = Some(session_workspace.display().to_string());
         let mut settings = config(
             "debate",

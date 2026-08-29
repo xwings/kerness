@@ -86,7 +86,7 @@ method boundary. See [channel.md](channel.md) for the full account.
 
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 442 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 443 passed
 cd bindings/python && ../../.venv/bin/maturin develop # pass = "Installed kerness-0.1.0"
 ```
 

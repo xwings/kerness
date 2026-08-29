@@ -390,12 +390,12 @@ impl Session {
         // sit outside it would confine only the half of the run that goes
         // through a tool. Checked here so a misplaced path fails at
         // construction rather than on the first write, mid-turn.
-        manager.check_workspace("The memory file", &config.memory, "")?;
+        manager.check_path("The memory file", &config.memory, "")?;
         if let Some(session_file) = &config.session_file {
-            manager.check_workspace("The session file", session_file, "")?;
+            manager.check_path("The session file", session_file, "")?;
         }
         for path in channel.paths() {
-            manager.check_workspace(
+            manager.check_path(
                 &format!("The {} destination", channel.type_name()),
                 &path.display().to_string(),
                 "",
@@ -727,7 +727,7 @@ impl Session {
             memories.per_agent.clear();
             for agent in &self.agents {
                 let Some(path) = &agent.memory else { continue };
-                lock(&self.shared.access).check_workspace(
+                lock(&self.shared.access).check_path(
                     &format!("The memory file for {}", agent.name),
                     path,
                     &agent.name,
@@ -1530,8 +1530,8 @@ fn run_and_log(
     // A command with no working directory of its own starts at the session
     // workspace, so a confined session's commands are *in* the confinement
     // rather than merely unable to name their way out of it.
-    let cwd = cwd.or_else(|| manager.workspace_for(actor));
-    let outcome = exec::run_command(&manager, command, cwd, timeout, actor);
+    let cwd = cwd.unwrap_or_else(|| manager.workspace_for(actor));
+    let outcome = exec::run_command(&manager, command, Some(cwd), timeout, actor);
     drop(manager);
     if actor.is_empty() {
         return outcome;
@@ -1843,6 +1843,18 @@ mod tests {
         }
     }
 
+    /// A policy whose workspace is *temp*, where a test keeps its files.
+    ///
+    /// Not optional decoration: an unset workspace is the process's current
+    /// directory, and a scratch directory under `/tmp` is not inside it. Every
+    /// test that writes a memory or session file needs this for the same reason
+    /// a real caller working outside its launch directory does.
+    fn confined(temp: &TempDir) -> Option<AccessPolicy> {
+        let mut policy = AccessPolicy::new();
+        policy.workspace = Some(temp.text());
+        Some(policy)
+    }
+
     /// The two-participant debate every flow test runs.
     fn debate(
         temp: &TempDir,
@@ -1855,6 +1867,7 @@ mod tests {
             provider: Some(provider),
             channel: Some(channel),
             memory: temp.child("memory.md"),
+            access_policy: confined(temp),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -2040,6 +2053,7 @@ mod tests {
             topic: "T".to_string(),
             channel: Some(Arc::new(CaptureChannel::default())),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -2104,6 +2118,7 @@ mod tests {
         let mut session = Session::new(SessionConfig {
             topic: "T".to_string(),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             ..SessionConfig::default()
         })
         .expect("loads");
@@ -2215,6 +2230,7 @@ mod tests {
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(channel),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -2246,6 +2262,7 @@ mod tests {
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(channel),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -2281,6 +2298,7 @@ mod tests {
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(channel),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -2312,6 +2330,7 @@ mod tests {
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(Arc::new(CaptureChannel::default())),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -2501,6 +2520,7 @@ mod tests {
                 provider: Some(provider),
                 channel: Some(Arc::new(CaptureChannel::default())),
                 memory: memory_path.clone(),
+                access_policy: confined(&temp),
                 memory_write: true,
                 turn_delay: Duration::ZERO,
                 ..SessionConfig::default()
@@ -2536,6 +2556,7 @@ mod tests {
         let read_only = Session::new(SessionConfig {
             topic: "T".to_string(),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             ..SessionConfig::default()
         })
         .expect("loads");
@@ -2551,6 +2572,7 @@ mod tests {
         let writing = Session::new(SessionConfig {
             topic: "T".to_string(),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             memory_write: true,
             ..SessionConfig::default()
         })
@@ -2571,6 +2593,7 @@ mod tests {
         let mut session = Session::new(SessionConfig {
             topic: "T".to_string(),
             memory: path.clone(),
+            access_policy: confined(&temp),
             memory_write: true,
             ..SessionConfig::default()
         })
@@ -2631,6 +2654,7 @@ mod tests {
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(Arc::new(CaptureChannel::default())),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -2667,6 +2691,7 @@ mod tests {
             provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
             channel: Some(Arc::new(CaptureChannel::default())),
             memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
@@ -2713,6 +2738,7 @@ mod tests {
                 provider: Some(provider),
                 channel: Some(Arc::new(CaptureChannel::default())),
                 memory: temp.child("memory.md"),
+                access_policy: confined(&temp),
                 session_file: Some(path.clone()),
                 turn_delay: Duration::ZERO,
                 ..SessionConfig::default()
@@ -2758,6 +2784,7 @@ mod tests {
                 provider: Some(provider),
                 channel: Some(Arc::new(CaptureChannel::default())),
                 memory: temp.child("memory.md"),
+                access_policy: confined(&temp),
                 session_file: Some(path.clone()),
                 turn_delay: Duration::ZERO,
                 ..SessionConfig::default()

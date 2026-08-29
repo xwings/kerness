@@ -15,6 +15,17 @@ from kerness.toolschema import ToolDialect
 from tests.conftest import CaptureChannel, MockProvider, SequenceMockProvider
 
 
+def confined(tmp_path, **kwargs):
+    """A policy whose workspace is *tmp_path*, where a test keeps its files.
+
+    Not optional decoration: an unset workspace is the process's current
+    directory, and pytest's scratch directory is not inside it. Every test that
+    writes a memory or session file needs this for the same reason a real caller
+    working outside its launch directory does.
+    """
+    return AccessPolicy(workspace=tmp_path, **kwargs)
+
+
 class TestOrchestratorDrivenFlow:
     def _run(self, tmp_path, responses, topic="Is pineapple acceptable on pizza?",
              **kwargs):
@@ -27,6 +38,7 @@ class TestOrchestratorDrivenFlow:
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
             **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -196,6 +208,10 @@ class TestAccessControl:
     behind another that still passes."""
 
     def _session(self, tmp_path, policy):
+        # Each policy below is about commands and allowlists. The workspace is
+        # filled in here so the memory file, which lives in *tmp_path*, is
+        # inside the world the policy describes.
+        policy.workspace = tmp_path
         return Session(
             gameplan="debate",
             topic="Test",
@@ -239,11 +255,13 @@ class TestAccessControl:
 
         assert session.read_file(str(data)) == "hello"
 
-    def test_file_access_blocklist(self, tmp_path):
+    def test_a_file_outside_the_workspace_is_refused(self, tmp_path):
+        workspace = tmp_path / "work"
+        workspace.mkdir()
         data = tmp_path / "data.txt"
         data.write_text("hello", encoding="utf-8")
         session = self._session(
-            tmp_path, AccessPolicy(approve_prompt=lambda req: False)
+            workspace, AccessPolicy(approve_prompt=lambda req: False)
         )
 
         with pytest.raises(AccessDeniedError):
@@ -284,7 +302,7 @@ class TestAccessControl:
         redirection in its argument string must not smuggle in a second action.
         """
         marker = tmp_path / "created-by-shell.txt"
-        session = self._session(tmp_path, AccessPolicy(allowed_programs=["echo"]))
+        session = self._session(tmp_path, AccessPolicy(allowed_commands=["echo *"]))
 
         output = session.run_command(f"echo safe > {marker}")
 
@@ -313,6 +331,7 @@ class TestToolCalls:
             provider=provider,
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -344,6 +363,9 @@ class TestCommandLogGoesToTheChannel:
 
     def _session(self, tmp_path, policy):
         channel = CaptureChannel()
+        # The workspace holds the memory file below; what is on trial here is
+        # the command verdict, not where a path lands.
+        policy.workspace = tmp_path
         session = Session(
             gameplan="debate",
             topic="Test",
@@ -431,6 +453,10 @@ class TestADenialCostsATurnNotTheSession:
             "builtins.input",
             lambda *a: pytest.fail("a stock session must never prompt"),
         )
+        # Run *from* the scratch directory, so the shipped default's workspace —
+        # the process's own — is where the memory file goes, and the session
+        # below can be built with no policy at all.
+        monkeypatch.chdir(tmp_path)
         result, provider, _ = self._run(tmp_path)
 
         followups = [
@@ -470,6 +496,7 @@ class TestToolExchangePrivacy:
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
             **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -515,6 +542,7 @@ class TestToolExchangePrivacy:
         session = Session(
             gameplan="debate", topic="T", provider=provider, turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"), tool_results_in_history=True,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -552,6 +580,7 @@ class TestNativeDialectGuard:
         session = Session(
             gameplan="debate", topic="T", provider=provider, turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"), **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -607,6 +636,7 @@ class TestHarnessToolNarrowing:
             provider=provider,
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")
@@ -687,6 +717,7 @@ class TestPerAgentProviders:
             channel=channel,
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="gpt-4o", provider=alice_provider)
         # Bob satisfies the debate harness's 2-participant minimum; he needs
@@ -720,6 +751,7 @@ class TestPerAgentProviders:
             channel=channel,
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="gpt-4o", provider=alice_provider)
         session.add_agent("Bob", model="m")
@@ -762,6 +794,7 @@ class TestSessionDefaults:
             channel=CaptureChannel(),
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice")
         session.add_agent("Bob", model="own/model")
@@ -815,14 +848,19 @@ class TestSessionContainment:
             channel=CaptureChannel(),
             turn_delay_sec=0,
             memory=str(workspace / "memory.md"),
-            access_policy=AccessPolicy(allowed_dirs=[workspace], workspace=workspace),
+            # No ``allowed_dirs``: the workspace grants its own contents, and an
+            # entry naming it would be a session-wide grant that Alice's
+            # narrowing could not take back.
+            access_policy=AccessPolicy(workspace=workspace),
         )
         session.add_agent("Alice", workspace=str(agent_workspace))
         session.add_agent("Bob")
         session.add_agent("Mod", role="orchestrator")
         return session
 
-    def test_a_workspace_confines_a_read_the_allowlist_would_have_allowed(self, tmp_path):
+    def test_an_agent_workspace_confines_a_read_the_sessions_would_have_allowed(
+        self, tmp_path
+    ):
         workspace = tmp_path / "work"
         (workspace / "alice").mkdir(parents=True)
         (workspace / "shared.txt").write_text("shared")
@@ -948,6 +986,7 @@ class TestSessionResult:
         session = Session(
             gameplan="debate", topic="Test", provider=provider,
             turn_delay_sec=0, memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -974,6 +1013,7 @@ class TestSessionResult:
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
             **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -1009,6 +1049,7 @@ class TestSkillInjection:
             gameplan="debate", topic="Test", provider=provider,
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         configure(session)
         session.run()
@@ -1086,6 +1127,7 @@ class TestSkillInjection:
             gameplan=str(path), topic="Test", provider=provider,
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")
@@ -1110,6 +1152,7 @@ class TestSkillInjection:
             provider=SequenceMockProvider(responses=["END_SESSION"]),
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -1129,6 +1172,7 @@ class TestSkillToolEndToEnd:
         session = Session(
             gameplan="debate", topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"), **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -1221,6 +1265,7 @@ class TestSkillToolEndToEnd:
         session = Session(
             gameplan="debate", topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m", skills=[str(base / "SKILL.md")])
         session.add_agent("Bob", model="m")
@@ -1249,6 +1294,7 @@ class TestResultShaping:
         session = Session(
             gameplan=gameplan, topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -1324,6 +1370,7 @@ class TestOrchestratorPromptOverride:
             gameplan="debate", topic="Pineapple", provider=provider,
             turn_delay_sec=0, channel=CaptureChannel(),
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -1390,6 +1437,7 @@ class TestHarnessDrivenLimits:
             gameplan=gameplan, topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"),
             **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")
@@ -1473,6 +1521,7 @@ class TestHarnessDrivenLimits:
                 ),
                 turn_delay_sec=0, channel=CaptureChannel(),
                 memory=str(tmp_path / "memory.md"), **kwargs,
+                access_policy=confined(tmp_path),
             )
 
         assert session(max_rounds=0)._max_rounds == 0
@@ -1541,6 +1590,7 @@ class TestOrchestratorIsRequiredToRun:
             provider=SequenceMockProvider(responses=["DONE", "Summary."]),
             turn_delay_sec=0, channel=CaptureChannel(),
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         return session
@@ -1579,6 +1629,7 @@ class TestDeclaredKeysReachTheOrchestrator:
         session = Session(
             gameplan=str(path), topic="T", provider=provider, turn_delay_sec=0,
             channel=CaptureChannel(), memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")
@@ -1669,6 +1720,7 @@ class TestMemoryMarkers:
             turn_delay_sec=0,
             memory=str(memory),
             **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -1724,6 +1776,7 @@ class TestMemoryMarkers:
             turn_delay_sec=0,
             memory=str(path),
             memory_write=True,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -1761,6 +1814,7 @@ class TestMemoryMarkers:
             turn_delay_sec=0,
             memory=str(session_mem),
             memory_write=True,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m", memory=str(alice_mem))
         session.add_agent("Bob", model="m")
@@ -1806,6 +1860,7 @@ class TestMemoryMarkers:
             channel=channel,
             turn_delay_sec=0,
             memory=str(session_mem),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Bob", model="m")  # no per-agent memory
         session.add_agent("Carol", model="m")
@@ -1849,6 +1904,7 @@ class TestMemoryTools:
             turn_delay_sec=0,
             memory=str(memory),
             **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -1955,6 +2011,7 @@ class TestMemoryTools:
             turn_delay_sec=0,
             memory=str(session_mem),
             memory_write=True,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m", memory=str(alice_mem))
         session.add_agent("Bob", model="m")
@@ -1985,6 +2042,7 @@ class TestMemoryTools:
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
             memory_write=True,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")
@@ -2015,6 +2073,7 @@ class TestParticipantCountIsEnforcedAtRun:
             gameplan=self._gameplan(tmp_path), topic="T", provider=provider,
             turn_delay_sec=0, channel=CaptureChannel(),
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         for name in seats:
             session.add_agent(name, model="m")
@@ -2050,6 +2109,7 @@ class TestTheDraftVerdictStaysPrivate:
         session = Session(
             gameplan="debate", topic="T", provider=provider, channel=channel,
             turn_delay_sec=0, memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -2097,6 +2157,7 @@ class TestTheDraftVerdictStaysPrivate:
             gameplan=str(plan), topic="T", provider=provider,
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "m2.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -2121,6 +2182,7 @@ class TestPersonasResolveBeforeTheRun:
             gameplan=gameplan, topic="T", provider=provider,
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m", persona=persona)
         session.add_agent("Bob", model="m")
@@ -2205,6 +2267,7 @@ class TestTheRosterNamesTheCharacter:
             gameplan="debate", topic="T", provider=provider,
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m", persona=persona)
         session.add_agent("Bob", model="m")
@@ -2245,6 +2308,7 @@ class TestSessionFileIsOptOut:
             gameplan="debate", topic="T", provider=provider,
             channel=CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
@@ -2284,6 +2348,7 @@ class TestResumingFromASessionFile:
             channel=channel or CaptureChannel(), turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
             session_file=str(tmp_path / "run.json"), max_turns=max_turns,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")
@@ -2386,6 +2451,7 @@ class TestContextLimitKeepsTheConversationSendable:
         session = Session(
             gameplan=str(path), topic="T", provider=provider, channel=channel,
             turn_delay_sec=0, memory=str(tmp_path / "memory.md"), **kwargs,
+            access_policy=confined(tmp_path),
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")

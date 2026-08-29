@@ -15,7 +15,7 @@ use kerness::sessionfile::SCHEMA_VERSION;
 use kerness::{Agent, Session, SessionResult};
 use serde_json::Value;
 
-use common::{config, refusal, RecordingChannel, ScriptedProvider, TempDir};
+use common::{config, confine, refusal, RecordingChannel, ScriptedProvider, TempDir};
 
 /// Two turns' worth of budget, and rounds to spare — so the first run stops on
 /// the turn ceiling with the phase list nowhere near finished.
@@ -55,6 +55,7 @@ fn run(
     let path = temp.write("resumable.md", RESUMABLE);
     let mut settings = config(&path.to_string_lossy(), topic, provider());
     settings.session_file = Some(temp.str_join(file));
+    confine(&mut settings, temp);
     settings.max_turns = turns;
     settings.channel = channel;
 
@@ -258,6 +259,7 @@ fn a_file_written_for_a_different_run_is_refused_by_name() {
     let path = temp.write("resumable.md", RESUMABLE);
     let mut settings = config(&path.to_string_lossy(), "Ship something else?", provider());
     settings.session_file = Some(temp.str_join("run.json"));
+    confine(&mut settings, &temp);
     let mut session = Session::new(settings).expect("the gameplan loads");
     session
         .add_agent(Agent::new("P0").with_model("gpt-4o"))
@@ -285,6 +287,7 @@ fn a_file_written_for_a_different_roster_is_refused() {
     let path = temp.write("resumable.md", RESUMABLE);
     let mut settings = config(&path.to_string_lossy(), "Ship it?", provider());
     settings.session_file = Some(temp.str_join("run.json"));
+    confine(&mut settings, &temp);
     let mut session = Session::new(settings).expect("the gameplan loads");
     session
         .add_agent(Agent::new("Someone else").with_model("gpt-4o"))
@@ -318,6 +321,7 @@ fn a_file_that_is_not_a_snapshot_is_refused_with_a_reason() {
         let path = temp.write("resumable.md", RESUMABLE);
         let mut settings = config(&path.to_string_lossy(), "Ship it?", provider());
         settings.session_file = Some(temp.str_join("run.json"));
+        confine(&mut settings, &temp);
         let mut session = Session::new(settings).expect("the gameplan loads");
         session
             .add_agent(Agent::new("P0").with_model("gpt-4o"))

@@ -86,7 +86,7 @@ swap in your own — the rest of the kernel does not notice.
 | **Roles** | `participant`, `orchestrator` | a `.md` file whose frontmatter declares a `position:`, or inline prose |
 | **Personas** | `pragmatic_engineer`, `devils_advocate` | a `.md` file, or inline prose |
 | **Gameplans** | `debate`, `discussion`, `research` | a new Markdown file — see below |
-| **Access** | closed by default; allow-lists for programs, patterns, directories, and a workspace nothing widens | an `AccessPolicy`, plus an approval callback |
+| **Access** | closed by default; a workspace that grants its own contents, glob and regex command allow-lists, and path allow-lists that reach past the workspace | an `AccessPolicy`, plus an approval callback |
 | **Memory** | a plain `.md` file, read-only unless asked | point `memory` anywhere; per-agent scopes supported |
 | **Session file** | JSON snapshot after every turn | `session_file` — absent means persist nothing |
 
@@ -190,14 +190,16 @@ the backend it was written for, so an agent that brings its own provider must
 name its own model; inheriting the session's would silently ask one vendor for
 another's model. It is an error at `run()`, naming the agent.
 
-**The workspace only ever narrows.** An `AccessPolicy` has two different
-mechanisms: the allow-lists answer *may I run this program, read this
-directory*, and the workspace answers *is this path inside the world at all*.
-The workspace is checked first, an approval callback cannot widen it, and it is
-the working directory a command starts in. An agent may set a workspace of its
-own, and it is intersected with the session's rather than replacing it —
-otherwise an agent stanza would be a way to hand itself more of the filesystem
-than the session was given.
+**The workspace only ever narrows.** A session's workspace grants its own
+contents — every path under it is readable without an allow-list entry — and it
+is the working directory a command starts in. Unset, it is the directory the
+program was launched from. `allowed_dirs` and `allowed_files` reach *past* it,
+which is how a session confined to one project still reads `/tmp`; the two
+together are the whole of what a session can touch, and an approval callback
+cannot add to them. An agent may set a workspace of its own, and it is
+intersected with the session's rather than replacing it — otherwise an agent
+stanza would be a way to hand itself more of the filesystem than the session was
+given.
 
 One further asymmetry, and it is not about inheritance: **`role` has no session
 default at all.** A session-wide role would make every agent the orchestrator at
@@ -242,13 +244,13 @@ let mut session = Session::new(SessionConfig {
     model: Some("gpt-4o".to_string()),
     reasoning_effort: ReasoningEffort::High,
     channel: Some(Arc::new(ConsoleChannel::default())),
-    memory: "notes.md".to_string(),               // the shared file agents read
+    memory: "/srv/work/notes.md".to_string(),     // the shared file agents read
     memory_write: true,                           // ...and, here, may append to
-    session_file: Some("run.json".to_string()),   // resumable; None persists nothing
+    session_file: Some("/srv/work/run.json".to_string()), // None persists nothing
     access_policy: Some(AccessPolicy {
-        workspace: Some("/srv/work".to_string()),  // nothing outside this, ever
-        allowed_dirs: vec!["/srv/work/data".to_string()],
-        allowed_programs: vec!["rg".to_string()],
+        workspace: Some("/srv/work".to_string()),  // this tree, and nothing else
+        allowed_dirs: vec!["/tmp".to_string()],    // ...except what is named here
+        allowed_commands: vec!["rg *".to_string()],
         ..AccessPolicy::new()
     }),
     ..Default::default()
@@ -343,13 +345,13 @@ session = Session(
     model="gpt-4o",
     reasoning_effort="high",
     channel=ConsoleChannel(),
-    memory="notes.md",
+    memory="/srv/work/notes.md",
     memory_write=True,
-    session_file="run.json",       # resumable; omit to persist nothing
+    session_file="/srv/work/run.json",  # resumable; omit to persist nothing
     access_policy=AccessPolicy(
-        workspace="/srv/work",      # nothing outside this, ever
-        allowed_dirs=["/srv/work/data"],
-        allowed_programs=["rg"],
+        workspace="/srv/work",      # this tree, and nothing else
+        allowed_dirs=["/tmp"],      # ...except what is named here
+        allowed_commands=["rg *"],
     ),
 )
 
@@ -403,7 +405,7 @@ or a different agent roster is refused, not half-applied.
 ```text
 Cargo.toml       # the only manifest at the root
 crates/kerness/  # the kernel, pure Rust — no PyO3, no Python
-  src/           #   29 modules, 337 unit tests inline
+  src/           #   29 modules, 341 unit tests inline
   tests/         #   101 integration tests, over the public API only
   examples/      #   8 runnable Rust harnesses, one needing no key
   assets/        #   bundled gameplans, roles, personas, skills
@@ -429,7 +431,7 @@ carries the kernel's behaviour across the FFI boundary intact.
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 337 unit + 101 integration
+cargo test --workspace                     # 341 unit + 101 integration
 cargo build -p kerness --examples          # every example still compiles
 cargo run -p kerness --example offline_debate   # a whole session, no key
 

@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use kerness::access::AccessPolicy;
 use kerness::channel::Channel;
 use kerness::error::Result;
 use kerness::provider::{Provider, ProviderBase, ProviderResponse, ReasoningEffort};
@@ -501,6 +502,21 @@ pub fn refusal<T>(result: Result<T>) -> String {
         Ok(_) => panic!("expected a refusal, got success"),
         Err(error) => error.to_string(),
     }
+}
+
+/// Confine *settings* to *temp*, where a test keeps its files.
+///
+/// Not optional decoration: an unset workspace is the process's current
+/// directory, and a scratch directory under the system temp root is not inside
+/// it. The memory path moves with the workspace because the default one is
+/// relative, and a relative path resolves against the working directory rather
+/// than the workspace — which is exactly the refusal a real caller working
+/// outside its launch directory meets.
+pub fn confine(settings: &mut SessionConfig, temp: &TempDir) {
+    let mut policy = AccessPolicy::new();
+    policy.workspace = Some(temp.path().to_string_lossy().into_owned());
+    settings.access_policy = Some(policy);
+    settings.memory = temp.str_join("memory.md");
 }
 
 /// A session configuration that runs at full speed and writes nothing.
