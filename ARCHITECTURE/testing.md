@@ -32,7 +32,7 @@ the pure-Rust caller the crate exists for unrepresented.
 | `crates/kerness/tests/common/mod.rs` | the doubles all eight files share |
 | `crates/kerness/tests/*.rs` | one file per behaviour cluster, 101 tests |
 | `bindings/python/tests/conftest.py` | the Python suite's equivalent doubles |
-| `bindings/python/tests/test_*.py` | 26 modules, 442 tests |
+| `bindings/python/tests/test_*.py` | 26 modules, 443 tests |
 | `crates/kerness/examples/*.rs` | 8 examples, compiled by CI |
 | `bindings/python/examples/` | 7 Python examples, walked by `bindings/python/tests/test_examples.py` |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
@@ -84,7 +84,7 @@ The eight integration files:
 | `skills_e2e.rs` | 13 | Only name and description reach the prompt; the body arrives for one turn; a repeat load says so; `allowed-tools` narrowing and unioning; `requires-tools` adding back past a gameplan's own list, and refused before the run when nobody registered it |
 | `resume.rs` | 9 | A snapshot every turn; a second `run()` continuing; identity mismatch naming the field; bad JSON, wrong version and missing file each handled |
 | `compaction_e2e.rs` | 8 | A small ceiling compacting, the anchor turn kept, the count recorded, and history untouched when the summarizer returns nothing |
-| `public_api.rs` | 9 | The well-known constants, the `lib.rs` re-exports, and every built-in asset loading — gameplans, personas, skills, and every role carrying a position and a prompt — the Rust half of what the self-check proves for Python |
+| `public_api.rs` | 10 | The well-known constants, the shared request defaults, the crate version, the `lib.rs` re-exports, and every built-in asset loading — gameplans, personas, skills, and every role carrying a position and a prompt — the Rust half of what the self-check proves for Python; also that a session assembles from the public API alone, that a provider written outside the crate is a `Provider`, and that a reasoning effort round-trips as its name |
 
 ## Interactions
 
@@ -111,7 +111,7 @@ The eight integration files:
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-cargo test --workspace -q                             # pass = 341 unit + 101 integration, 0 failed
+cargo test --workspace -q                             # pass = 342 unit + 101 integration, 0 failed
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key
 .venv/bin/python -m pytest bindings/python/tests -q   # pass = 443 passed

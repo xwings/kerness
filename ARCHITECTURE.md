@@ -199,7 +199,7 @@ its own status.
 
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
-cargo test --workspace -q                             # pass = 341 unit + 101 integration, 0 failed
+cargo test --workspace -q                             # pass = 342 unit + 101 integration, 0 failed
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key, no network

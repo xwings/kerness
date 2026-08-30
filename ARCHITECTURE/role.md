@@ -57,7 +57,7 @@ take it over.
 - `crates/kerness/src/role.rs:66` — `DEFAULT_ROLE_FILE` — `participant.md`, the
   role an agent that named none of its own reads.
 
-## Three-way resolution, and why prose cannot conduct
+### Three-way resolution, and why prose cannot conduct
 
 `Session::add_agent` (`crates/kerness/src/session.rs:538`) reads the spec far
 enough to learn the position:
@@ -83,7 +83,7 @@ no session-level default to wait for — a session-wide role would make every ag
 the orchestrator at once — so a typo is knowable the moment it is written, and
 the error names the agent that wrote it.
 
-## The two built-in roles
+### The two built-in roles
 
 - **`participant.md`** — its body is the base system prompt every participant
   gets. `SessionConfig.system_prompt` overrides it for everyone who named no
