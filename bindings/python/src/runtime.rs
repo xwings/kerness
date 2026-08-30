@@ -202,6 +202,7 @@ pub struct PyPromptAssembler {
     memory_for: Py<PyAny>,
     tools_for: Py<PyAny>,
     dialect_for: Option<Py<PyAny>>,
+    context_for: Option<Py<PyAny>>,
     show_reasoning: Option<bool>,
     memory_writable: bool,
 }
@@ -249,9 +250,34 @@ impl PyPromptAssembler {
                     .and_then(|found| specs_from(&found)),
             )
         };
+        // The same object `memory_for` returns, asked how old its file is —
+        // reading the age off it is what keeps the core taking plain days.
+        let memory_age_for = move |_: &Agent| -> Option<u64> {
+            park(
+                parked,
+                self.memory_for
+                    .bind(py)
+                    .call1((agent,))
+                    .and_then(|memory| memory.getattr("age"))
+                    .and_then(|age| age.extract()),
+            )
+        };
         let assembler =
             PromptAssembler::new(skills_for, memory_for, tools_for, self.show_reasoning)
-                .with_memory_writable(self.memory_writable);
+                .with_memory_writable(self.memory_writable)
+                .with_memory_age(memory_age_for);
+        let assembler = match &self.context_for {
+            None => assembler,
+            Some(callable) => assembler.with_context(move |_: &Agent| {
+                park(
+                    parked,
+                    callable
+                        .bind(py)
+                        .call1((agent,))
+                        .and_then(|found| found.extract::<Vec<(String, String)>>()),
+                )
+            }),
+        };
         match &self.dialect_for {
             None => assembler,
             Some(callable) => assembler.with_dialect(move |_: &Agent| {
@@ -293,6 +319,7 @@ impl PyPromptAssembler {
         tools_for,
         show_reasoning=None,
         dialect_for=None,
+        context_for=None,
         memory_writable=false,
     ))]
     fn new(
@@ -301,6 +328,7 @@ impl PyPromptAssembler {
         tools_for: Py<PyAny>,
         show_reasoning: Option<bool>,
         dialect_for: Option<Bound<'_, PyAny>>,
+        context_for: Option<Bound<'_, PyAny>>,
         memory_writable: bool,
     ) -> Self {
         PyPromptAssembler {
@@ -308,6 +336,9 @@ impl PyPromptAssembler {
             memory_for,
             tools_for,
             dialect_for: dialect_for
+                .filter(|object| !object.is_none())
+                .map(Bound::unbind),
+            context_for: context_for
                 .filter(|object| !object.is_none())
                 .map(Bound::unbind),
             show_reasoning,

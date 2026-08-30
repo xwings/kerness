@@ -63,6 +63,12 @@ pub struct ClaudeConfig {
     pub retries: u32,
     pub backoff_sec: f64,
     pub interval_sec: Option<f64>,
+    /// How many tokens this model can hold, when the caller knows the figure.
+    ///
+    /// Answered by `Provider::context_window` and taken as the ceiling for the
+    /// conversation. Unset leaves the session's own `max_context_tokens` as the
+    /// only bound, which is what a caller who has not looked it up should get.
+    pub context_window: Option<usize>,
     pub temperature: f64,
     /// Required by the endpoint, so it has a value rather than being optional.
     pub max_tokens: i64,
@@ -77,6 +83,7 @@ impl Default for ClaudeConfig {
             retries: DEFAULT_RETRIES,
             backoff_sec: DEFAULT_BACKOFF_SEC,
             interval_sec: None,
+            context_window: None,
             temperature: DEFAULT_TEMPERATURE,
             max_tokens: DEFAULT_CLAUDE_MAX_TOKENS,
         }
@@ -96,7 +103,8 @@ pub struct ClaudeProvider {
 impl ClaudeProvider {
     pub fn new(config: ClaudeConfig) -> Self {
         ClaudeProvider {
-            base: ProviderBase::new(config.retries, config.backoff_sec, config.interval_sec),
+            base: ProviderBase::new(config.retries, config.backoff_sec, config.interval_sec)
+                .with_context_window(config.context_window),
             credential: config.credential,
             base_url: config.base_url.trim_end_matches('/').to_string(),
             timeout_sec: config.timeout_sec,

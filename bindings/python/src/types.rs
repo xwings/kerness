@@ -10,8 +10,8 @@ use std::sync::{Arc, OnceLock};
 
 use kerness::gameplan::GameplanConfig;
 use kerness::harness::{
-    AgentsSpec, HarnessSpec, LoopSpec, OrchestratorSpec, ParticipantSpec, PhaseSpec, ResultField,
-    ResultType,
+    AgentsSpec, HarnessSpec, LoopSpec, OrchestratorSpec, ParticipantSpec, Permitted, PhaseSpec,
+    ResultField, ResultType,
 };
 use kerness::persona::PersonaConfig;
 use kerness::provider::{ProviderResponse, ReasoningEffort};
@@ -681,6 +681,7 @@ impl PyAgent {
         system_prompt=None,
         provider=None,
         skills=None,
+        tools=None,
         memory=None,
         workspace=None,
     ))]
@@ -695,6 +696,7 @@ impl PyAgent {
         system_prompt: Option<String>,
         provider: Option<Bound<'_, PyAny>>,
         skills: Option<Vec<String>>,
+        tools: Option<Vec<String>>,
         memory: Option<String>,
         workspace: Option<String>,
     ) -> PyResult<Self> {
@@ -717,6 +719,7 @@ impl PyAgent {
                     None => None,
                 },
                 skills,
+                tools,
                 memory,
                 workspace,
             },
@@ -841,6 +844,19 @@ impl PyAgent {
         self.inner.skills = value;
     }
 
+    /// Tools this agent may call. `None` takes every tool the session permits;
+    /// an empty list takes none. It narrows and never widens — a name the
+    /// gameplan withheld is refused by `run()`.
+    #[getter]
+    fn tools(&self) -> Option<Vec<String>> {
+        self.inner.tools.clone()
+    }
+
+    #[setter]
+    fn set_tools(&mut self, value: Option<Vec<String>>) {
+        self.inner.tools = value;
+    }
+
     #[getter]
     fn memory(&self) -> Option<String> {
         self.inner.memory.clone()
@@ -926,6 +942,7 @@ impl PyAgent {
             && left.language == right.language
             && left.system_prompt == right.system_prompt
             && left.skills == right.skills
+            && left.tools == right.tools
             && left.memory == right.memory
             && left.workspace == right.workspace
     }
@@ -1005,6 +1022,13 @@ impl PyMemory {
     fn path(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let path = self.store.with(|memory| memory.path().to_path_buf());
         path_to_py(py, path.to_string_lossy().as_ref())
+    }
+
+    /// Whole days since the file was last written, or ``None`` when there is
+    /// no file to date.
+    #[getter]
+    fn age(&mut self) -> Option<u64> {
+        self.store.with(|memory| memory.age())
     }
 
     /// Read the file into memory, treating an absent file as empty.
@@ -1677,8 +1701,10 @@ impl PyHarnessSpec {
         r#loop=None,
         tools=None,
         skills=None,
+        context=None,
         result=None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         description: String,
@@ -1686,6 +1712,7 @@ impl PyHarnessSpec {
         r#loop: Option<PyLoopSpec>,
         tools: Option<Vec<String>>,
         skills: Option<Vec<String>>,
+        context: Option<Vec<String>>,
         result: Option<Vec<PyResultField>>,
     ) -> Self {
         let agents = agents.unwrap_or_else(|| PyAgentsSpec::new(None, None));
@@ -1706,6 +1733,7 @@ impl PyHarnessSpec {
                 loop_spec: r#loop.map(|spec| spec.inner).unwrap_or_default(),
                 tools,
                 skills,
+                context,
                 result: result
                     .unwrap_or_default()
                     .iter()
@@ -1760,6 +1788,11 @@ impl PyHarnessSpec {
     }
 
     #[getter]
+    fn context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        optional_names(py, self.inner.context.as_deref())
+    }
+
+    #[getter]
     fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         PyTuple::new(
             py,
@@ -1776,9 +1809,57 @@ impl PyHarnessSpec {
         self.inner.resolve_tools(&registered).raise()
     }
 
+    /// Narrow *registered* to the context source names this harness permits.
+    fn resolve_context(&self, registered: Vec<String>) -> PyResult<Vec<String>> {
+        self.inner.resolve_context(&registered).raise()
+    }
+
     /// Narrow *session_skills* to the names this harness permits.
     fn resolve_skills(&self, session_skills: Vec<String>) -> Vec<String> {
         self.inner.resolve_skills(&session_skills)
+    }
+}
+
+/// What a session may use once the harness has narrowed what it registered.
+#[pyclass(name = "Permitted", module = "kerness._core", frozen)]
+#[derive(Clone)]
+pub struct PyPermitted {
+    pub inner: Permitted,
+}
+
+#[pymethods]
+impl PyPermitted {
+    #[new]
+    #[pyo3(signature = (tools=Vec::new(), context=Vec::new()))]
+    fn new(tools: Vec<String>, context: Vec<String>) -> Self {
+        PyPermitted {
+            inner: Permitted { tools, context },
+        }
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<PyPermitted>()
+            .is_ok_and(|other| other.inner == self.inner)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Permitted(tools={:?}, context={:?})",
+            self.inner.tools, self.inner.context
+        )
+    }
+
+    /// Tool names, in registration order.
+    #[getter]
+    fn tools<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.inner.tools)
+    }
+
+    /// Context source names, in registration order.
+    #[getter]
+    fn context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.inner.context)
     }
 }
 

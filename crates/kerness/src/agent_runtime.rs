@@ -8,15 +8,23 @@
 //! conversation, and only the final text goes back into the conversation. That
 //! isolation is the point: the buffer holds tool exchanges in one provider's
 //! message shape, and no other agent should have to read them.
+//!
+//! Because the loop is driven by the model rather than by a count, it needs
+//! bounds a stuck model cannot argue with. The tool-iteration limit is the
+//! caller's, and it is optional; [`MAX_INVALID_CALLS`] and
+//! [`MAX_REPEATED_FAILURES`] are the framework's, and they are not. Both watch
+//! for the same thing — a round that told the model nothing it was not told
+//! last round — and both end the turn rather than the session, because a turn
+//! that produced no text is a turn the session can carry on without.
 
 use serde_json::{json, Value};
 
 use crate::agent::Agent;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::logging;
 use crate::provider::{Provider, ProviderResponse};
 use crate::tooling::{parse_tool_calls, ToolCall, ToolSpec, INVALID_CALL};
-use crate::toolkit::ToolDispatcher;
+use crate::toolkit::{ToolDispatcher, ToolResult};
 use crate::toolschema::{render_assistant_turn, render_tool_result, ToolDialect};
 
 /// Prompt sent after tool results so the model continues with them in view.
@@ -31,6 +39,17 @@ pub const FOLLOWUP_PROMPT: &str = "Tool results are available above. Continue.";
 /// the same reply forever. With the tool-iteration bound unset that is an
 /// unbounded loop against a paid API.
 pub const MAX_INVALID_CALLS: u32 = 3;
+
+/// How many times a round of tool calls may repeat the previous round's
+/// failures, word for word, before giving up on the turn.
+///
+/// A tool result normally carries new information, so a model looping on one is
+/// a model making progress. The exception is a round in which every call failed
+/// and every failure reads exactly as it did last time: the model has been told
+/// what is wrong, has changed nothing, and will be told the same thing again.
+/// This is the same hole [`MAX_INVALID_CALLS`] closes, one step further in —
+/// there the block never parsed, here it parsed and the call is hopeless.
+pub const MAX_REPEATED_FAILURES: u32 = 3;
 
 /// Builds the message list an agent is called with, from a rendered history.
 type MessagesFor<'a> = Box<dyn Fn(&Agent, &[Value], &str) -> Result<Vec<Value>> + 'a>;
@@ -125,12 +144,14 @@ impl<'a> AgentRunner<'a> {
 
         let mut response = match self.chat(&scratch, purpose) {
             Ok(response) => response,
-            Err(error) if error.is_provider() => return Ok(no_response(purpose)),
+            Err(error) if absorbable(&error) => return Ok(no_response(purpose)),
             Err(error) => return Err(error),
         };
 
         let mut iterations = 0;
         let mut invalid = 0;
+        let mut repeated = 0;
+        let mut previous: Option<Vec<ToolResult>> = None;
         loop {
             let calls = calls_from(&response, dialect);
             if calls.is_empty() {
@@ -152,10 +173,25 @@ impl<'a> AgentRunner<'a> {
             }
 
             self.append(&mut scratch, render_assistant_turn(dialect, &response));
+            let mut results = Vec::with_capacity(calls.len());
             for call in &calls {
                 let result = self.dispatcher.execute(call, &self.agent.name);
                 self.append(&mut scratch, render_tool_result(dialect, call, &result));
+                results.push(result);
             }
+
+            let stuck = results.iter().all(|result| result.is_error)
+                && previous.as_deref() == Some(results.as_slice());
+            repeated = if stuck { repeated + 1 } else { 0 };
+            previous = Some(results);
+            if repeated >= MAX_REPEATED_FAILURES {
+                logging::warning(&format!(
+                    "Giving up on {purpose} after {repeated} repeats of the same failing \
+                     tool calls"
+                ));
+                return Ok(response.content);
+            }
+
             if dialect == ToolDialect::Text {
                 // The native dialects end on their own result message; text
                 // renders results as assistant turns, so it needs a user turn
@@ -208,6 +244,17 @@ fn calls_from(response: &ProviderResponse, dialect: ToolDialect) -> Vec<ToolCall
         return response.tool_calls.clone();
     }
     parse_tool_calls(&response.content)
+}
+
+/// Whether a provider failure is the turn's to swallow.
+///
+/// Nearly all of them are: a backend that is down or answering nonsense costs
+/// the turn its text, and the session carries on. A context-length refusal is
+/// the exception, because it is the one the caller can act on — the session
+/// compacts and calls the turn again — and returning a placeholder for it would
+/// hide the only provider failure that is fixable.
+fn absorbable(error: &Error) -> bool {
+    error.is_provider() && !error.is_context_overflow()
 }
 
 /// Whether a round produced nothing but unparseable blocks.
@@ -497,6 +544,65 @@ mod tests {
         );
         // Each bad response costs one call; the third trips the bound.
         assert_eq!(provider.call_count(), MAX_INVALID_CALLS as usize);
+    }
+
+    #[test]
+    fn a_model_repeating_one_failing_call_does_not_loop_forever() {
+        // The block parses, so MAX_INVALID_CALLS never sees it, and the tool
+        // result is an error the model declines to act on. Nothing else in the
+        // turn is watching for the model making no progress.
+        let block = call_block("teleport");
+        let provider = MockProvider::text(&[block.as_str()]);
+        let (agent, dispatcher) = fixture(ping());
+        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
+
+        assert_eq!(runner.run(&[], "turn", None).expect("a turn"), block);
+        // The opening call, then one per repeat until the bound trips.
+        assert_eq!(
+            provider.call_count(),
+            MAX_REPEATED_FAILURES as usize + 1,
+            "{:?}",
+            provider.call_count()
+        );
+    }
+
+    #[test]
+    fn a_failing_call_the_model_varies_is_left_alone() {
+        // Only an identical round is no progress. A model working through
+        // different wrong calls is still working, and the guard has to let it.
+        let provider = MockProvider::text(&[
+            call_block("teleport").as_str(),
+            call_block("levitate").as_str(),
+            call_block("teleport").as_str(),
+            call_block("levitate").as_str(),
+            "I give up, here is my answer.",
+        ]);
+        let (agent, dispatcher) = fixture(ping());
+        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
+
+        assert_eq!(
+            runner.run(&[], "turn", None).expect("a turn"),
+            "I give up, here is my answer."
+        );
+    }
+
+    #[test]
+    fn a_tool_that_keeps_succeeding_is_never_cut_off() {
+        // Every result carries new information as far as the turn can tell, so
+        // repeating a *working* call is the model's business, not the guard's.
+        let block = call_block("ping");
+        let provider = MockProvider::text(&[block.as_str()]);
+        let (agent, dispatcher) = fixture(ping());
+        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE")
+            .with_max_tool_iterations(MAX_REPEATED_FAILURES + 4);
+
+        assert_eq!(runner.run(&[], "turn", None).expect("a turn"), block);
+        // Only the iteration bound stopped it.
+        assert_eq!(
+            provider.call_count(),
+            MAX_REPEATED_FAILURES as usize + 5,
+            "the repeat guard fired on a succeeding tool"
+        );
     }
 
     #[test]

@@ -32,32 +32,38 @@ that resolves `kerness.provider.http_post_json` at call time so `@patch` works.
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/provider/mod.rs:180` — `Provider` — `chat` is required; six
-  methods are defaulted.
+- `crates/kerness/src/provider/mod.rs:193` — `Provider` — `chat` is required;
+  everything else is defaulted.
 - `crates/kerness/src/provider/mod.rs:114` — `ProviderResponse` — text, tool calls,
   and an optional `structured` value for structured output.
 - `crates/kerness/src/provider/mod.rs:149` — `ProviderBase` — retries, backoff,
-  minimum interval, and the two latches, shared by every backend.
+  minimum interval, the declared context window, and the two latches, shared by
+  every backend.
+- `crates/kerness/src/provider/mod.rs:177` — `with_context_window(tokens)` — a
+  builder, because most callers do not know the figure and write nothing.
+- `crates/kerness/src/provider/mod.rs:231` — `context_window(model)` — how many
+  tokens the model can hold, or `None` for "nobody has said".
 - `crates/kerness/src/provider/mod.rs:57` — `ReasoningEffort` — `Minimal`, `Low`,
   `Medium`, `High`, `XHigh`, `Max`, defaulting to `High`; a closed enum with
   `as_str`, `parse`, and `Display`, like `Position`.
-- `crates/kerness/src/provider/mod.rs:289`–`:451` — `supplied_effective_dialect`,
-  `supplied_effective_effort`, `supplied_note_native_tools_rejected`,
+- `crates/kerness/src/provider/mod.rs:317`–`:510` — `supplied_effective_dialect`,
+  `supplied_context_window`, `supplied_effective_effort`,
+  `supplied_note_native_tools_rejected`,
   `supplied_note_reasoning_effort_rejected`, `supplied_chat_with_retries`,
-  `supplied_chat_dispatch` — the six defaulted method bodies, extracted as free
+  `supplied_chat_dispatch` — the defaulted method bodies, extracted as free
   functions generic over `P: Provider + ?Sized`.
-- `crates/kerness/src/provider/mod.rs:578` — `convert_messages_for_claude(messages)` —
+- `crates/kerness/src/provider/mod.rs:616` — `convert_messages_for_claude(messages)` —
   the Anthropic wire shape, which lifts the system message out of the list.
 - `crates/kerness/src/http.rs:24` — `HttpTransport` — the seam; `:75`
   `set_transport` installs a replacement; `:80` `post_json` is what providers call.
 - `bindings/python/kerness/provider.py:99` — `Provider` — the class user code subclasses.
-- `bindings/python/kerness/provider.py:121` — `effective_dialect()`, `:137`
-  `_chat_accepts_tools()`, and `:141` `_chat_accepts_reasoning_effort()` —
+- `bindings/python/kerness/provider.py:122` — `effective_dialect()`, `:153`
+  `_chat_accepts_tools()`, and `:157` `_chat_accepts_reasoning_effort()` —
   deliberately Python: each is `inspect.signature(type(self).chat)` on the
   concrete subclass, and the core takes the answer as a capability flag.
-- `bindings/python/src/provider.rs:682` — `install_transport()` — installs the
+- `bindings/python/src/provider.rs:726` — `install_transport()` — installs the
   transport that resolves `kerness.provider.http_post_json` at call time.
-- `bindings/python/src/provider.rs:693` — `http_post_json(...)` — the unpatched
+- `bindings/python/src/provider.rs:737` — `http_post_json(...)` — the unpatched
   function, itself a `#[pyfunction]` over the same Rust code.
 
 ### Why the supplied methods are free functions
@@ -86,6 +92,29 @@ shared spelling:
 Anthropic accepts a narrower set of names than the enum offers, and nothing
 remaps a level the model has no word for — that is a rejection, and the rejection
 is what the second latch is for.
+
+### The context window, and why there is no table
+
+`context_window` answers how many tokens a model can hold, and the honest
+default is `None`. The framework ships no table of published window sizes: a
+table is wrong the week a vendor changes one, wrong silently, and would have to
+carry models the framework has never heard of. So the four built-in backends
+answer from a figure their config was given — `context_window` on each
+`*Config`, threaded to `ProviderBase::with_context_window` — and a caller with a
+model registry of their own overrides the trait method and answers from that.
+
+The method takes a *model* even though `supplied_context_window`
+(`provider/mod.rs:337`) does not read it. One `ProviderBase` holds one figure,
+which is right for a backend serving one model; a backend serving several with
+different windows is exactly the case the argument exists for, and answering it
+means overriding.
+
+`None` is not a failure. The session falls back to its own
+`max_context_tokens` alone, which is what every session did before any backend
+declared a window. What the figure buys is the other direction: a caller whose
+ceiling is generous and whose model is small no longer discovers the mismatch as
+a provider refusal. See [compaction.md](compaction.md) for how the two are
+combined.
 
 ### The two degrade latches
 
@@ -120,7 +149,10 @@ and response parsing stay in Rust either way.
 - Structured output runs the schema through [jsonschema.md](jsonschema.md)'s
   `ensure_strict` before sending, then `model_validate` on the Python side.
 - Failures become `ProviderError` and its subclasses in [errors.md](errors.md);
-  `is_provider()` is what makes them retryable.
+  `is_provider()` is what makes them retryable, and `is_context_overflow()` is
+  the one [compaction.md](compaction.md) acts on rather than retries.
+- `context_window` is read once per turn by [session.md](session.md)'s
+  `context_ceiling`.
 
 ## How to Test
 
@@ -129,11 +161,19 @@ cargo test -p kerness provider                                       # pass = 0 
 .venv/bin/python -m pytest bindings/python/tests/test_provider.py -q # pass = 0 failed
 ```
 
-- The Rust tests use a `Recorder` transport (`provider/mod.rs:632`) to assert the
+- The Rust tests use a `Recorder` transport (`provider/mod.rs:700`) to assert the
   exact payload each backend builds, without a network call.
 - `bindings/python/tests/test_provider.py` covers the `@patch` seam, the native-tools fallback
   when a provider rejects tool schemas, the effort level reaching each backend's
   own key, retry and backoff, and structured output through `pydantic`.
+- `bindings/python/tests/test_provider.py:778` — `TestContextWindow` — the
+  default of `None` (`:785`), every backend reporting the figure it was built
+  with (`:800`), a subclass answering per model from its own registry (`:804`),
+  and a hand-written provider declaring one through `super().__init__` without
+  overriding anything (`:822`).
+- `crates/kerness/src/session.rs:3180` —
+  `the_smaller_of_the_session_and_the_provider_window_is_the_ceiling` — what a
+  declared window is actually for, asserted both ways round.
 
 ## Open Gaps / Roadmap
 
@@ -141,7 +181,10 @@ cargo test -p kerness provider                                       # pass = 0 
   token-by-token output cannot get it.
 - Retry is a fixed backoff over `is_provider()` errors; there is no jitter and no
   respect for a `Retry-After` header.
-- `pydantic` is optional and imported lazily (`bindings/python/kerness/provider.py:48`);
+- `pydantic` is optional and imported lazily (`bindings/python/kerness/provider.py:83`);
   structured output raises a clear error when it is absent rather than degrading.
+- `context_window` is a figure the caller supplies; nothing checks it against
+  what the endpoint will actually accept, so a wrong one is wrong in whichever
+  direction it was written.
 - The minimum-interval throttle is per provider instance, so two providers
   against one endpoint do not coordinate.

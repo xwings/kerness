@@ -126,6 +126,7 @@ pub fn policy_from_py(object: &Bound<'_, PyAny>) -> PyResult<AccessPolicy> {
         allowed_command_patterns: object.getattr("allowed_command_patterns")?.extract()?,
         allowed_files: path_strings(&object.getattr("allowed_files")?)?,
         allowed_dirs: path_strings(&object.getattr("allowed_dirs")?)?,
+        allowed_hosts: object.getattr("allowed_hosts")?.extract()?,
         trust_skill_bundles: object.getattr("trust_skill_bundles")?.is_truthy()?,
     })
 }
@@ -210,6 +211,15 @@ impl PyAccessManager {
     #[pyo3(signature = (command, actor=""))]
     fn check_command(&self, command: &str, actor: &str) -> PyResult<()> {
         self.inner.check_command(command, actor).raise()
+    }
+
+    /// Validate a network destination against ``allowed_hosts``.
+    ///
+    /// *target* may be a URL or a bare hostname. An empty ``allowed_hosts``
+    /// allows everything.
+    #[pyo3(signature = (target, actor=""))]
+    fn check_host(&self, target: &str, actor: &str) -> PyResult<()> {
+        self.inner.check_host(target, actor).raise()
     }
 
     /// Validate a file or directory access request, returning the resolved path.

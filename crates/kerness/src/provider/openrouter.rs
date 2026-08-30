@@ -23,6 +23,12 @@ pub struct OpenRouterConfig {
     pub retries: u32,
     pub backoff_sec: f64,
     pub interval_sec: Option<f64>,
+    /// How many tokens this model can hold, when the caller knows the figure.
+    ///
+    /// Answered by `Provider::context_window` and taken as the ceiling for the
+    /// conversation. Unset leaves the session's own `max_context_tokens` as the
+    /// only bound, which is what a caller who has not looked it up should get.
+    pub context_window: Option<usize>,
     pub temperature: f64,
     pub top_p: f64,
     pub max_tokens: Option<i64>,
@@ -41,6 +47,7 @@ impl Default for OpenRouterConfig {
             retries: DEFAULT_RETRIES,
             backoff_sec: DEFAULT_BACKOFF_SEC,
             interval_sec: None,
+            context_window: None,
             temperature: DEFAULT_TEMPERATURE,
             top_p: DEFAULT_TOP_P,
             max_tokens: None,
@@ -66,7 +73,8 @@ pub struct OpenRouterProvider {
 impl OpenRouterProvider {
     pub fn new(config: OpenRouterConfig) -> Self {
         OpenRouterProvider {
-            base: ProviderBase::new(config.retries, config.backoff_sec, config.interval_sec),
+            base: ProviderBase::new(config.retries, config.backoff_sec, config.interval_sec)
+                .with_context_window(config.context_window),
             api_key: config.api_key,
             base_url: config.base_url.trim_end_matches('/').to_string(),
             timeout_sec: config.timeout_sec,

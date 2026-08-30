@@ -103,8 +103,9 @@ class Provider(ABC):
     tool_dialect: ToolDialect = ToolDialect.TEXT
 
     def __init__(self, retries: int = DEFAULT_RETRIES, backoff_sec: float = DEFAULT_BACKOFF_SEC,
-                 interval_sec: float | None = None) -> None:
-        self._core = ProviderCore(retries, backoff_sec, interval_sec)
+                 interval_sec: float | None = None,
+                 context_window: int | None = None) -> None:
+        self._core = ProviderCore(retries, backoff_sec, interval_sec, context_window)
 
     @abstractmethod
     def chat(self, model: str, messages: list[dict[str, str]]) -> ProviderResponse:
@@ -133,6 +134,21 @@ class Provider(ABC):
            third-party subclasses working untouched.
         """
         return self._core.effective_dialect(self)
+
+    def context_window(self, model: str) -> int | None:
+        """How many tokens *model* can hold, or ``None`` when nobody has said.
+
+        The session takes the smaller of this and its own
+        ``max_context_tokens``, so a mixed-provider session compacts each agent
+        against the window its own model actually has.
+
+        The default answers with the single figure the constructor was given,
+        ignoring *model*.  Kerness ships no table of published window sizes — a
+        table is wrong the week a vendor changes one, and wrong silently.  A
+        caller with a model registry of their own overrides this and answers
+        from that.
+        """
+        return self._core.context_window(self, model)
 
     def _chat_accepts_tools(self) -> bool:
         """Whether this subclass's ``chat`` can be offered tools."""
@@ -235,6 +251,7 @@ class OpenRouterProvider(Provider):
         max_tokens: int | None = None,
         app_url: str = "",
         app_name: str = "",
+        context_window: int | None = None,
     ) -> None:
         self._core = ProviderCore.openrouter(
             api_key,
@@ -248,6 +265,7 @@ class OpenRouterProvider(Provider):
             max_tokens,
             app_url,
             app_name,
+            context_window,
         )
 
     def chat(self, model: str, messages: list[dict[str, str]],
@@ -282,6 +300,7 @@ class OpenAIProvider(Provider):
         output_type: type[Any] | None = None,
         strict_json_schema: bool = True,
         output_schema_name: str | None = None,
+        context_window: int | None = None,
     ) -> None:
         self._output_type_adapter: Any | None = None
         self._validation_error: type[Exception] = ValueError
@@ -306,6 +325,7 @@ class OpenAIProvider(Provider):
             schema,
             strict_json_schema,
             output_schema_name or "",
+            context_window,
         )
 
     def chat(self, model: str, messages: list[dict[str, str]],
@@ -348,6 +368,7 @@ class OpenAIOAuthProvider(OpenAIProvider):
         output_type: type[Any] | None = None,
         strict_json_schema: bool = True,
         output_schema_name: str | None = None,
+        context_window: int | None = None,
     ) -> None:
         super().__init__(
             api_key=oauth_token,
@@ -362,6 +383,7 @@ class OpenAIOAuthProvider(OpenAIProvider):
             output_type=output_type,
             strict_json_schema=strict_json_schema,
             output_schema_name=output_schema_name,
+            context_window=context_window,
         )
 
 
@@ -381,6 +403,7 @@ class ClaudeProvider(Provider):
         interval_sec: float | None = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_CLAUDE_MAX_TOKENS,
+        context_window: int | None = None,
     ) -> None:
         self._core = ProviderCore.claude(
             api_key,
@@ -391,6 +414,7 @@ class ClaudeProvider(Provider):
             interval_sec,
             temperature,
             max_tokens,
+            context_window=context_window,
         )
 
     def chat(self, model: str, messages: list[dict[str, str]],
@@ -417,6 +441,7 @@ class ClaudeOAuthProvider(ClaudeProvider):
         interval_sec: float | None = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_CLAUDE_MAX_TOKENS,
+        context_window: int | None = None,
     ) -> None:
         self._core = ProviderCore.claude(
             oauth_token,
@@ -428,6 +453,7 @@ class ClaudeOAuthProvider(ClaudeProvider):
             temperature,
             max_tokens,
             True,
+            context_window,
         )
 
 
@@ -456,6 +482,10 @@ class CustomProvider(Provider):
         max_tokens: Maximum tokens to generate (overrides ``model_config["maxTokens"]``).
         extra_headers: Additional HTTP headers merged into every request.
         extra_body: Additional fields merged into the JSON request body.
+        context_window: How many tokens the model can hold, answered by
+            :meth:`Provider.context_window`.  Read from here rather than from
+            ``model_config["contextWindow"]``, so a vendor dict stored for its
+            own sake never becomes a ceiling the session enforces.
     """
 
     #: Assumed OpenAI-shaped, since that is what "OpenAI-compatible" means.
@@ -478,6 +508,7 @@ class CustomProvider(Provider):
         max_tokens: int | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,
+        context_window: int | None = None,
     ) -> None:
         self._model_config: dict[str, Any] = dict(model_config) if model_config else {}
         self._core = ProviderCore.custom(
@@ -493,6 +524,7 @@ class CustomProvider(Provider):
             max_tokens,
             extra_headers,
             extra_body,
+            context_window,
         )
 
     @property

@@ -59,6 +59,17 @@ pub struct Agent {
     /// Skills this agent may load. `None` means every skill the session has;
     /// an empty list means none.
     pub skills: Option<Vec<String>>,
+    /// Tools this agent may call. `None` means every tool the session permits;
+    /// an empty list means none.
+    ///
+    /// This narrows and never widens: a name the gameplan did not permit is
+    /// refused when the session resolves its agents, so an agent cannot hand
+    /// itself a tool the harness withheld. Narrowing here is what keeps a
+    /// large catalogue off the prompt of an agent that calls two of it —
+    /// under [`ToolDialect::Text`](crate::toolschema::ToolDialect::Text) every
+    /// permitted schema is written out in the system prompt, so what an agent
+    /// may call is also what it pays for on every turn.
+    pub tools: Option<Vec<String>>,
     /// Memory scope name, when this agent keeps its own.
     pub memory: Option<String>,
     /// A directory this agent alone is confined to. It must sit inside the
@@ -82,6 +93,7 @@ impl Agent {
             system_prompt: None,
             provider: None,
             skills: None,
+            tools: None,
             memory: None,
             workspace: None,
         }

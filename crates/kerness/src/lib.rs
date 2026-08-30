@@ -20,6 +20,7 @@ pub mod agent_runtime;
 pub mod assets;
 pub mod channel;
 pub mod compaction;
+pub mod context;
 pub mod conversation;
 pub mod error;
 pub mod exec;
@@ -49,6 +50,7 @@ mod testing;
 
 pub use crate::agent::Agent;
 pub use crate::channel::{Channel, ConsoleChannel, FileChannel, LogChannel, MultiChannel};
+pub use crate::context::ContextSource;
 pub use crate::conversation::{ChatMessage, Conversation, Message, Turn};
 pub use crate::error::{Error, Result};
 pub use crate::memory::Memory;

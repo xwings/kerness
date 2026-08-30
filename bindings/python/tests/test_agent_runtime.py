@@ -4,6 +4,7 @@ from kerness.agent import Agent
 from kerness.agent_runtime import (
     FOLLOWUP_PROMPT,
     MAX_INVALID_CALLS,
+    MAX_REPEATED_FAILURES,
     AgentRunner,
 )
 from kerness.exceptions import ProviderError
@@ -135,6 +136,18 @@ class TestToolLoop:
         # Each bad response costs one call; the third trips the bound.
         assert len(provider.calls) == MAX_INVALID_CALLS
         assert result == "```tool_calls\n{bad\n```"
+
+    def test_a_model_repeating_a_hopeless_call_does_not_loop_forever(self):
+        """One step past MAX_INVALID_CALLS: the block parses, the call is
+        dispatched, and every round fails with the text of the round before.
+        Nothing new has been said, so the turn ends."""
+        provider = SequenceMockProvider(responses=[call_block("teleport")])
+        result = runner(provider, spec()).run([], "turn")
+
+        # The first failing round has nothing to repeat, so it costs one call
+        # before the counter can start.
+        assert len(provider.calls) == MAX_REPEATED_FAILURES + 1
+        assert result == call_block("teleport")
 
     def test_a_recovering_model_is_not_penalised_for_an_earlier_bad_block(self):
         """The counter tracks *consecutive* failures — one bad block followed

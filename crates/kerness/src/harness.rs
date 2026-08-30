@@ -206,6 +206,9 @@ pub struct HarnessSpec {
     pub tools: Option<Vec<String>>,
     /// Skill names this harness adds. `None` means "session skills only".
     pub skills: Option<Vec<String>>,
+    /// Context source names this harness permits. `None` means "every
+    /// registered source"; a list narrows, as [`HarnessSpec::tools`] does.
+    pub context: Option<Vec<String>>,
     pub result: Vec<ResultField>,
 }
 
@@ -221,7 +224,44 @@ impl HarnessSpec {
     ///
     /// Returns the permitted tool names in *registration* order.
     pub fn resolve_tools(&self, registered: &[String]) -> Result<Vec<String>> {
-        let Some(declared) = &self.tools else {
+        self.narrow(
+            self.tools.as_deref(),
+            "tool",
+            "session.add_tool(...)",
+            registered,
+        )
+    }
+
+    /// The context source names available under this harness.
+    ///
+    /// **Context narrows,** for the same reason tools do: a source is a
+    /// function the host program supplied, so a gameplan naming one nobody
+    /// registered is naming nothing.
+    ///
+    /// Returns the permitted source names in *registration* order.
+    pub fn resolve_context(&self, registered: &[String]) -> Result<Vec<String>> {
+        self.narrow(
+            self.context.as_deref(),
+            "context source",
+            "session.add_context(...)",
+            registered,
+        )
+    }
+
+    /// Apply one declared list to what the host program registered.
+    ///
+    /// *kind* names what is being resolved and *remedy* the call that registers
+    /// one; both appear in the refusal, which is the only thing that differs
+    /// between [`HarnessSpec::resolve_tools`] and
+    /// [`HarnessSpec::resolve_context`].
+    fn narrow(
+        &self,
+        declared: Option<&[String]>,
+        kind: &str,
+        remedy: &str,
+        registered: &[String],
+    ) -> Result<Vec<String>> {
+        let Some(declared) = declared else {
             return Ok(registered.to_vec());
         };
         let unknown: BTreeSet<&str> = declared
@@ -234,8 +274,8 @@ impl HarnessSpec {
             let joined = registered.join(", ");
             let registered_list = if joined.is_empty() { "(none)" } else { &joined };
             return Err(Error::Session(format!(
-                "Gameplan '{}' requires tool(s) {listed} which are not registered. \
-                 Register them with session.add_tool(...) before run(). \
+                "Gameplan '{}' requires {kind}(s) {listed} which are not registered. \
+                 Register them with {remedy} before run(). \
                  Registered: {registered_list}",
                 self.name
             )));
@@ -292,20 +332,31 @@ pub fn parse_harness(data: &Value, source: &str) -> Result<HarnessSpec> {
         loop_spec: parse_loop(get(data, "loop"), source)?,
         tools: parse_name_list(get(data, "tools"), "tools", source)?,
         skills: parse_name_list(get(data, "skills"), "skills", source)?,
+        context: parse_name_list(get(data, "context"), "context", source)?,
         result: parse_result(get(data, "result"), source)?,
     })
 }
 
+/// What a session may use once the harness has narrowed what it registered.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Permitted {
+    /// Tool names, in registration order.
+    pub tools: Vec<String>,
+    /// Context source names, in registration order.
+    pub context: Vec<String>,
+}
+
 /// Check a configured session against the contract.
 ///
-/// Returns the tool names permitted for this session, and reports every
-/// problem the caller can fix at once rather than one per run.
+/// Returns what the session may use, and reports every problem the caller can
+/// fix at once rather than one per run.
 pub fn validate_harness(
     spec: &HarnessSpec,
     participants: &[String],
     orchestrator: Option<&str>,
     registered_tools: &[String],
-) -> Result<Vec<String>> {
+    registered_context: &[String],
+) -> Result<Permitted> {
     let mut problems: Vec<String> = Vec::new();
 
     if spec.agents.orchestrator.required && orchestrator.is_none_or(|name| name.is_empty()) {
@@ -354,9 +405,13 @@ pub fn validate_harness(
         }
     }
 
-    let mut tools = Vec::new();
+    let mut permitted = Permitted::default();
     match spec.resolve_tools(registered_tools) {
-        Ok(resolved) => tools = resolved,
+        Ok(resolved) => permitted.tools = resolved,
+        Err(error) => problems.push(error.to_string()),
+    }
+    match spec.resolve_context(registered_context) {
+        Ok(resolved) => permitted.context = resolved,
         Err(error) => problems.push(error.to_string()),
     }
 
@@ -370,7 +425,7 @@ pub fn validate_harness(
             listed.join("\n")
         )));
     }
-    Ok(tools)
+    Ok(permitted)
 }
 
 fn parse_agents(raw: Option<&Value>, source: &str) -> Result<AgentsSpec> {
@@ -976,6 +1031,39 @@ mod tests {
     }
 
     #[test]
+    fn the_context_key_narrows_what_was_registered() {
+        // Same tri-state as `tools`, and the same registration ordering.
+        assert_eq!(
+            ok(json!({}))
+                .resolve_context(&names(&["repo_map", "schema"]))
+                .expect("all"),
+            names(&["repo_map", "schema"])
+        );
+        assert!(ok(json!({"context": []}))
+            .resolve_context(&names(&["repo_map"]))
+            .expect("none")
+            .is_empty());
+        assert_eq!(
+            ok(json!({"context": ["schema", "repo_map"]}))
+                .resolve_context(&names(&["repo_map", "schema", "roster"]))
+                .expect("narrowed"),
+            names(&["repo_map", "schema"])
+        );
+    }
+
+    #[test]
+    fn an_unknown_context_source_is_an_error_and_says_how_to_register_one() {
+        let spec = ok(json!({"name": "x", "context": ["repo_map"]}));
+        let error = spec.resolve_context(&[]).expect_err("unregistered");
+        let reported = error.to_string();
+        assert!(
+            reported.contains("context source(s) repo_map"),
+            "{reported}"
+        );
+        assert!(reported.contains("session.add_context(...)"), "{reported}");
+    }
+
+    #[test]
     fn a_result_field_takes_the_shorthand_or_the_long_form() {
         let spec = ok(json!({"result": {"summary": "str"}}));
         assert_eq!(spec.result[0].name, "summary");
@@ -995,16 +1083,18 @@ mod tests {
     }
 
     #[test]
-    fn a_passing_session_returns_the_allowed_tools() {
-        let spec = ok(json!({"name": "t", "tools": ["cmd"]}));
-        let tools = validate_harness(
+    fn a_passing_session_returns_what_it_may_use() {
+        let spec = ok(json!({"name": "t", "tools": ["cmd"], "context": ["repo_map"]}));
+        let permitted = validate_harness(
             &spec,
             &names(&["A", "B"]),
             Some("M"),
             &names(&["cmd", "read_file"]),
+            &names(&["repo_map", "roster"]),
         )
         .expect("valid session");
-        assert_eq!(tools, names(&["cmd"]));
+        assert_eq!(permitted.tools, names(&["cmd"]));
+        assert_eq!(permitted.context, names(&["repo_map"]));
     }
 
     #[test]
@@ -1015,7 +1105,7 @@ mod tests {
             "agents": {"orchestrator": true, "participants": {"min": 4}},
             "tools": ["teleport"],
         }));
-        let error = validate_harness(&spec, &names(&["A", "A"]), None, &names(&["cmd"]))
+        let error = validate_harness(&spec, &names(&["A", "A"]), None, &names(&["cmd"]), &[])
             .expect_err("four problems");
         let reported = error.to_string();
 
@@ -1034,19 +1124,19 @@ mod tests {
         // Routing is by name, so a clash makes an `@Name` ambiguous.
         let spec = ok(json!({"name": "t"}));
         let error =
-            validate_harness(&spec, &names(&["A"]), Some("A"), &[]).expect_err("name clash");
+            validate_harness(&spec, &names(&["A"]), Some("A"), &[], &[]).expect_err("name clash");
         assert!(error.to_string().contains("shares a name"), "{error}");
     }
 
     #[test]
     fn the_roster_must_fit_the_declared_bounds() {
         let spec = ok(json!({"name": "t", "agents": {"participants": {"min": 3}}}));
-        let error = validate_harness(&spec, &names(&["A"]), None, &[]).expect_err("too few");
+        let error = validate_harness(&spec, &names(&["A"]), None, &[], &[]).expect_err("too few");
         assert!(error.to_string().contains("at least 3"), "{error}");
 
         let spec = ok(json!({"name": "t", "agents": {"participants": {"max": 2}}}));
-        let error =
-            validate_harness(&spec, &names(&["A", "B", "C"]), None, &[]).expect_err("too many");
+        let error = validate_harness(&spec, &names(&["A", "B", "C"]), None, &[], &[])
+            .expect_err("too many");
         assert!(error.to_string().contains("at most 2"), "{error}");
     }
 

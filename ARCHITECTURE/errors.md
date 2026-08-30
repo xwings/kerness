@@ -29,7 +29,10 @@ declared in Python instead.
 - `crates/kerness/src/error.rs:17` — `Error` — one variant per exception class.
 - `crates/kerness/src/error.rs:56` — `is_provider()` — the test the retry loop
   branches on; a provider error is retryable, others are not.
-- `crates/kerness/src/error.rs:103` — `Result<T>` — the crate-wide alias.
+- `crates/kerness/src/error.rs:80` — `is_context_overflow()` — the narrower test
+  the session branches on: the one provider failure it can act on rather than
+  write the turn off for.
+- `crates/kerness/src/error.rs:141` — `Result<T>` — the crate-wide alias.
 - `bindings/python/src/errors.rs:31` — `register(module)` — stores the classes
   handed down by `bootstrap`.
 - `bindings/python/src/errors.rs:55` — `to_py(error)` — `Error` to `PyErr`,
@@ -43,6 +46,16 @@ declared in Python instead.
   `PyResult<T>`, used wherever the framework calls into Python.
 - `bindings/python/kerness/exceptions.py:19` — `ProviderHTTPError(status_code, url, body)` —
   the two-argument constructor the map has to preserve.
+
+### Recognising an overflow by phrase
+
+`is_context_overflow` reads a `ProviderHttp` body rather than a status code,
+because no backend gives the condition one: OpenAI and OpenRouter answer 400,
+Anthropic 400 or 413, and all of them say what actually happened only in the
+body. A phrase list is wrong when a vendor rewrites its message, and it is wrong
+in the safe direction — an unrecognised refusal stays an ordinary provider
+failure, which is what a session does with it today. The session's use of it is
+[compaction.md](compaction.md)'s reactive pass.
 
 ### Where `from_py` loses information
 
@@ -69,6 +82,12 @@ cargo test -p kerness error                                  # pass = 0 failed
 - The provider, access, and gameplan test modules each assert the specific
   exception class and its attributes, which is what proves the map rather than
   just that something was raised.
+- `crates/kerness/src/error.rs:157` — `a_refusal_about_length_is_told_apart_from_every_other_refusal` —
+  the phrases each backend actually sends, and the near misses that must not
+  match: a 400 about an API key, a 400 about tools, a 500 that happens to
+  contain the phrase, and a non-HTTP provider error. `:175`
+  `an_overflow_is_still_a_provider_error` keeps the retry and dialect-fallback
+  paths seeing it as one.
 
 ## Open Gaps / Roadmap
 

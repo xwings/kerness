@@ -73,3 +73,25 @@ class TestMemory:
 
         mem.append_entry("a note")
         assert path.read_text(encoding="utf-8") == "a note\n"
+
+    def test_age_is_none_without_a_file_and_whole_days_once_there_is_one(
+        self, tmp_path
+    ):
+        """`Option<u64>` reaching Python as ``None`` or an ``int``: the prompt's
+        staleness caveat is the file's own age, so a file that does not exist
+        has to be distinguishable from one written today."""
+        import os
+        import time
+
+        path = tmp_path / "memory.md"
+        mem = Memory(str(path))
+        mem.load()
+        assert mem.age is None
+
+        mem.append_entry("a note")
+        assert mem.age == 0
+
+        week = time.time() - 7 * 24 * 60 * 60
+        os.utime(path, (week, week))
+        mem.load()
+        assert mem.age == 7

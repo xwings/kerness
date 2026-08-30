@@ -7,6 +7,8 @@ their pieces as attributes, and code that catches one reads them back.
 
 from __future__ import annotations
 
+from kerness._core import is_context_overflow as _is_context_overflow
+
 
 class KernessError(Exception):
     """Base exception for all Kerness errors."""
@@ -24,6 +26,16 @@ class ProviderHTTPError(ProviderError):
         self.url = url
         self.body = body
         super().__init__(f"HTTP {status_code} from {url}: {body}")
+
+    @property
+    def is_context_overflow(self) -> bool:
+        """Whether the provider refused this request for being too long.
+
+        A caller that sees this true has a conversation to shrink rather than a
+        request to retry unchanged. The phrases it recognises live in the
+        extension, so both languages read one list.
+        """
+        return _is_context_overflow(self.status_code, self.body)
 
 
 class ProviderNetworkError(ProviderError):

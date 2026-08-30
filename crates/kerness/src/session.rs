@@ -18,13 +18,14 @@ use crate::agent::{Agent, AgentDefaults};
 use crate::agent_runtime::AgentRunner;
 use crate::channel::{Channel, ConsoleChannel};
 use crate::compaction::{compact, estimate_tokens, summary_request};
+use crate::context::ContextSource;
 use crate::conversation::{ChatMessage, Conversation, Message, Turn};
 use crate::error::{Error, Result};
 use crate::exec;
 use crate::gameplan::{load_gameplan, GameplanConfig};
-use crate::harness::validate_harness;
+use crate::harness::{validate_harness, Permitted};
 use crate::logging;
-use crate::memory::Memory;
+use crate::memory::{Memory, MemoryFilter};
 use crate::orchestrator::{LoopHost, OrchestratorLoop};
 use crate::persona::{load_persona, resolve_persona_path};
 use crate::prompting::PromptAssembler;
@@ -47,11 +48,23 @@ use crate::utils::parse_memory_markers;
 /// Default ceiling on one request, in estimated tokens.
 ///
 /// This stands for what the model can hold, so it is not the framework's number
-/// to pick well — a caller running a 128k model should say so. The default is
-/// deliberately generous rather than clever: guessing per model would mean
-/// shipping a table of context windows that goes stale every release and has no
-/// entry at all for `CustomProvider`.
+/// to pick well — a caller running a 128k model should say so, either here or
+/// through [`Provider::context_window`], whichever is smaller binding. The
+/// default is deliberately generous rather than clever: guessing per model would
+/// mean shipping a table of context windows that goes stale every release and
+/// has no entry at all for `CustomProvider`.
 pub const DEFAULT_MAX_CONTEXT_TOKENS: usize = 256_000;
+
+/// How much of the estimated allowance the conversation is compacted to after a
+/// provider refuses a request for being too long.
+///
+/// The estimate said the request fit and the provider says it did not, so the
+/// retry cannot be measured against the same figure — it would find nothing to
+/// do. Half is the same step [`COMPACT_TO_FRACTION`](crate::compaction::COMPACT_TO_FRACTION)
+/// takes for the same reason: big enough that one retry is likely to be the only
+/// one, small enough not to throw the conversation away over a heuristic that
+/// was slightly off.
+pub const OVERFLOW_RETRY_FRACTION: f64 = 0.5;
 
 /// Result of a completed session.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -119,6 +132,13 @@ pub struct SessionConfig {
     /// makes a run read-only: the `write_memory` tool is not offered,
     /// `@MEMORY:` notes are dropped, and the session result is not recorded.
     pub memory_write: bool,
+    /// Filter over what agents write to memory, or `None` to store notes as
+    /// written.
+    ///
+    /// Only consulted when [`SessionConfig::memory_write`] is on, because a
+    /// read-only session stores nothing to filter. See [`MemoryFilter`] for why
+    /// the framework ships no default implementation.
+    pub memory_filter: Option<Arc<dyn MemoryFilter>>,
     /// Path to this run's state file, or `None` to persist nothing. This is
     /// not the memory file: it holds the conversation, the turn count, and the
     /// phase position for one run, in a schema the framework owns.
@@ -170,6 +190,7 @@ impl Default for SessionConfig {
             channel: None,
             memory: "memory.md".to_string(),
             memory_write: false,
+            memory_filter: None,
             session_file: None,
             max_context_tokens: DEFAULT_MAX_CONTEXT_TOKENS,
             access_policy: None,
@@ -209,6 +230,34 @@ impl Memories {
     }
 }
 
+/// Store *note* against *agent_name*, after *filter* has seen it.
+///
+/// The one path model output takes into the memory file. Both the
+/// `write_memory` tool and the `@MEMORY:` marker pass call this, so a caller
+/// that installs a filter cannot have it cover one and miss the other — and a
+/// free function rather than a method because the tool handler outlives any
+/// borrow of the session and holds only the `Arc`s.
+///
+/// Returns whether the note was stored. A filter that returns `None` drops it,
+/// and the writer learns only that; a rejection saying *which* rule refused it
+/// would teach a model how to word the next attempt.
+fn remember(
+    memories: &Mutex<Memories>,
+    filter: Option<&Arc<dyn MemoryFilter>>,
+    agent_name: &str,
+    note: &str,
+) -> Result<bool> {
+    let note = match filter {
+        Some(filter) => match filter.filter(note, agent_name) {
+            Some(note) => note,
+            None => return Ok(false),
+        },
+        None => note.to_string(),
+    };
+    lock(memories).get_mut(agent_name).append_entry(&note)?;
+    Ok(true)
+}
+
 /// The parts of a session that outlive a borrow of it.
 ///
 /// Tool handlers are `Arc<dyn ToolHandler>` and the dispatcher's tool source is
@@ -229,12 +278,27 @@ struct Shared {
     /// gameplan declaring `tools: []` grants none), so the two cannot share a
     /// representation.
     allowed_tools: Mutex<Option<Vec<String>>>,
+    /// Tool names each agent that declared its own may call, resolved by
+    /// `run()`. An agent absent from the map declared nothing and takes the
+    /// harness-permitted set whole.
+    agent_tools: Mutex<HashMap<String, Vec<String>>>,
+    /// The agent whose turn is in progress, recorded alongside its activation.
+    /// The dispatcher is `'static` and shared by every agent, so this is how a
+    /// per-agent narrowing reaches it.
+    turn_agent: Mutex<Option<String>>,
     /// The skill activation for the turn in progress. Replaced at the start of
     /// every turn, which is what bounds a loaded body — and the tool gate it
     /// may carry — to that turn.
     activation: Mutex<Option<Arc<SkillActivation>>>,
     skills_cache: Arc<Mutex<HashMap<String, Vec<SkillConfig>>>>,
     skills_registry: SkillRegistry,
+    /// The context blocks each agent reads, rendered once by `run()`. A source
+    /// is called there and not here so a walker or a query costs one call per
+    /// agent per run rather than one per prompt, and so a source that fails
+    /// does so before the first provider call.
+    context_cache: Mutex<HashMap<String, Vec<(String, String)>>>,
+    /// Filter over what agents write to memory; `None` stores notes as written.
+    memory_filter: Option<Arc<dyn MemoryFilter>>,
 }
 
 /// Take a session lock, treating poisoning as the panic it reports.
@@ -258,9 +322,32 @@ impl Shared {
             .unwrap_or_default()
     }
 
+    /// The standing context blocks an agent reads, in registration order.
+    fn context_for(&self, agent_name: &str) -> Vec<(String, String)> {
+        lock(&self.context_cache)
+            .get(agent_name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// The memory content an agent reads.
     fn memory_text(&self, agent_name: &str) -> String {
         lock(&self.memories).get(agent_name).read().to_string()
+    }
+
+    /// How old an agent's memory file is, in whole days.
+    fn memory_age(&self, agent_name: &str) -> Option<u64> {
+        lock(&self.memories).get(agent_name).age()
+    }
+
+    /// Store *note* against *agent_name*, after the memory filter has seen it.
+    fn remember(&self, agent_name: &str, note: &str) -> Result<bool> {
+        remember(
+            &self.memories,
+            self.memory_filter.as_ref(),
+            agent_name,
+            note,
+        )
     }
 
     /// Resolve the provider for an agent: agent-level over session-level.
@@ -276,17 +363,21 @@ impl Shared {
 
     /// The tools callable right now.
     ///
-    /// Four steps, applied in order, and the order matters:
+    /// Five steps, applied in order, and the order matters:
     ///
     /// 1. The harness narrows the registered set. Before `run()` resolves it
     ///    this is every registered tool; after, it is the permitted set.
-    /// 2. The turn's `Skill` tool is added, built from the agent's own skill
+    /// 2. The turn's agent narrows what the harness left, if it declared a
+    ///    list of its own. Static, like the harness's, and applied next to it.
+    /// 3. The turn's `Skill` tool is added, built from the agent's own skill
     ///    list so its `enum` names only skills that agent can load.
-    /// 3. An active skill's `allowed-tools` narrows further, restrictively.
-    /// 4. An active skill's `requires-tools` adds back, out of the registered
+    /// 4. An active skill's `allowed-tools` narrows further, restrictively.
+    /// 5. An active skill's `requires-tools` adds back, out of the registered
     ///    set. Last, because a skill that brings instructions for a tool must
-    ///    outrank both narrowings — otherwise a gameplan's `tools:` list turns
-    ///    the skill into prose about something the agent cannot call.
+    ///    outrank every narrowing above it — otherwise a gameplan's `tools:`
+    ///    list turns the skill into prose about something the agent cannot
+    ///    call. An agent's own list is outranked the same way, and the skill
+    ///    that does it is one that agent chose to load.
     ///
     /// Both the prompt and the dispatcher read this, so a tool the gameplan
     /// excluded is neither advertised to the model nor callable if it asks
@@ -294,6 +385,12 @@ impl Shared {
     fn active_tools(&self) -> Vec<ToolSpec> {
         let registered = lock(&self.tools);
         let tools = resolve(&registered, lock(&self.allowed_tools).as_deref());
+        let tools = {
+            let declared = lock(&self.agent_tools);
+            let turn_agent = lock(&self.turn_agent);
+            let names = turn_agent.as_deref().and_then(|name| declared.get(name));
+            resolve(&tools, names.map(Vec::as_slice))
+        };
         let Some(activation) = lock(&self.activation).clone() else {
             return tools;
         };
@@ -305,8 +402,10 @@ impl Shared {
         admit_required(tools, &registered, &activation.required())
     }
 
-    /// Start a fresh activation for one agent's turn.
+    /// Start a fresh activation for one agent's turn, and record whose turn it
+    /// is so `active_tools` can find that agent's own tool list.
     fn start_activation(&self, agent_name: &str) {
+        *lock(&self.turn_agent) = Some(agent_name.to_string());
         *lock(&self.activation) = Some(self.skills_registry.activation_for(agent_name));
     }
 
@@ -324,6 +423,8 @@ impl Shared {
         )
         .with_dialect(|agent: &Agent| self.dialect_for(agent))
         .with_memory_writable(self.memory_write)
+        .with_memory_age(|agent: &Agent| self.memory_age(&agent.name))
+        .with_context(|agent: &Agent| self.context_for(&agent.name))
     }
 }
 
@@ -352,6 +453,10 @@ pub struct Session {
 
     agents: Vec<Agent>,
     skills: Vec<SkillConfig>,
+    /// Registered context sources, in registration order — which is the order
+    /// their blocks appear in a prompt. Kept here rather than in `Shared`
+    /// because nothing but `run()` calls them.
+    context: Vec<(String, Arc<dyn ContextSource>)>,
     conversation: Conversation,
     dispatcher: ToolDispatcher,
     shared: Arc<Shared>,
@@ -424,12 +529,14 @@ impl Session {
             })
         };
 
+        let memory_filter = config.memory_filter;
         let shared = Arc::new(Shared {
             tools: Mutex::new(default_tools(
                 &access,
                 &memories,
                 &channel,
                 config.memory_write,
+                memory_filter.as_ref(),
             )),
             channel,
             provider: config.provider,
@@ -438,9 +545,13 @@ impl Session {
             access,
             memories,
             allowed_tools: Mutex::new(None),
+            agent_tools: Mutex::new(HashMap::new()),
+            turn_agent: Mutex::new(None),
             activation: Mutex::new(None),
             skills_cache,
             skills_registry: SkillRegistry::new(skills_for, Some(grant_paths)),
+            context_cache: Mutex::new(HashMap::new()),
+            memory_filter,
         });
         let dispatcher = ToolDispatcher::new({
             let shared = Arc::clone(&shared);
@@ -468,6 +579,7 @@ impl Session {
             compactions: 0,
             agents: Vec::new(),
             skills: Vec::new(),
+            context: Vec::new(),
             conversation: Conversation::new(),
             dispatcher,
             shared,
@@ -608,6 +720,36 @@ impl Session {
         Ok(self)
     }
 
+    /// Register standing background text for agents to read.
+    ///
+    /// *name* becomes the subheading the block arrives under, and a gameplan's
+    /// `context:` key narrows by it. The source is called once per agent at the
+    /// top of [`Session::run`], in registration order.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Session`] when *name* is empty, or when a source of that name
+    /// is already registered — two blocks under one heading would leave an
+    /// agent no way to say which it is quoting, and a gameplan no way to name
+    /// one of them.
+    pub fn add_context(&mut self, name: &str, source: Arc<dyn ContextSource>) -> Result<&mut Self> {
+        if name.trim().is_empty() {
+            return Err(Error::session(
+                "A context source needs a name: it becomes the heading its \
+                 block arrives under and the name a gameplan's 'context:' key \
+                 narrows by.",
+            ));
+        }
+        if self.context.iter().any(|(existing, _)| existing == name) {
+            return Err(Error::session(format!(
+                "A context source named '{name}' is already registered. \
+                 Context source names must be unique."
+            )));
+        }
+        self.context.push((name.to_string(), source));
+        Ok(self)
+    }
+
     /// Run an external command with access control.
     ///
     /// A named *actor* also reports the attempt through the session's channel.
@@ -696,13 +838,23 @@ impl Session {
             .iter()
             .map(|tool| tool.name.clone())
             .collect();
-        let allowed = validate_harness(
+        let registered_context: Vec<String> =
+            self.context.iter().map(|(name, _)| name.clone()).collect();
+        let permitted = validate_harness(
             &harness,
             &participants,
             Some(orchestrator.as_str()),
             &registered,
+            &registered_context,
         )?;
-        *lock(&self.shared.allowed_tools) = Some(allowed);
+        let Permitted { tools, context } = permitted;
+        self.resolve_agent_tools(&tools)?;
+        *lock(&self.shared.allowed_tools) = Some(tools);
+
+        // Render the permitted sources once per agent, here rather than per
+        // prompt: a source that walks a tree would otherwise pay for it several
+        // times a turn, and one that fails would do so mid-run.
+        self.resolve_context(&context)?;
 
         // Personas resolve here, before a single provider call, for the same
         // reason tools and skills do: a configuration error should cost
@@ -797,12 +949,41 @@ impl Session {
         })
     }
 
+    /// Run one agent's turn, and compact and try again if the provider says the
+    /// request was too long.
+    ///
+    /// The token count the pre-turn check works from is a character heuristic,
+    /// so the provider is the authority and it disagrees sometimes. Once, not in
+    /// a loop: a second refusal means the shortfall is not in the conversation,
+    /// and going round again would buy a summary call per attempt and be refused
+    /// each time.
+    fn turn(
+        &mut self,
+        agent: &Agent,
+        base_prompt: &str,
+        purpose: &str,
+        instruction: Option<&str>,
+    ) -> Result<String> {
+        match self.attempt_turn(agent, base_prompt, purpose, instruction) {
+            Err(error) if error.is_context_overflow() => {
+                logging::warning(&format!(
+                    "Provider refused {purpose} as too long; compacting to \
+                     {OVERFLOW_RETRY_FRACTION} of the estimated allowance and \
+                     trying once more."
+                ));
+                self.fit_conversation(agent, base_prompt, OVERFLOW_RETRY_FRACTION)?;
+                self.attempt_turn(agent, base_prompt, purpose, instruction)
+            }
+            other => other,
+        }
+    }
+
     /// Run one agent's turn, tool loop included.
     ///
     /// The activation is started before the history is measured: it decides the
     /// turn's tool set, and the prompt overhead the history has to fit inside
     /// is measured against exactly that set.
-    fn turn(
+    fn attempt_turn(
         &mut self,
         agent: &Agent,
         base_prompt: &str,
@@ -1084,6 +1265,69 @@ impl Session {
         Ok(resolved)
     }
 
+    /// Record the tool list of every agent that declared one, against the set
+    /// the harness permits.
+    ///
+    /// Agents narrow, so a name outside *permitted* is refused rather than
+    /// granted: an agent list is a way of paying for fewer schemas and calling
+    /// fewer tools, never a way around the gameplan. Refused here, before the
+    /// first provider call, and named with the agent so the caller knows which
+    /// list to fix.
+    fn resolve_agent_tools(&self, permitted: &[String]) -> Result<()> {
+        let mut declared = HashMap::new();
+        for agent in &self.agents {
+            let Some(names) = &agent.tools else { continue };
+            let unknown: Vec<&str> = names
+                .iter()
+                .filter(|name| !permitted.contains(name))
+                .map(String::as_str)
+                .collect();
+            if !unknown.is_empty() {
+                let joined = permitted.join(", ");
+                let permitted_list = if joined.is_empty() { "(none)" } else { &joined };
+                return Err(Error::session(format!(
+                    "Agent '{}' declares tool(s) {} which this session does not permit. \
+                     An agent narrows the permitted set and cannot add to it. \
+                     Permitted: {permitted_list}",
+                    agent.name,
+                    unknown.join(", "),
+                )));
+            }
+            declared.insert(agent.name.clone(), names.clone());
+        }
+        *lock(&self.shared.agent_tools) = declared;
+        Ok(())
+    }
+
+    /// Render the *permitted* context sources for every agent, and cache what
+    /// they said.
+    ///
+    /// One call per source per agent, and the text is what every turn reads.
+    /// A source that returns nothing is dropped here rather than in the prompt,
+    /// so the cache holds what an agent actually sees.
+    fn resolve_context(&self, permitted: &[String]) -> Result<()> {
+        let sources: Vec<(String, Arc<dyn ContextSource>)> = self
+            .context
+            .iter()
+            .filter(|(name, _)| permitted.contains(name))
+            .map(|(name, source)| (name.clone(), Arc::clone(source)))
+            .collect();
+        let mut cache: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for agent in &self.agents {
+            let mut blocks = Vec::new();
+            for (name, source) in &sources {
+                let text = source.render(&agent.name)?;
+                if text.trim().is_empty() {
+                    continue;
+                }
+                blocks.push((name.clone(), text));
+            }
+            cache.insert(agent.name.clone(), blocks);
+        }
+        *lock(&self.shared.context_cache) = cache;
+        Ok(())
+    }
+
     /// Settle every agent's options against the session's defaults.
     ///
     /// The one place the session-default/agent-override rule is applied. Run
@@ -1185,10 +1429,8 @@ impl Session {
         if notes.is_empty() || !self.shared.memory_write {
             return Ok(cleaned);
         }
-        let mut memories = lock(&self.shared.memories);
-        let memory = memories.get_mut(agent_name);
         for note in &notes {
-            memory.append_entry(note)?;
+            self.shared.remember(agent_name, note)?;
         }
         Ok(cleaned)
     }
@@ -1314,22 +1556,51 @@ impl Session {
     /// turn rather than once: personas, skill indexes and permitted tool sets
     /// differ by agent, and the memory file grows during the run.
     fn history_for_turn(&mut self, agent: &Agent, base_prompt: &str) -> Result<Vec<Value>> {
+        self.fit_conversation(agent, base_prompt, 1.0)?;
+        Ok(as_values(&self.conversation.render()))
+    }
+
+    /// The context ceiling for one agent's turn.
+    ///
+    /// `max_context_tokens` is what the caller is willing to spend and the
+    /// provider's window is what the model can physically hold, so the smaller
+    /// of the two binds. Read per agent because a mixed-provider session has one
+    /// figure per model, and compacting the whole run against the largest of
+    /// them would fail on every turn taken by the smallest.
+    fn context_ceiling(&self, agent: &Agent) -> usize {
+        self.shared
+            .provider_for(agent)
+            .and_then(|provider| provider.context_window(agent.model_name()))
+            .map_or(self.max_context_tokens, |window| {
+                window.min(self.max_context_tokens)
+            })
+    }
+
+    /// Compact the conversation until it fits *fraction* of what this agent's
+    /// turn leaves for it.
+    ///
+    /// *fraction* is `1.0` for the ordinary pre-turn check. It is lower only
+    /// when a provider has already refused the request as too long, where
+    /// re-measuring against the same allowance would conclude the conversation
+    /// fits and change nothing.
+    fn fit_conversation(&mut self, agent: &Agent, base_prompt: &str, fraction: f64) -> Result<()> {
+        let ceiling = self.context_ceiling(agent);
         let overhead = self.prompt_overhead(agent, base_prompt)?;
-        if overhead >= self.max_context_tokens {
+        if overhead >= ceiling {
             // Not a provider's problem to discover. Compaction cannot touch the
             // system prompt, so no amount of summarizing makes this fit;
             // continuing would buy a summary call per turn and still 400.
             return Err(Error::session(format!(
                 "The prompt for {} needs about {overhead} tokens before any \
-                 conversation, which already meets or exceeds \
-                 max_context_tokens={}. Compaction shrinks the conversation \
+                 conversation, which already meets or exceeds the context \
+                 ceiling of {ceiling}. Compaction shrinks the conversation \
                  only, so nothing it can do would make this request fit. Raise \
                  max_context_tokens, or cut the persona, skill index, tool set, \
-                 or memory file.",
-                agent.name, self.max_context_tokens
+                 context sources, or memory file.",
+                agent.name
             )));
         }
-        let available = self.max_context_tokens - overhead;
+        let available = (((ceiling - overhead) as f64) * fraction) as usize;
 
         let mut failure: Option<Error> = None;
         let compacted = compact(self.conversation.turns(), available, |turns| {
@@ -1349,14 +1620,14 @@ impl Session {
             self.conversation.replace_turns(turns);
             self.compactions += 1;
             let message = format!(
-                "Compacted conversation: {overhead} of {} estimated tokens are \
-                 prompt overhead, leaving {available} for the conversation.",
-                self.max_context_tokens
+                "Compacted conversation: {overhead} of {ceiling} estimated \
+                 tokens are prompt overhead, leaving {available} for the \
+                 conversation."
             );
             self.emit_system(&message)?;
             self.save()?;
         }
-        Ok(as_values(&self.conversation.render()))
+        Ok(())
     }
 
     /// Summarize turns being dropped, using the orchestrator's model.
@@ -1562,6 +1833,7 @@ fn default_tools(
     memories: &Arc<Mutex<Memories>>,
     channel: &Arc<dyn Channel>,
     memory_write: bool,
+    memory_filter: Option<&Arc<dyn MemoryFilter>>,
 ) -> Vec<ToolSpec> {
     let mut tools = Vec::new();
 
@@ -1666,9 +1938,11 @@ fn default_tools(
         tools.push(
             ToolSpec::new(
                 "write_memory",
-                "Append a note to this session's memory file. The note is \
-                 stored word for word: include whoever and whenever matters, \
-                 because nothing is added around it.",
+                "Append a note to this session's memory file, which every agent \
+                 in the session reads. The note is stored as written: include \
+                 whoever and whenever matters, because nothing is added around \
+                 it. A session may filter what it keeps, so a note is not \
+                 guaranteed to be stored.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -1678,11 +1952,19 @@ fn default_tools(
                 }),
                 {
                     let memories = Arc::clone(memories);
+                    let filter = memory_filter.cloned();
                     Arc::new(move |arguments: &Arguments, actor: &str| {
-                        lock(&memories)
-                            .get_mut(actor)
-                            .append_entry(&argument(arguments, "note"))?;
-                        Ok("Saved to memory.".to_string())
+                        let stored = remember(
+                            &memories,
+                            filter.as_ref(),
+                            actor,
+                            &argument(arguments, "note"),
+                        )?;
+                        Ok(if stored {
+                            "Saved to memory.".to_string()
+                        } else {
+                            "Not saved: this session did not keep that note.".to_string()
+                        })
                     })
                 },
             )
@@ -2633,6 +2915,65 @@ mod tests {
             .contains("Ship it."));
     }
 
+    /// The filter has to cover both ways model output reaches the file, or a
+    /// note the tool refuses lands anyway by being written as a marker.
+    #[test]
+    fn a_filter_rewrites_or_drops_what_an_agent_writes() {
+        struct NoSecrets;
+        impl MemoryFilter for NoSecrets {
+            fn filter(&self, note: &str, actor: &str) -> Option<String> {
+                if note.contains("sk-") {
+                    return None;
+                }
+                Some(format!("{actor}: {note}"))
+            }
+        }
+
+        let temp = TempDir::new("memory-filter");
+        let path = temp.child("memory.md");
+        let mut session = Session::new(SessionConfig {
+            topic: "T".to_string(),
+            memory: path.clone(),
+            access_policy: confined(&temp),
+            memory_write: true,
+            memory_filter: Some(Arc::new(NoSecrets)),
+            ..SessionConfig::default()
+        })
+        .expect("loads");
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+
+        let tools = session.shared.active_tools();
+        let write = tools
+            .iter()
+            .find(|tool| tool.name == "write_memory")
+            .expect("write_memory is registered");
+        let note = |text: &str| {
+            let mut arguments = Map::new();
+            arguments.insert("note".to_string(), Value::String(text.to_string()));
+            write.handler.call(&arguments, "Alice").expect("a write")
+        };
+
+        assert_eq!(note("Ship it."), "Saved to memory.");
+        assert_eq!(
+            note("The key is sk-4242."),
+            "Not saved: this session did not keep that note."
+        );
+        // The marker pass is the other door into the same file.
+        session
+            .process_memory_markers("Agreed.\n@MEMORY: Also sk-9999.", "Alice")
+            .expect("markers");
+        session
+            .process_memory_markers("Agreed.\n@MEMORY: Bob dissented.", "Alice")
+            .expect("markers");
+
+        let written = std::fs::read_to_string(&path).expect("the file exists");
+        assert!(written.contains("Alice: Ship it."), "{written}");
+        assert!(written.contains("Alice: Bob dissented."), "{written}");
+        assert!(!written.contains("sk-"), "{written}");
+    }
+
     // ---- harness narrowing ------------------------------------------------
 
     #[test]
@@ -2828,8 +3169,185 @@ mod tests {
         let error = error_text(&session.run().expect_err("the prompt cannot fit"));
 
         assert!(error.contains("tokens before any conversation"));
-        assert!(error.contains("max_context_tokens=10"));
+        assert!(error.contains("context ceiling of 10"), "{error}");
         assert!(provider.calls().is_empty());
+    }
+
+    /// A window the provider declares is what the model can hold; the session's
+    /// figure is what the caller will pay for. Neither outranks the other, so
+    /// the smaller has to bind both ways round.
+    #[test]
+    fn the_smaller_of_the_session_and_the_provider_window_is_the_ceiling() {
+        struct Windowed(usize);
+        impl Provider for Windowed {
+            fn name(&self) -> &str {
+                "Windowed"
+            }
+            fn base(&self) -> &ProviderBase {
+                static BASE: std::sync::OnceLock<ProviderBase> = std::sync::OnceLock::new();
+                BASE.get_or_init(ProviderBase::default)
+            }
+            fn context_window(&self, _model: &str) -> Option<usize> {
+                Some(self.0)
+            }
+            fn chat(
+                &self,
+                _: &str,
+                _: &[Value],
+                _: Option<&[ToolSpec]>,
+                _: ReasoningEffort,
+            ) -> Result<ProviderResponse> {
+                Ok(ProviderResponse::text("hi"))
+            }
+        }
+
+        let temp = TempDir::new("ceiling");
+        let agent = Agent::new("Alice").with_model("m");
+        let ceiling = |session_limit: usize, window: usize| {
+            let mut session = debate(
+                &temp,
+                Arc::new(Windowed(window)) as Arc<dyn Provider>,
+                Arc::new(CaptureChannel::default()),
+                "T",
+            );
+            session.max_context_tokens = session_limit;
+            session.context_ceiling(&agent)
+        };
+
+        assert_eq!(ceiling(200_000, 8_000), 8_000);
+        assert_eq!(ceiling(4_000, 8_000), 4_000);
+    }
+
+    /// The pre-turn check counts characters, so the provider is the authority
+    /// and it disagrees sometimes. Writing the turn off would lose it over a
+    /// heuristic the framework already documents as approximate.
+    #[test]
+    fn a_request_the_provider_calls_too_long_is_compacted_and_sent_again() {
+        struct Overflowing {
+            base: ProviderBase,
+            calls: AtomicUsize,
+        }
+        impl Provider for Overflowing {
+            fn name(&self) -> &str {
+                "Overflowing"
+            }
+            fn base(&self) -> &ProviderBase {
+                &self.base
+            }
+            fn chat(
+                &self,
+                _: &str,
+                _: &[Value],
+                _: Option<&[ToolSpec]>,
+                _: ReasoningEffort,
+            ) -> Result<ProviderResponse> {
+                if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    return Err(Error::ProviderHttp {
+                        status_code: 400,
+                        url: "https://api.example.com/v1".to_string(),
+                        body: "maximum context length is 8000 tokens".to_string(),
+                    });
+                }
+                Ok(ProviderResponse::text("END_SESSION"))
+            }
+        }
+
+        let temp = TempDir::new("overflow-retry");
+        let provider = Arc::new(Overflowing {
+            base: ProviderBase::new(0, 0.0, None),
+            calls: AtomicUsize::new(0),
+        });
+        let mut session = debate(
+            &temp,
+            Arc::clone(&provider) as Arc<dyn Provider>,
+            Arc::new(CaptureChannel::default()),
+            "T",
+        );
+
+        let text = session
+            .turn(
+                &Agent::new("Mod").with_model("m").with_role("orchestrator"),
+                "BASE",
+                "orchestrator turn",
+                None,
+            )
+            .expect("the retry salvages the turn");
+
+        assert_eq!(text, "END_SESSION");
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+    }
+
+    /// Once, not in a loop. A second refusal means the length is not in the
+    /// conversation, so going round again buys a summary call per attempt and
+    /// is refused every time.
+    #[test]
+    fn a_second_refusal_reaches_the_caller() {
+        struct AlwaysOverflowing {
+            base: ProviderBase,
+            calls: AtomicUsize,
+        }
+        impl Provider for AlwaysOverflowing {
+            fn name(&self) -> &str {
+                "AlwaysOverflowing"
+            }
+            fn base(&self) -> &ProviderBase {
+                &self.base
+            }
+            fn chat(
+                &self,
+                _: &str,
+                _: &[Value],
+                _: Option<&[ToolSpec]>,
+                _: ReasoningEffort,
+            ) -> Result<ProviderResponse> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Err(Error::ProviderHttp {
+                    status_code: 400,
+                    url: "https://api.example.com/v1".to_string(),
+                    body: "prompt is too long".to_string(),
+                })
+            }
+        }
+
+        let temp = TempDir::new("overflow-twice");
+        let provider = Arc::new(AlwaysOverflowing {
+            base: ProviderBase::new(0, 0.0, None),
+            calls: AtomicUsize::new(0),
+        });
+        let mut session = debate(
+            &temp,
+            Arc::clone(&provider) as Arc<dyn Provider>,
+            Arc::new(CaptureChannel::default()),
+            "T",
+        );
+
+        let error = session
+            .turn(
+                &Agent::new("Mod").with_model("m").with_role("orchestrator"),
+                "BASE",
+                "orchestrator turn",
+                None,
+            )
+            .expect_err("the second refusal is the caller's");
+        assert!(error.is_context_overflow(), "{error}");
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_provider_that_names_no_window_leaves_the_session_figure_alone() {
+        let temp = TempDir::new("no-window");
+        let mut session = debate(
+            &temp,
+            Arc::new(SequenceProvider::new(&["hi"])) as Arc<dyn Provider>,
+            Arc::new(CaptureChannel::default()),
+            "T",
+        );
+        session.max_context_tokens = 12_345;
+
+        assert_eq!(
+            session.context_ceiling(&Agent::new("Alice").with_model("m")),
+            12_345
+        );
     }
 
     #[test]

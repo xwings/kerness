@@ -67,7 +67,7 @@ boundary. The same pattern appears for callbacks in `runtime.rs`.
 ### Declared paths, read once
 
 A channel's destinations are read at bind time, not per write, because the
-session checks them in `Session::new` (`session.rs:397`) — before the first turn,
+session checks them in `Session::new` (`session.rs:502`) — before the first turn,
 so a misplaced log fails at construction rather than mid-run. The cost is that a
 channel choosing its file later is not confined by the workspace; the four bundled
 channels all fix theirs in their constructor.

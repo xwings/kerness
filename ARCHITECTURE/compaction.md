@@ -8,7 +8,9 @@ the oldest half with a single summary turn and keep the rest verbatim.
 
 The estimate is deliberately crude — characters divided by four — because the
 alternative is a tokenizer per model family, and the ceiling exists to stay
-under a hard limit, not to fill it exactly.
+under a hard limit, not to fill it exactly. Being crude means being wrong
+sometimes, which is why there are two passes rather than one: a check before
+every call, and a retry after a provider says the check was wrong.
 
 ## Status
 
@@ -19,6 +21,8 @@ under a hard limit, not to fill it exactly.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/compaction.rs` | estimation, the rewrite, and the summary request |
+| `crates/kerness/src/session.rs:1586` | `fit_conversation`, the ceiling and the overhead it leaves |
+| `crates/kerness/src/session.rs:960` | `turn`, the one retry after a provider refusal |
 | `bindings/python/src/funcs.rs` | the four functions and four constants, re-exported |
 | `bindings/python/kerness/compaction.py` | re-export shim |
 
@@ -34,31 +38,81 @@ under a hard limit, not to fill it exactly.
 - `crates/kerness/src/compaction.rs:49` — `SUMMARY_PROMPT` — what the model is
   asked to produce.
 - `crates/kerness/src/compaction.rs:62` — `estimate_tokens(text)` / `:70`
-  `estimate_turns(turns)` — the estimate over byte length, with no intermediate
-  render allocated.
+  `estimate_turns(turns)` — the estimate over character count, with no
+  intermediate render allocated.
 - `crates/kerness/src/compaction.rs:86` — `compact(turns, limit, summarize)` —
   returns `None` when the history is under the limit, so the caller can tell
   "nothing to do" from "rewritten".
 - `crates/kerness/src/compaction.rs:147` — `summary_request(turns)` — the messages
   sent to the summarizing model.
+- `crates/kerness/src/session.rs:67` — `OVERFLOW_RETRY_FRACTION` — how far the
+  conversation is compacted on the retry.
 
 `compact` takes the summarizer as a closure rather than a provider, so the
 rewrite is testable without a network call and a caller can summarize with a
 cheaper model than the one running the session.
 
+### The ceiling is per agent, and the conversation gets what is left
+
+`fit_conversation` (`session.rs:1586`) is called before every provider call, not
+after the previous one, so the turn about to be sent is the one that fits. It
+works out two figures:
+
+- The **ceiling** (`context_ceiling`, `session.rs:1570`) is the smaller of
+  `max_context_tokens` — what the caller is willing to spend — and the
+  provider's own window for that agent's model
+  ([`Provider::context_window`](provider.md)). A mixed-provider session has one
+  figure per model, and compacting the whole run against the largest of them
+  would fail on every turn taken by the smallest.
+- The **overhead** (`prompt_overhead`, `session.rs:1525`) is the assembled
+  system message plus, under a native dialect, the tool schemas that travel in
+  the request body. Under text the schemas are already inside the system message,
+  so counting them again would charge the caller twice.
+
+The conversation may use the difference. That is why the memory file, the
+persona, the skill index, the context blocks, and the permitted tool set all
+narrow what history survives, and why the measurement is per turn rather than
+once: those differ by agent, and the memory file grows during the run. An
+overhead that meets or exceeds the ceiling is a named session error
+(`session.rs:1593`) rather than something to hand to the provider — compaction
+cannot touch the system prompt, so no amount of summarizing would make it fit,
+and continuing would buy a summary call per turn and still fail.
+
+### The reactive pass
+
+The estimate can be wrong in the direction that matters, and the provider is the
+authority. `Session::turn` (`session.rs:960`) catches a refusal that
+[errors.md](errors.md)'s `is_context_overflow` recognises, compacts to
+`OVERFLOW_RETRY_FRACTION` of the allowance, and calls once more.
+
+The fraction is not `1.0` for a concrete reason: re-measuring against the same
+allowance would find the conversation already fits and change nothing, so the
+retry would be the same request refused twice. Half is the same step
+`COMPACT_TO_FRACTION` takes, for the same reason — big enough that one retry is
+likely to be the only one, small enough not to throw the conversation away over
+a heuristic that was slightly off.
+
+Once, not in a loop. A second refusal means the shortfall is not in the
+conversation, and going round again would buy a summary call per attempt and be
+refused each time.
+
 ## Interactions
 
 - Called by [session.md](session.md) before each provider call, against
-  `DEFAULT_MAX_CONTEXT_TOKENS` (`session.rs:54`) or the configured ceiling.
+  `DEFAULT_MAX_CONTEXT_TOKENS` (`session.rs:56`) or the configured ceiling,
+  whichever the agent's provider window does not undercut.
 - Rewrites the turn list owned by [conversation.md](conversation.md) via
   `replace_turns`.
 - Its summary comes from a [provider.md](provider.md) call the session makes.
+- Measures what [prompting.md](prompting.md) assembled, so every block that
+  module renders is overhead here.
 
 ## How to Test
 
 ```sh
 cargo test -p kerness compaction                                       # pass = 0 failed
 .venv/bin/python -m pytest bindings/python/tests/test_compaction.py -q # pass = 0 failed
+.venv/bin/python -m pytest bindings/python/tests/test_session.py -q    # pass = 0 failed
 ```
 
 - `bindings/python/tests/test_compaction.py:47` — `test_it_leaves_a_short_conversation_alone`;
@@ -67,14 +121,26 @@ cargo test -p kerness compaction                                       # pass = 
 - `:85` `test_the_newest_turn_is_kept_even_when_it_alone_is_too_big` and `:53`
   `test_a_single_oversized_turn_is_not_compactable` are the two edge cases that
   decide what `compact` does when halving cannot help.
+- `bindings/python/tests/test_session.py:2752` —
+  `TestContextLimitKeepsTheConversationSendable` — the proactive pass through a
+  live run, including that it compacts the prompt and only the prompt: the
+  transcript is never sent to a model, so shrinking it would silently cost the
+  caller their report.
+- `bindings/python/tests/test_session.py:2849` —
+  `TestAProviderRefusingALongRequestIsRetriedOnce` — the reactive pass: a
+  provider that answers 400 with an overflow body once, and a run that reaches
+  its summary rather than ending on the refusal.
 
 ## Open Gaps / Roadmap
 
-- `estimate_turns` measures the turns alone. The rest of the prompt — system
-  prompt, tool schemas, memory block — is counted against the ceiling by the
-  session, not by this module (`bindings/python/tests/test_session.py:2209`), so a caller using
+- `estimate_turns` measures the turns alone. The rest of the prompt is counted
+  against the ceiling by the session, not by this module, so a caller using
   `compact` directly has to account for it themselves.
 - One compaction pass per check: a history far over the limit is halved once, not
   repeatedly, and is compacted again on the next check.
 - The summary is not itself bounded; a verbose summarizer can produce a turn
   larger than the ones it replaced.
+- `CHARS_PER_TOKEN` is one number for every model and every script. It is
+  roughly right for English prose and wrong for CJK text and for dense JSON in a
+  tool result, in opposite directions. The reactive pass is what absorbs being
+  wrong; a per-model figure would need a tokenizer the framework does not carry.

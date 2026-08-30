@@ -72,6 +72,26 @@ class TestMemoryBlock:
         assert "@MEMORY:" in writable
         assert "write_memory" in writable
 
+    def test_a_stale_file_is_dated_in_the_block_it_renders(self, tmp_path):
+        """The age is read off the Memory object, the same way the content is,
+        so a caller does not have to compute a caveat the framework owns."""
+        import os
+        import time
+
+        path = tmp_path / "old.md"
+        path.write_text("# Memory\n- the deploy is green\n")
+        old = time.time() - 47 * 24 * 60 * 60
+        os.utime(path, (old, old))
+
+        block = memory_block(_loaded(path))
+        assert "47 days ago" in block
+        assert "confirm before repeating" in block
+
+        # Written this run: as fresh as the run, so no caveat.
+        fresh = tmp_path / "new.md"
+        fresh.write_text("# Memory\n- the deploy is green\n")
+        assert "days ago" not in memory_block(_loaded(fresh))
+
 
 class TestOrchestratorPrompt:
     def test_order_is_base_skills_tools_memory(self, filled_memory):

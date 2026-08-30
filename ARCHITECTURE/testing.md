@@ -15,6 +15,17 @@ can be broken. A suite that catches one of those says nothing about the others.
 | Integration | `crates/kerness/tests/` | A session that cannot be *assembled* — a missing re-export, a type a dependent cannot name, a run whose parts are each right and whose whole is not. |
 | Python | `bindings/python/tests/` | Anything about the boundary: a value that crosses wrong, a subclass the extension will not accept, an asset the wheel did not install. |
 
+The Python column is a boundary, not a second opinion. A Python test earns its
+place when the binding does work — a callable crossing as a handler or a context
+source, a subclass answering by Python method resolution, an exception or an
+`Option` arriving as the right Python thing, a constant spelled in both
+languages. Restating a crate rule through a pass-through binding is not a
+boundary test: it cannot fail unless the crate test fails first, and two suites
+asserting one rule drift apart in exactly the place nobody rereads. Where a
+value is plain data the crate validates — `allowed_hosts`, an agent's `tools` —
+one case proves it crossed, and the semantics are asserted where they are
+decided.
+
 The integration suite is the one that was missing. Before it, every claim about
 how a session actually runs — the orchestrator loop, resume, compaction, the
 access boundary, the tool dialects — was proved only by driving the framework
@@ -30,9 +41,9 @@ the pure-Rust caller the crate exists for unrepresented.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/tests/common/mod.rs` | the doubles all eight files share |
-| `crates/kerness/tests/*.rs` | one file per behaviour cluster, 101 tests |
+| `crates/kerness/tests/*.rs` | one file per behaviour cluster, 109 tests |
 | `bindings/python/tests/conftest.py` | the Python suite's equivalent doubles |
-| `bindings/python/tests/test_*.py` | 26 modules, 443 tests |
+| `bindings/python/tests/test_*.py` | 26 modules, 477 tests |
 | `crates/kerness/examples/*.rs` | 8 examples, compiled by CI |
 | `bindings/python/examples/` | 7 Python examples, walked by `bindings/python/tests/test_examples.py` |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
@@ -60,16 +71,16 @@ module canonicalizing its path and another not.
   and a last entry that repeats. Built on `ProviderBase::new(0, 0.0, None)`: zero
   extra attempts, so a scripted reply means exactly one call and a failure
   surfaces instead of being slept over.
-- `:271` — `ToolProvider` — emits native tool calls under a chosen
+- `:272` — `ToolProvider` — emits native tool calls under a chosen
   `ToolDialect`, which is how the OpenAI and Anthropic wire shapes are exercised
   without a network.
-- `:365` — `RecordingChannel` — what was delivered, as against what the
+- `:366` — `RecordingChannel` — what was delivered, as against what the
   transcript holds. The two differ, and the difference is a tested behaviour.
-- `:421` — `TempDir` — `env::temp_dir()/kerness-test-{pid}-{counter}`, removed on
+- `:422` — `TempDir` — `env::temp_dir()/kerness-test-{pid}-{counter}`, removed on
   `Drop`.
-- `:499` — `refusal<T>(Result<T>) -> String` — `Session` does not implement
+- `:500` — `refusal<T>(Result<T>) -> String` — `Session` does not implement
   `Debug`, so `expect_err` is unusable; this is how a test reads a rejection.
-- `:510` — `config(gameplan, topic, provider)` — a `SessionConfig` with
+- `:526` — `config(gameplan, topic, provider)` — a `SessionConfig` with
   `turn_delay: Duration::ZERO`, because the default one-second pause between
   turns is for humans reading a console.
 
@@ -78,9 +89,9 @@ The eight integration files:
 | File | n | What it proves |
 | --- | --- | --- |
 | `session_run.rs` | 21 | A run end to end: turns, `phase_reached`, `end_reason`, parsed result fields, transcript against channel, per-agent providers, `@MEMORY:` stripped from what is delivered; session defaults filling an agent's unset options, and an agent with its own provider and no model named as an error; a role seating an agent by declaration and never by prose, and a missing role file refused at the `add_agent` that named it |
-| `harness_contract.rs` | 13 | Participant bounds collected into one error; `tools:` naming nothing registered; `Skill` refused as a tool name; `skills:` unioning; phase rounds clamped; every built-in gameplan declaring `terminate_on` |
-| `tools_e2e.rs` | 13 | The tool loop inside a real turn, in all three dialects; unknown tool, schema violation and failing handler each answered as text rather than raised; `MAX_INVALID_CALLS`; `max_tool_iterations`; `tool_results_in_history` both ways |
-| `access_e2e.rs` | 14 | Default-deny; each allow rule; `set_exec` rebuilding the manager; reads outside `allowed_dirs`; `..` denied after resolution; symlink escape; a root confining a read, a write and a command's working directory; an agent root narrowing the session's, and a wider one refused by name |
+| `harness_contract.rs` | 16 | Participant bounds collected into one error; `tools:` and `context:` each naming nothing registered, and each narrowing what was; a context source that fails stopping the run before any provider call; `Skill` refused as a tool name; `skills:` unioning; phase rounds clamped; every built-in gameplan declaring `terminate_on` |
+| `tools_e2e.rs` | 17 | The tool loop inside a real turn, in all three dialects; unknown tool, schema violation and failing handler each answered as text rather than raised; `MAX_INVALID_CALLS`; `max_tool_iterations`; `tool_results_in_history` both ways; an agent's own `tools` narrowing what it is offered, an empty list leaving it none, a tool it gave up refused at dispatch too, and one the session withheld refused before the run |
+| `access_e2e.rs` | 15 | Default-deny; each allow rule; an allowed command still held to the hosts it names; `set_exec` rebuilding the manager; reads outside `allowed_dirs`; `..` denied after resolution; symlink escape; a root confining a read, a write and a command's working directory; an agent root narrowing the session's, and a wider one refused by name |
 | `skills_e2e.rs` | 13 | Only name and description reach the prompt; the body arrives for one turn; a repeat load says so; `allowed-tools` narrowing and unioning; `requires-tools` adding back past a gameplan's own list, and refused before the run when nobody registered it |
 | `resume.rs` | 9 | A snapshot every turn; a second `run()` continuing; identity mismatch naming the field; bad JSON, wrong version and missing file each handled |
 | `compaction_e2e.rs` | 8 | A small ceiling compacting, the anchor turn kept, the count recorded, and history untouched when the summarizer returns nothing |
@@ -111,10 +122,10 @@ The eight integration files:
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-cargo test --workspace -q                             # pass = 342 unit + 101 integration, 0 failed
+cargo test --workspace -q                             # pass = 369 unit + 109 integration, 0 failed
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 443 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 477 passed
 ```
 
 The wheel is built from `bindings/python/`, where `pyproject.toml` lives:

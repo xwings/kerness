@@ -213,7 +213,7 @@ fn a_ceiling_the_prompt_alone_exceeds_is_refused_with_the_numbers() {
         .expect("the roster has no orchestrator yet");
 
     let message = refusal(session.run());
-    assert!(message.contains("max_context_tokens=1"), "{message}");
+    assert!(message.contains("context ceiling of 1"), "{message}");
     assert!(
         message.contains("Compaction shrinks the conversation"),
         "{message}"

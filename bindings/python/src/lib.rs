@@ -72,6 +72,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<types::PyLoopSpec>()?;
     module.add_class::<types::PyResultField>()?;
     module.add_class::<types::PyHarnessSpec>()?;
+    module.add_class::<types::PyPermitted>()?;
     module.add_class::<types::PyGameplanConfig>()?;
     module.add_class::<provider::PyProviderCore>()?;
     module.add_class::<access::PyAccessRequest>()?;

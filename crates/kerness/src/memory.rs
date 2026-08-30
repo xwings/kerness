@@ -8,11 +8,45 @@
 //! The content is cached in memory and written through on every mutation, so a
 //! reader never pays for a re-read and a crash mid-run still leaves the file
 //! holding everything that was committed before it.
+//!
+//! Two things follow from the file being shared, and both live here rather
+//! than at the call sites that discovered them:
+//!
+//! - What one agent writes, every other agent reads *inside its system
+//!   prompt*. That makes the file a channel between agents, so text arriving
+//!   from a model is filtered on the way in — see [`MemoryFilter`] — and framed
+//!   as quoted material on the way out, in [`crate::prompting::memory_block`].
+//! - A file outlives the run that wrote it. A session resumed a week later
+//!   reads week-old notes with nothing to say they are old, so [`Memory::age`]
+//!   reports the file's age from its mtime and the prompt carries the caveat.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::error::{Error, Result};
+
+/// Seconds in a day, for [`Memory::age`].
+const SECONDS_PER_DAY: u64 = 86_400;
+
+/// A filter over text an *agent* writes to memory.
+///
+/// Installed with [`SessionConfig::memory_filter`](crate::session::SessionConfig::memory_filter)
+/// and applied at the two points model output reaches the file: the
+/// `write_memory` tool and the `@MEMORY:` marker pass. A caller writing through
+/// [`Memory`] directly is not filtered, because the caller is not the untrusted
+/// party.
+///
+/// The framework ships no implementation. What counts as a secret, and what a
+/// session is willing to persist, are the caller's to define — a redactor
+/// guessing at it here would be wrong in both directions, and wrong silently.
+pub trait MemoryFilter: Send + Sync {
+    /// The text to store, or `None` to drop the note entirely.
+    ///
+    /// *actor* is the agent that wrote it, so a filter can hold one agent to a
+    /// stricter rule than another.
+    fn filter(&self, note: &str, actor: &str) -> Option<String>;
+}
 
 /// A memory file and its cached contents.
 #[derive(Clone, Debug)]
@@ -39,6 +73,24 @@ impl Memory {
     /// The configured path to the memory file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whole days since the file was last written, or `None` when there is no
+    /// file to date.
+    ///
+    /// Read from the filesystem rather than from the content, because the
+    /// module imposes no format on the content and a timestamp parsed out of
+    /// prose would be a format. A clock that has gone backwards since the write
+    /// reads as `0` rather than as an error: staleness is advisory, and no
+    /// caveat is the right answer when the age is not credible.
+    pub fn age(&self) -> Option<u64> {
+        let modified = fs::metadata(&self.path)
+            .and_then(|data| data.modified())
+            .ok()?;
+        let elapsed = SystemTime::now()
+            .duration_since(modified)
+            .map_or(0, |since| since.as_secs());
+        Some(elapsed / SECONDS_PER_DAY)
     }
 
     /// Read the file into the cache; an absent file reads as empty.
@@ -161,6 +213,17 @@ mod tests {
         memory.write("notes").expect("write");
 
         assert_eq!(fs::read_to_string(&path).expect("read back"), "notes");
+    }
+
+    #[test]
+    fn a_file_written_now_is_zero_days_old_and_an_absent_one_has_no_age() {
+        let dir = TempDir::new("age");
+        let path = dir.join("memory.md");
+        let mut memory = Memory::new(&path);
+
+        assert_eq!(memory.age(), None, "there is no file to date yet");
+        memory.append_entry("just written").expect("append");
+        assert_eq!(memory.age(), Some(0));
     }
 
     #[test]

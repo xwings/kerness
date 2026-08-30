@@ -14,12 +14,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kerness::context::ContextSource;
 use kerness::exec::DEFAULT_TIMEOUT;
+use kerness::memory::MemoryFilter;
 use kerness::provider::ReasoningEffort;
 use kerness::pyfmt::repr_str;
 use kerness::role::Position;
 use kerness::session::{Session, SessionConfig, SessionResult, DEFAULT_MAX_CONTEXT_TOKENS};
 use kerness::tooling::{Arguments, ToolHandler};
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -165,6 +168,81 @@ impl ToolHandler for PyHandler {
     }
 }
 
+/// A Python callable behind the `MemoryFilter` trait.
+///
+/// Called with the note and the agent that wrote it, and expected to return the
+/// text to store or `None` to drop the note.
+struct PyFilter {
+    callable: Py<PyAny>,
+}
+
+impl MemoryFilter for PyFilter {
+    /// A filter that raises drops the note and says so.
+    ///
+    /// The trait has no error path, and it is a gate: the safe reading of a
+    /// filter that could not decide is that the note does not go in the file.
+    /// Silence would make that indistinguishable from a filter that returned
+    /// `None` on purpose, so the failure is logged.
+    fn filter(&self, note: &str, actor: &str) -> Option<String> {
+        Python::with_gil(|py| match self.callable.bind(py).call1((note, actor)) {
+            Ok(value) if value.is_none() => None,
+            Ok(value) => Some(value.str().ok()?.to_string_lossy().into_owned()),
+            Err(error) => {
+                kerness::logging::warning(&format!(
+                    "memory_filter raised on a note from {actor}; the note was \
+                     dropped: {error}"
+                ));
+                None
+            }
+        })
+    }
+}
+
+/// Wrap a caller's filter, treating `None` as "store notes as written".
+///
+/// A filter that is not callable is refused here rather than at the first note
+/// an agent writes, mid-run and with the session's work already spent.
+fn bind_memory_filter(filter: Option<Py<PyAny>>) -> PyResult<Option<Arc<dyn MemoryFilter>>> {
+    let Some(callable) = filter else {
+        return Ok(None);
+    };
+    let verdict = Python::with_gil(|py| -> PyResult<bool> {
+        let bound = callable.bind(py);
+        if bound.is_none() {
+            return Ok(false);
+        }
+        if bound.is_callable() {
+            return Ok(true);
+        }
+        Err(PyTypeError::new_err(format!(
+            "memory_filter must be callable as filter(note, actor) and return \
+             the text to store or None; got {}.",
+            bound.get_type().name()?
+        )))
+    })?;
+    Ok(verdict.then(|| Arc::new(PyFilter { callable }) as Arc<dyn MemoryFilter>))
+}
+
+/// A Python callable behind the `ContextSource` trait.
+///
+/// Called with the agent's name and expected to return text, so a caller writes
+/// `lambda agent: ...` where the trait asks for an implementation — the same
+/// bargain `add_tool` makes with a handler.
+struct PySource {
+    callable: Py<PyAny>,
+}
+
+impl ContextSource for PySource {
+    fn render(&self, agent: &str) -> kerness::Result<String> {
+        use crate::errors::Catch;
+        Python::with_gil(|py| {
+            let value = self.callable.bind(py).call1((agent,))?;
+            Ok(value.str()?.to_string_lossy().into_owned())
+        })
+        .catch()
+    }
+}
+
 /// Orchestrates a multi-agent collaboration session.
 #[pyclass(name = "Session", module = "kerness._core")]
 pub struct PySession {
@@ -188,6 +266,7 @@ impl PySession {
         system_prompt: Option<String>,
         provider: Option<Bound<'_, PyAny>>,
         skills: Option<Vec<String>>,
+        tools: Option<Vec<String>>,
         memory: Option<String>,
         workspace: Option<String>,
     ) -> PyResult<kerness::Agent> {
@@ -208,6 +287,7 @@ impl PySession {
                 None => None,
             },
             skills,
+            tools,
             memory,
             workspace,
         })
@@ -239,6 +319,7 @@ impl PySession {
         system_prompt=None,
         orchestrator_retries=None,
         tool_results_in_history=false,
+        memory_filter=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -263,6 +344,7 @@ impl PySession {
         system_prompt: Option<String>,
         orchestrator_retries: Option<i64>,
         tool_results_in_history: bool,
+        memory_filter: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let bound_channel = match channel {
             Some(object) => bind_channel(&object)?,
@@ -296,6 +378,7 @@ impl PySession {
             system_prompt,
             orchestrator_retries,
             tool_results_in_history,
+            memory_filter: bind_memory_filter(memory_filter)?,
         };
         Ok(PySession {
             inner: Session::new(config).raise()?,
@@ -361,6 +444,7 @@ impl PySession {
         system_prompt=None,
         provider=None,
         skills=None,
+        tools=None,
         memory=None,
         workspace=None,
     ))]
@@ -376,6 +460,7 @@ impl PySession {
         system_prompt: Option<String>,
         provider: Option<Bound<'_, PyAny>>,
         skills: Option<Vec<String>>,
+        tools: Option<Vec<String>>,
         memory: Option<String>,
         workspace: Option<String>,
     ) -> PyResult<PyRefMut<'py, Self>> {
@@ -389,6 +474,7 @@ impl PySession {
             system_prompt,
             provider,
             skills,
+            tools,
             memory,
             workspace,
         )?;
@@ -418,6 +504,21 @@ impl PySession {
                 parameters,
                 Arc::new(PyHandler { callable: handler }),
             )
+            .raise()?;
+        Ok(slf)
+    }
+
+    /// Register standing background text for agents to read.
+    ///
+    /// *source* is called with one argument, the agent's name, once per agent
+    /// at the top of :meth:`run`.
+    fn add_context<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        name: &str,
+        source: Py<PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner
+            .add_context(name, Arc::new(PySource { callable: source }))
             .raise()?;
         Ok(slf)
     }

@@ -23,7 +23,7 @@ deliberately Python and the bundled assets.
 | `bindings/python/src/lib.rs` | the module, `bootstrap`, and the class registry |
 | `bindings/python/src/convert.rs` | `serde_json::Value` ↔ Python objects |
 | `bindings/python/src/errors.rs` | the exception map, both directions |
-| `bindings/python/src/types.rs` | 20 pyclasses: tools, messages, agents, roles, harness specs |
+| `bindings/python/src/types.rs` | 21 pyclasses: tools, messages, agents, roles, harness specs |
 | `bindings/python/src/funcs.rs` | free functions and the framework constants |
 | `bindings/python/src/runtime.rs` | `Conversation`, `ToolDispatcher`, `PromptAssembler`, `AgentRunner`, `OrchestratorLoop` |
 | `bindings/python/src/{provider,session,access,skill,channel}.rs` | one boundary concern each |
@@ -39,17 +39,18 @@ deliberately Python and the bundled assets.
 - `bindings/python/src/lib.rs:48` — `_core(module)` — the `#[pymodule]`; the
   explicit `add_class` list is the extension's whole surface.
 - `bindings/python/src/convert.rs:59` — `value_from_py(object)` — Python to
-  `Value`; `value_to_py` at `:13` is the inverse. `serde_json` is built with
+  `Value`; `value_to_py` at `:15` is the inverse. `serde_json` is built with
   `preserve_order`, so a dict's key order survives a round trip.
 - `bindings/python/src/errors.rs:146` — `Raise` / `:157` `Catch` — the two
   extension traits that turn `Result<T>` into `PyResult<T>` and back at every
   call site, so no boundary function hand-rolls the mapping.
-- `bindings/python/src/types.rs:166` — `PyToolHandler` — a Rust closure seen
+- `bindings/python/src/types.rs:165` — `PyToolHandler` — a Rust closure seen
   from Python as an ordinary callable, so `spec.handler(...)` works for the
   built-in tools.
-- `bindings/python/src/funcs.rs:45` onward — the free functions, and the
-  constant block in `register()` that re-exports every framework constant.
-- `bindings/python/src/funcs.rs:638` — `__version__` — `env!("CARGO_PKG_VERSION")`
+- `bindings/python/src/funcs.rs:46` onward — the free functions, and the
+  constant block in `register()` at `:674` that re-exports every framework
+  constant.
+- `bindings/python/src/funcs.rs:679` — `__version__` — `env!("CARGO_PKG_VERSION")`
   at the top of that block. `kerness/__init__.py:14` re-exports it, so the
   number a caller reads is the one the binary was compiled at rather than a
   literal that can drift from it.
@@ -68,11 +69,33 @@ does.
 **Own the pieces, build the borrowing value transiently.** `PromptAssembler<'a>`
 and `AgentRunner<'a>` borrow their inputs, which no `#[pyclass]` can express.
 The Python-facing class stores the pieces and constructs the Rust value inside
-each call — `bindings/python/src/runtime.rs:210` and `:370`.
+each call — `bindings/python/src/runtime.rs:266` and `:474`.
 
 **Park the exception.** A framework callback type cannot carry a `PyErr`, so a
 raising Python callable's exception is stashed and re-raised at the pyclass
 method boundary. See [channel.md](channel.md) for the full account.
+
+### Four ways in, and one that fails closed
+
+Python code reaches the framework as four traits, and each is bound at a
+different moment. `Provider` and `Channel` are subclassed, so the binding takes
+the instance. A tool handler is any callable and is bound by
+`Session.add_tool`. A context source is a callable too, bound by `add_context`
+(`bindings/python/src/session.rs:515`), called once per agent at the top of
+`run()` rather than per turn. And a memory filter is bound by
+`bind_memory_filter` (`:205`), which refuses a non-callable at construction
+rather than at the first note an agent writes.
+
+`PyFilter` (`:175`) is the one that fails closed rather than parking. A filter
+that raises drops the note and logs a warning: the filter is a trust boundary
+([memory.md](memory.md)), and a boundary that lets a note through because the
+check crashed is not one. The parked-exception pattern would surface the error
+to the caller, which is the right answer for a channel and the wrong one here —
+by the time `run()` returned, the note would already be in the file.
+
+An agent's `tools` (`bindings/python/src/types.rs:851`) and the access policy's
+`allowed_hosts` (`bindings/python/src/access.rs:129`) are the mirror direction:
+plain data, extracted at the boundary, validated by the crate.
 
 ## Interactions
 
@@ -86,7 +109,7 @@ method boundary. See [channel.md](channel.md) for the full account.
 
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 443 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 477 passed
 cd bindings/python && ../../.venv/bin/maturin develop # pass = "Installed kerness-0.1.0"
 ```
 

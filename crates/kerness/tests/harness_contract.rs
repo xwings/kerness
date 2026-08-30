@@ -112,6 +112,35 @@ loop:
 # Phaseless
 "#;
 
+/// Two context sources are registered; this one permits a single source by name.
+const ONE_CONTEXT: &str = r#"---
+name: one-context
+agents:
+  orchestrator: true
+  participants: {min: 1}
+context: [repo_map]
+loop:
+  max_rounds: 1
+  terminate_on: [DONE]
+---
+
+# One context
+"#;
+
+/// Declares a context source the host program is not obliged to register.
+const NEEDS_CONTEXT: &str = r#"---
+name: needs-context
+agents:
+  orchestrator: true
+  participants: {min: 1}
+context: [deploy_state]
+loop:
+  terminate_on: [DONE]
+---
+
+# Needs context
+"#;
+
 const CLAIMS_SKILL: &str = r#"---
 name: claims-skill
 tools: [Skill]
@@ -278,6 +307,100 @@ fn a_gameplan_narrows_the_registered_tools() {
         !offered.contains(&"secret".to_string()),
         "a tool the gameplan excluded was still offered: {offered:?}"
     );
+}
+
+/// Context narrows exactly as tools do, and the refusal says what *is*
+/// registered so the fix is obvious.
+#[test]
+fn a_declared_context_source_that_is_not_registered_is_refused_with_the_list() {
+    let temp = TempDir::new("harness");
+    let path = temp.write("needs_context.md", NEEDS_CONTEXT);
+
+    let provider = ScriptedProvider::new().fallback(&["DONE"]).shared();
+    let mut session = session(&path.to_string_lossy(), 1, provider.clone());
+    session
+        .add_context("repo_map", Arc::new(|_: &str| Ok("src/lib.rs".to_string())))
+        .expect("a fresh name is accepted");
+
+    let message = session
+        .run()
+        .expect_err("the gameplan wants a source nobody supplied")
+        .to_string();
+    assert!(message.contains("requires context source(s) deploy_state"));
+    assert!(message.contains("session.add_context(...)"));
+    assert!(message.contains("Registered: repo_map"));
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "a configuration error cost a provider call"
+    );
+}
+
+/// The narrowing is real at runtime, not only at validation: a source the
+/// gameplan left out is never rendered, let alone put in a prompt. And what a
+/// permitted source returns reaches every agent, under its registered name.
+#[test]
+fn a_gameplan_narrows_the_registered_context_sources() {
+    let temp = TempDir::new("harness");
+    let path = temp.write("one_context.md", ONE_CONTEXT);
+
+    let provider = ScriptedProvider::new()
+        .on("orchestrator turn", &["@P0, go.", "DONE"])
+        .on("final summary", &["Done."])
+        .fallback(&["Read it."])
+        .shared();
+    let mut session = session(&path.to_string_lossy(), 1, provider.clone());
+    session
+        .add_context(
+            "repo_map",
+            // A source is called per agent, so it can answer per agent.
+            Arc::new(|agent: &str| Ok(format!("crates/ and bindings/, read by {agent}"))),
+        )
+        .expect("a fresh name is accepted");
+    session
+        .add_context(
+            "secret",
+            Arc::new(|_: &str| Ok("NOT_FOR_THIS_GAMEPLAN".to_string())),
+        )
+        .expect("a fresh name is accepted");
+
+    session.run().expect("a scripted run cannot fail");
+
+    let prompt = provider
+        .last_call_for("orchestrator turn")
+        .expect("the orchestrator took a turn")
+        .system();
+    assert!(prompt.contains("### repo_map"), "{prompt}");
+    assert!(prompt.contains("read by Mod"), "{prompt}");
+    assert!(
+        !prompt.contains("NOT_FOR_THIS_GAMEPLAN"),
+        "a source the gameplan excluded still reached the prompt:\n{prompt}"
+    );
+
+    let participant = provider
+        .last_call_for("turn from P0")
+        .expect("the participant took a turn")
+        .system();
+    assert!(participant.contains("read by P0"), "{participant}");
+}
+
+/// A source that fails does so before the first provider call, for the same
+/// reason a persona or a tool list does: a configuration error should cost
+/// nothing.
+#[test]
+fn a_context_source_that_fails_stops_the_run_before_any_provider_call() {
+    let provider = ScriptedProvider::new().fallback(&["DONE"]).shared();
+    let mut session = session("debate", 2, provider.clone());
+    session
+        .add_context(
+            "repo_map",
+            Arc::new(|_: &str| Err(kerness::Error::session("no such directory"))),
+        )
+        .expect("a fresh name is accepted");
+
+    let message = session.run().expect_err("the source failed").to_string();
+    assert!(message.contains("no such directory"), "{message}");
+    assert_eq!(provider.call_count(), 0);
 }
 
 /// Skills widen, because a skill is inert instruction text with no handler

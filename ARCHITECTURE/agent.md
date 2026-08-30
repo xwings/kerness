@@ -34,33 +34,36 @@ prompt, a different loop, and the authority to address participants by name. See
 ## Key Types and Entry Points
 
 - `crates/kerness/src/agent.rs:22` — `Agent` — name, model, reasoning effort,
-  provider, persona, role and position, system prompt, skills, the per-agent
-  memory path, and the per-agent workspace.
-- `crates/kerness/src/agent.rs:91` — `with_model(model)` / `:111`
+  provider, persona, role and position, system prompt, skills, tools, the
+  per-agent memory path, and the per-agent workspace.
+- `crates/kerness/src/agent.rs:61` — `skills` / `:72` `tools` — the two
+  tri-state lists: `None` takes what the session permits, a list selects out of
+  it, and `[]` opts out. Both narrow — see below.
+- `crates/kerness/src/agent.rs:103` — `with_model(model)` / `:123`
   `with_provider(provider, model)` — the two ways to answer for an agent; the
   second takes both because a model name and a backend are a pair.
-- `crates/kerness/src/agent.rs:102` — `with_role(role)` — stores the spec
+- `crates/kerness/src/agent.rs:114` — `with_role(role)` — stores the spec
   verbatim. It does *not* set `position`; only `Session::add_agent` reads one
   into the other, so an agent added nowhere is a participant.
-- `crates/kerness/src/agent.rs:118` — `model_name()` / `:124` `effort()` — what a
+- `crates/kerness/src/agent.rs:130` — `model_name()` / `:136` `effort()` — what a
   caller reads: the resolved value, or the default, never an `Option`.
-- `crates/kerness/src/agent.rs:262` — `inherit(defaults)` — fills every unset
+- `crates/kerness/src/agent.rs:274` — `inherit(defaults)` — fills every unset
   option from the session's, and refuses the two configurations that cannot be
   filled. Called by `Session::resolve_agents` at the top of `run()`.
-- `crates/kerness/src/agent.rs:301` — `AgentDefaults` — the session's answers,
+- `crates/kerness/src/agent.rs:313` — `AgentDefaults` — the session's answers,
   carried as one value so there is exactly one inheritance mechanism.
-- `crates/kerness/src/agent.rs:129` — `build_system_prompt(...)` — the base prompt
+- `crates/kerness/src/agent.rs:141` — `build_system_prompt(...)` — the base prompt
   plus persona, in the order a reader of the transcript would expect them.
-- `crates/kerness/src/agent.rs:145` — `decorate_system_prompt(...)` — layers the
-  optional parts on: skills index, memory block, tool prompt, reasoning note.
-  Split from `build_system_prompt` because the session decorates a prompt it did
-  not build, for an agent whose persona was already resolved.
-- `crates/kerness/src/agent.rs:206` — `build_messages(...)` — the system message
+- `crates/kerness/src/agent.rs:157` — `decorate_system_prompt(...)` — layers the
+  optional parts on: context blocks, skills index, memory block, tool prompt,
+  reasoning note. Split from `build_system_prompt` because the session decorates
+  a prompt it did not build, for an agent whose persona was already resolved.
+- `crates/kerness/src/agent.rs:218` — `build_messages(...)` — the system message
   followed by history; this is exactly what goes to the provider.
-- `crates/kerness/src/agent.rs:228` — `resolve_role()` — the base prompt: the body
+- `crates/kerness/src/agent.rs:240` — `resolve_role()` — the base prompt: the body
   of the role file, or the prose itself, or the built-in `participant` role when
   the agent named none.
-- `crates/kerness/src/agent.rs:238` — `is_orchestrator()` / `:242`
+- `crates/kerness/src/agent.rs:250` — `is_orchestrator()` / `:254`
   `is_participant()` — the position test the loop branches on, a field read.
 
 ### Provider and model inherit as a pair
@@ -93,9 +96,35 @@ provider call the agent makes — the follow-up after a tool result included.
 intersection rather than override, so it is settled against the access manager,
 which can refuse it — see [access.md](access.md).
 
-`Agent` implements `Debug` by hand (`agent.rs:313`) because the provider handle
+### Tools narrow, and what that buys
+
+`tools` is the third field that does not simply override the session's. A name
+the gameplan did not permit is refused when the session resolves its agents
+(`session.rs:1276`), before the first provider call and named with the agent, so
+an agent cannot hand itself a tool the harness withheld. The reasoning is
+[access.md](access.md)'s: a per-agent list under override semantics turns a
+config file into a way around the contract, and the same syntax would spell both
+the legitimate narrowing and the escalation.
+
+What narrowing buys is not only reach. Under
+[`ToolDialect::Text`](toolschema.md) every permitted schema is written out in
+the system prompt, so an agent that calls two tools out of thirty otherwise pays
+for thirty on every turn of the session. The narrowing binds the dispatcher as
+well as the prompt — a tool the agent gave up is neither advertised nor callable
+if the model asks anyway — and it is outranked only by a skill's
+`requires-tools:`, which is a skill that agent chose to load. See
+`Shared::active_tools` in [session.md](session.md) for the full order.
+
+`skills` is the mirror image and deliberately not symmetrical: skills union with
+the session's, because a skill is capability a session offers, while tools are
+capability a harness grants.
+
+`Agent` implements `Debug` by hand (`agent.rs:325`) because the provider handle
 is a trait object with no useful representation, and a derived `Debug` would
-print nothing legible in a test failure.
+print nothing legible in a test failure. It prints the identity and the
+inheritable options and omits the session wiring — skills, tools, memory,
+workspace — which are resolved elsewhere and would bury the fields a test
+failure is about.
 
 ## Interactions
 
@@ -126,11 +155,15 @@ cargo test -p kerness agent::                                     # pass = 0 fai
 - `:145` — `test_the_level_is_unset_until_named_and_round_trips_as_its_name` — and
   `:158` `test_an_unknown_level_is_rejected`: `reasoning_effort` crosses the
   boundary as a validated string, the way `position` does.
-- `bindings/python/tests/test_session.py` — `TestSessionDefaults`: a session
+- `bindings/python/tests/test_session.py:981` — `TestSessionDefaults`: a session
   model filling the agents that named none, an agent on a second provider
   refused for naming no model, and a model named nowhere naming both places to
   write one. The Rust counterparts are in
   `crates/kerness/tests/session_run.rs`.
+- `bindings/python/tests/test_session.py:703` — `TestPerAgentTools` — and
+  `crates/kerness/tests/tools_e2e.rs`: what `tools` narrows, and that it cannot
+  widen. Tested through a session because narrowing is resolved there, not on
+  the record.
 
 ## Open Gaps / Roadmap
 

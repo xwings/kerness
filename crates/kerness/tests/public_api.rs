@@ -12,18 +12,19 @@ mod common;
 
 use std::sync::Arc;
 
-use kerness::agent_runtime::MAX_INVALID_CALLS;
+use kerness::agent_runtime::{MAX_INVALID_CALLS, MAX_REPEATED_FAILURES};
 use kerness::compaction::{CHARS_PER_TOKEN, COMPACT_TO_FRACTION};
 use kerness::exec::DEFAULT_TIMEOUT;
 use kerness::gameplan::{list_builtin_gameplans, load_gameplan};
 use kerness::harness::RESERVED_TOOL_NAMES;
 use kerness::persona::{format_persona_for_prompt, list_builtin_personas, load_persona};
+use kerness::prompting::MEMORY_STALE_AFTER_DAYS;
 use kerness::provider::{
     CLAUDE_BASE_URL, DEFAULT_BACKOFF_SEC, DEFAULT_CLAUDE_MAX_TOKENS, DEFAULT_REQUEST_TIMEOUT_SEC,
     DEFAULT_RETRIES, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
 };
 use kerness::role::{list_builtin_roles, load_role, DEFAULT_ROLE_FILE};
-use kerness::session::DEFAULT_MAX_CONTEXT_TOKENS;
+use kerness::session::{DEFAULT_MAX_CONTEXT_TOKENS, OVERFLOW_RETRY_FRACTION};
 use kerness::sessionfile::SCHEMA_VERSION;
 use kerness::skill::loader::{list_builtin_skills, load_skill};
 use kerness::utils::DEFAULT_TERMINATORS;
@@ -43,7 +44,10 @@ fn the_documented_constants_hold_their_documented_values() {
     assert_eq!(DEFAULT_MAX_CONTEXT_TOKENS, 256_000);
     assert_eq!(CHARS_PER_TOKEN, 4);
     assert_eq!(COMPACT_TO_FRACTION, 0.5);
+    assert_eq!(OVERFLOW_RETRY_FRACTION, 0.5);
     assert_eq!(MAX_INVALID_CALLS, 3);
+    assert_eq!(MAX_REPEATED_FAILURES, 3);
+    assert_eq!(MEMORY_STALE_AFTER_DAYS, 1);
     assert_eq!(DEFAULT_ROLE_FILE, "participant.md");
     assert_eq!(DEFAULT_TERMINATORS, ["CONSENSUS_REACHED", "END_SESSION"]);
     assert_eq!(RESERVED_TOOL_NAMES, ["Skill"]);

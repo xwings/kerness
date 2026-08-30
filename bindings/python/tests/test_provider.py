@@ -748,6 +748,88 @@ class TestReasoningEffort:
         assert seen == ["no kwarg", "low"]
 
 
+class TestContextOverflowDetection:
+    """The phrases live in Rust; this is the Python surface reading that list.
+
+    Spelling them out here as well would be two lists that drift, and the drift
+    would show up as a session that stopped retrying the one error it can fix.
+    """
+
+    @pytest.mark.parametrize("body", [
+        '{"error":{"message":"This model\'s maximum context length is 8192 tokens"}}',
+        '{"error":{"code":"context_length_exceeded"}}',
+        "prompt is too long: 210000 tokens > 200000 maximum",
+        "input length exceeds the model's context window",
+    ])
+    def test_a_refusal_about_length_is_recognised(self, body):
+        assert ProviderHTTPError(400, "https://x.test", body).is_context_overflow
+
+    def test_a_refusal_about_anything_else_is_not(self):
+        assert not ProviderHTTPError(401, "https://x.test", "invalid api key").is_context_overflow
+        assert not ProviderHTTPError(400, "https://x.test", "bad request").is_context_overflow
+
+    def test_the_status_has_to_agree_with_the_body(self):
+        """A 500 whose body happens to mention context length is an outage, not
+        a request to shorten — retrying it smaller wastes a summary call."""
+        long_body = "maximum context length is 8192 tokens"
+        assert not ProviderHTTPError(500, "https://x.test", long_body).is_context_overflow
+
+
+class TestContextWindow:
+    """Nobody has said, until a caller says.
+
+    Kerness ships no table of published window sizes, so the default answer is
+    ``None`` — the session then compacts against its own ceiling alone.
+    """
+
+    def test_nobody_has_said_by_default(self):
+        assert OpenAIProvider(api_key="k").context_window("gpt-4o") is None
+        assert ClaudeProvider(api_key="k").context_window("claude") is None
+
+    @pytest.mark.parametrize(
+        ("cls", "kwargs"),
+        [
+            (OpenAIProvider, {"api_key": "k"}),
+            (OpenRouterProvider, {"api_key": "k"}),
+            (ClaudeProvider, {"api_key": "k"}),
+            (ClaudeOAuthProvider, {"oauth_token": "t"}),
+            (OpenAIOAuthProvider, {"oauth_token": "t"}),
+            (CustomProvider, {"url": "https://x.test/v1", "api_key": "k"}),
+        ],
+    )
+    def test_every_backend_reports_the_figure_it_was_built_with(self, cls, kwargs):
+        provider = cls(context_window=32_000, **kwargs)
+        assert provider.context_window("any-model") == 32_000
+
+    def test_a_subclass_answers_from_its_own_registry(self):
+        """The reason it takes a model at all: one provider, several models,
+        and the session compacts each agent against the right one."""
+
+        class Registry(Provider):
+            WINDOWS = {"small": 8_000, "large": 200_000}
+
+            def chat(self, model, messages):
+                return ProviderResponse(content="", model=model)
+
+            def context_window(self, model):
+                return self.WINDOWS.get(model)
+
+        registry = Registry()
+        assert registry.context_window("small") == 8_000
+        assert registry.context_window("large") == 200_000
+        assert registry.context_window("unheard-of") is None
+
+    def test_a_hand_written_provider_can_declare_one_without_overriding(self):
+        class Fixed(Provider):
+            def __init__(self):
+                super().__init__(context_window=16_000)
+
+            def chat(self, model, messages):
+                return ProviderResponse(content="", model=model)
+
+        assert Fixed().context_window("whatever") == 16_000
+
+
 class TestSharedDefaults:
     """The request defaults are declared once, in Rust, and named on both sides.
 

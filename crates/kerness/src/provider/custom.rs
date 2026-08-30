@@ -26,6 +26,12 @@ pub struct CustomConfig {
     pub retries: u32,
     pub backoff_sec: f64,
     pub interval_sec: Option<f64>,
+    /// How many tokens this model can hold, when the caller knows the figure.
+    ///
+    /// Answered by `Provider::context_window` and taken as the ceiling for the
+    /// conversation. Unset leaves the session's own `max_context_tokens` as the
+    /// only bound, which is what a caller who has not looked it up should get.
+    pub context_window: Option<usize>,
     pub temperature: f64,
     pub top_p: f64,
     /// Outranks `model_config["maxTokens"]` when set.
@@ -46,6 +52,7 @@ impl Default for CustomConfig {
             retries: DEFAULT_RETRIES,
             backoff_sec: DEFAULT_BACKOFF_SEC,
             interval_sec: None,
+            context_window: None,
             temperature: DEFAULT_TEMPERATURE,
             top_p: DEFAULT_TOP_P,
             max_tokens: None,
@@ -83,7 +90,8 @@ impl CustomProvider {
                 .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)))
         });
         CustomProvider {
-            base: ProviderBase::new(config.retries, config.backoff_sec, config.interval_sec),
+            base: ProviderBase::new(config.retries, config.backoff_sec, config.interval_sec)
+                .with_context_window(config.context_window),
             base_url: config.url.trim_end_matches('/').to_string(),
             api_key: config.api_key,
             model_config: config.model_config,

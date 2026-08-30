@@ -5,6 +5,7 @@ import pytest
 from kerness.exceptions import GameplanLoadError, SessionError
 from kerness.harness import (
     HarnessSpec,
+    Permitted,
     PhaseSpec,
     parse_harness,
     validate_harness,
@@ -175,14 +176,35 @@ class TestValidateHarness:
     def spec(self, **kw):
         return parse({"name": "t", **kw})
 
-    def test_passing_session_returns_allowed_tools(self):
-        tools = validate_harness(
-            self.spec(tools=["cmd"]),
+    def test_passing_session_returns_what_it_permits(self):
+        permitted = validate_harness(
+            self.spec(tools=["cmd"], context=["repo_map"]),
             participants=["A", "B"],
             orchestrator="M",
             registered_tools=["cmd", "read_file"],
+            registered_context=["repo_map", "open_bugs"],
         )
-        assert tools == ["cmd"]
+        assert permitted.tools == ("cmd",)
+        assert permitted.context == ("repo_map",)
+        assert permitted == Permitted(tools=["cmd"], context=["repo_map"])
+
+    def test_registered_context_is_optional_and_defaults_to_none_registered(self):
+        """A session that registers no sources is only in trouble if the
+        gameplan asked for one."""
+        assert validate_harness(
+            self.spec(),
+            participants=["A"],
+            orchestrator=None,
+            registered_tools=[],
+        ) == Permitted(tools=[], context=[])
+
+        with pytest.raises(SessionError, match="requires context source"):
+            validate_harness(
+                self.spec(context=["repo_map"]),
+                participants=["A"],
+                orchestrator=None,
+                registered_tools=[],
+            )
 
     def test_the_roster_must_fit_the_declared_bounds(self):
         with pytest.raises(SessionError, match="at least 3"):

@@ -29,8 +29,8 @@ take it over.
 | ---- | ---- |
 | `crates/kerness/src/role.rs` | the `Position` enum, loading, and path resolution |
 | `crates/kerness/assets/roles/*.md` | the two built-in roles |
-| `bindings/python/src/types.rs:1105` | `PyRoleConfig` |
-| `bindings/python/src/funcs.rs:339` | the three loader functions |
+| `bindings/python/src/types.rs:1127` | `PyRoleConfig` |
+| `bindings/python/src/funcs.rs:341` | the three loader functions |
 | `bindings/python/kerness/role_loader.py` | re-export shim |
 
 ## Key Types and Entry Points
@@ -59,7 +59,7 @@ take it over.
 
 ### Three-way resolution, and why prose cannot conduct
 
-`Session::add_agent` (`crates/kerness/src/session.rs:538`) reads the spec far
+`Session::add_agent` (`crates/kerness/src/session.rs:650`) reads the spec far
 enough to learn the position:
 
 1. it looks like a path — ends with `.md`, or holds a separator → that file, and
@@ -74,7 +74,7 @@ naming a role file whose frontmatter declares `position: orchestrator`.
 
 Cases 1 and 2 rewrite `agent.role` to the absolute path that was found, so a
 later `chdir` cannot make the file unfindable halfway through a run, and
-`Agent::resolve_role` (`crates/kerness/src/agent.rs:228`) stays a plain lookup
+`Agent::resolve_role` (`crates/kerness/src/agent.rs:240`) stays a plain lookup
 with no search path of its own.
 
 Resolution happens at *add* time, unlike every option in
@@ -88,10 +88,10 @@ the error names the agent that wrote it.
 - **`participant.md`** — its body is the base system prompt every participant
   gets. `SessionConfig.system_prompt` overrides it for everyone who named no
   role, and `Agent.system_prompt` overrides both
-  (`crates/kerness/src/session.rs:872`).
+  (`crates/kerness/src/session.rs:1053`).
 - **`orchestrator.md`** — the whole orchestrator prompt: the layout and every
   literal word. `build_orchestrator_prompt`
-  (`crates/kerness/src/session.rs:905`) supplies only what the harness contract
+  (`crates/kerness/src/session.rs:1086`) supplies only what the harness contract
   knows — the roster, the phase block, the end and flow rules — substituted by
   name through the same mechanism `decorate_system_prompt` already applies to
   `{topic}` and `{bot_name}`. The frontmatter is not shown to any model.

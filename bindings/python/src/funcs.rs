@@ -34,8 +34,9 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use crate::convert::{chat_to_py, map_from_py, map_to_py, value_from_py, value_to_py};
 use crate::errors::Raise;
 use crate::types::{
-    dialect_from_py, PyGameplanConfig, PyHarnessSpec, PyPersonaConfig, PyProviderResponse,
-    PyResultField, PyRoleConfig, PySkillConfig, PyToolCall, PyToolResult, PyToolSpec, PyTurn,
+    dialect_from_py, PyGameplanConfig, PyHarnessSpec, PyPermitted, PyPersonaConfig,
+    PyProviderResponse, PyResultField, PyRoleConfig, PySkillConfig, PyToolCall, PyToolResult,
+    PyToolSpec, PyTurn,
 };
 
 // ---------------------------------------------------------------------- utils
@@ -293,23 +294,27 @@ pub fn parse_harness(data: &Bound<'_, PyAny>, source: &str) -> PyResult<PyHarnes
     })
 }
 
-/// Check a configured session against its contract, returning the tool names it
-/// permits.
+/// Check a configured session against its contract, returning what it permits.
 #[pyfunction]
-#[pyo3(signature = (spec, *, participants, orchestrator, registered_tools))]
+#[pyo3(signature = (
+    spec, *, participants, orchestrator, registered_tools, registered_context=Vec::new()
+))]
 pub fn validate_harness(
     spec: PyRef<'_, PyHarnessSpec>,
     participants: Vec<String>,
     orchestrator: Option<String>,
     registered_tools: Vec<String>,
-) -> PyResult<Vec<String>> {
-    harness::validate_harness(
+    registered_context: Vec<String>,
+) -> PyResult<PyPermitted> {
+    let inner = harness::validate_harness(
         &spec.inner,
         &participants,
         orchestrator.as_deref(),
         &registered_tools,
+        &registered_context,
     )
-    .raise()
+    .raise()?;
+    Ok(PyPermitted { inner })
 }
 
 // ------------------------------------------------------------------- gameplan
@@ -454,14 +459,50 @@ pub fn apply_gate(
         .collect())
 }
 
+// --------------------------------------------------------------------- errors
+
+/// Whether an HTTP refusal is the provider saying the request was too long.
+///
+/// The phrase list lives in the crate and is read from here rather than
+/// restated, because a list spelled out in both languages drifts silently.
+/// `ProviderHTTPError.is_context_overflow` is the surface a caller uses.
+#[pyfunction]
+pub fn is_context_overflow(status_code: u16, body: String) -> bool {
+    kerness::Error::ProviderHttp {
+        status_code,
+        url: String::new(),
+        body,
+    }
+    .is_context_overflow()
+}
+
 // ------------------------------------------------------------------ prompting
 
 /// Render the memory section of a system prompt.
+///
+/// The file's age is read off *memory* alongside its content, so the staleness
+/// caveat is the file's own rather than something the caller has to compute.
 #[pyfunction]
 #[pyo3(signature = (memory, *, writable=false))]
 pub fn memory_block(memory: &Bound<'_, PyAny>, writable: bool) -> PyResult<String> {
     let content: String = memory.call_method0("read")?.extract()?;
-    Ok(prompting::memory_block(&content, writable))
+    let age_days: Option<u64> = memory.getattr("age")?.extract()?;
+    Ok(prompting::memory_block(&content, writable, age_days))
+}
+
+/// The staleness caveat for a memory file *days* old, or `""` when it is fresh.
+#[pyfunction]
+pub fn memory_freshness(days: u64) -> String {
+    prompting::memory_freshness(days)
+}
+
+/// Render the standing-context section of a system prompt.
+///
+/// *entries* are `(name, text)` pairs; each name becomes a subheading, and an
+/// entry whose text is blank is skipped.
+#[pyfunction]
+pub fn context_block(entries: Vec<(String, String)>) -> String {
+    prompting::context_block(&entries)
 }
 
 // ----------------------------------------------------------------- closing turn
@@ -672,9 +713,19 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("DEFAULT_ROLE_FILE", role::DEFAULT_ROLE_FILE)?;
     module.add("MEMORY_HEADER", prompting::MEMORY_HEADER)?;
     module.add("MEMORY_WRITE_HINT", prompting::MEMORY_WRITE_HINT)?;
+    module.add(
+        "MEMORY_STALE_AFTER_DAYS",
+        prompting::MEMORY_STALE_AFTER_DAYS,
+    )?;
+    module.add("CONTEXT_HEADER", prompting::CONTEXT_HEADER)?;
     module.add("FORCED_END_NOTE", orchestrator::FORCED_END_NOTE)?;
     module.add("FOLLOWUP_PROMPT", agent_runtime::FOLLOWUP_PROMPT)?;
     module.add("MAX_INVALID_CALLS", agent_runtime::MAX_INVALID_CALLS)?;
+    module.add(
+        "MAX_REPEATED_FAILURES",
+        agent_runtime::MAX_REPEATED_FAILURES,
+    )?;
+    module.add("OVERFLOW_RETRY_FRACTION", session::OVERFLOW_RETRY_FRACTION)?;
     module.add(
         "BUNDLE_DIRS",
         PyTuple::new(py, skill_loader::BUNDLE_DIRS.iter().copied())?,
@@ -712,6 +763,9 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         estimate_turns,
         compact,
         summary_request,
+        is_context_overflow,
+        memory_freshness,
+        context_block,
         parse_harness,
         validate_harness,
         load_gameplan,

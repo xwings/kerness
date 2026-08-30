@@ -466,3 +466,131 @@ fn an_agent_with_no_provider_anywhere_is_named() {
     let message = refusal(session.run());
     assert!(message.contains("provider"), "{message}");
 }
+
+/// The same session, with *tools* declared on the participant.
+fn narrowed_session(
+    temp: &TempDir,
+    speaker: Arc<dyn Provider>,
+    tools: Option<Vec<String>>,
+) -> Session {
+    let path = temp.write("tooled.md", TOOLED);
+    let mut session = Session::new(config(
+        &path.to_string_lossy(),
+        "What is it worth?",
+        routing(),
+    ))
+    .expect("the gameplan loads");
+    session
+        .add_agent(Agent {
+            provider: Some(speaker),
+            tools,
+            ..Agent::new("P0").with_model("gpt-4o")
+        })
+        .expect("add agent");
+    session
+        .add_agent(
+            Agent::new("Mod")
+                .with_model("gpt-4o")
+                .with_role("orchestrator"),
+        )
+        .expect("the roster has no orchestrator yet");
+    session
+        .add_tool(
+            "lookup",
+            "Look up a price.",
+            lookup_schema(),
+            Arc::new(lookup),
+        )
+        .expect("a fresh name is accepted");
+    session
+        .add_tool(
+            "boom",
+            "Always fails.",
+            json!({"type": "object"}),
+            Arc::new(boom),
+        )
+        .expect("a fresh name is accepted");
+    session
+}
+
+/// A participant that declares its own list is offered that and nothing else.
+///
+/// Which is what the narrowing is for: under [`ToolDialect::Text`] every offered
+/// schema is written into the system prompt, so an agent that names two tools
+/// stops paying for the rest of the catalogue on every turn of the session.
+#[test]
+fn an_agent_declaring_its_own_tools_is_offered_those_alone() {
+    let temp = TempDir::new("tools");
+    let speaker = ToolProvider::new(
+        ToolDialect::Openai,
+        vec![ProviderResponse::text("Nothing to look up.")],
+    )
+    .shared();
+    narrowed_session(&temp, speaker.clone(), Some(vec!["lookup".to_string()]))
+        .run()
+        .expect("a scripted run cannot fail");
+
+    let offered = &speaker.calls()[0].tools;
+    assert_eq!(offered, &vec!["lookup".to_string()], "{offered:?}");
+}
+
+/// An empty list is a real answer, exactly as it is for skills: this agent
+/// argues and calls nothing.
+#[test]
+fn an_empty_list_leaves_an_agent_with_no_tools_at_all() {
+    let temp = TempDir::new("tools");
+    let speaker = ToolProvider::new(
+        ToolDialect::Openai,
+        vec![ProviderResponse::text("Just talk.")],
+    )
+    .shared();
+    narrowed_session(&temp, speaker.clone(), Some(Vec::new()))
+        .run()
+        .expect("a scripted run cannot fail");
+
+    assert!(speaker.calls()[0].tools.is_empty());
+}
+
+/// The narrowing binds the dispatcher too. A model that asks for a tool its
+/// agent gave up is answered the way any unknown name is — the tool does not
+/// run.
+#[test]
+fn a_tool_the_agent_gave_up_is_not_callable_either() {
+    let temp = TempDir::new("tools");
+    let speaker = ToolProvider::new(
+        ToolDialect::Openai,
+        vec![
+            tool_call_reply("boom", json!({}), "c1"),
+            ProviderResponse::text("Fine, no."),
+        ],
+    )
+    .shared();
+    narrowed_session(&temp, speaker.clone(), Some(vec!["lookup".to_string()]))
+        .run()
+        .expect("a scripted run cannot fail");
+
+    let followup = seen(&speaker.calls()[1]);
+    assert!(followup.contains("Unknown tool: boom"), "{followup}");
+    assert!(
+        !followup.contains("the exchange is closed"),
+        "the handler ran anyway: {followup}"
+    );
+}
+
+/// Agents narrow. A name the session does not permit is refused before the
+/// first provider call, and the refusal names the agent whose list to fix.
+#[test]
+fn an_agent_cannot_grant_itself_a_tool_the_session_withheld() {
+    let temp = TempDir::new("tools");
+    let speaker =
+        ToolProvider::new(ToolDialect::Openai, vec![ProviderResponse::text("hi")]).shared();
+    let message =
+        refusal(narrowed_session(&temp, speaker.clone(), Some(vec!["teleport".to_string()])).run());
+
+    assert!(message.contains("P0"), "{message}");
+    assert!(message.contains("teleport"), "{message}");
+    assert!(
+        speaker.calls().is_empty(),
+        "a configuration error should cost nothing"
+    );
+}

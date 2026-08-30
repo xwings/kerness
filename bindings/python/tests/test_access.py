@@ -129,6 +129,31 @@ class TestStarIsATotalBypass:
             manager.check_command("rm")
 
 
+class TestHostChecks:
+    """The network dimension. The framework ships no tool that reaches the
+    network — a caller registering one, or activating the ``agent-browser``
+    skill, has already decided that much — so this narrows that decision rather
+    than making it."""
+
+    def test_a_named_host_passes_and_an_unnamed_one_does_not(self):
+        """The list is plain data the crate validates, so this is the one case
+        the binding needs: it crossed, and it is consulted. Pattern anchoring,
+        userinfo, case, and the empty list are decided in ``access.rs`` and
+        tested there."""
+        manager = denying(allowed_commands=["*"], allowed_hosts=["example.com"])
+        manager.check_command("curl https://example.com/page")
+
+        with pytest.raises(AccessDeniedError) as caught:
+            manager.check_command("curl https://evil.test/x")
+        assert "allowed_hosts" in str(caught.value)
+
+    def test_the_refusal_names_the_agent_that_asked(self):
+        manager = denying(allowed_hosts=["example.com"])
+        with pytest.raises(AccessDeniedError) as caught:
+            manager.check_host("https://evil.test/", "Alice")
+        assert "'Alice'" in str(caught.value)
+
+
 class TestPathChecks:
     def test_an_allowed_file_grants_that_file_and_no_sibling(self, tmp_path):
         allowed = tmp_path / "ok.txt"

@@ -140,6 +140,27 @@ fn each_command_allow_list_admits_its_own_shape() {
     }
 }
 
+/// `allowed_hosts` narrows a command the command allow-list already admitted,
+/// which is how a session that may run a browser is still confined to the sites
+/// it was given.
+#[test]
+fn an_allowed_command_is_still_held_to_the_hosts_it_names() {
+    let session = guarded(AccessPolicy {
+        allowed_commands: vec!["*".to_string()],
+        allowed_hosts: vec!["ok.test".to_string()],
+        ..AccessPolicy::new()
+    });
+
+    let output = session
+        .run_command("echo https://ok.test/page", None, None, "Alice")
+        .expect("a listed host");
+    assert_eq!(output.trim(), "https://ok.test/page");
+
+    let message = refusal(session.run_command("echo https://evil.test/", None, None, "Alice"));
+    assert!(message.contains("allowed_hosts"), "{message}");
+    assert!(message.contains("'evil.test'"), "{message}");
+}
+
 /// An allow-list is not a category. `allowed_commands` admits the string it was
 /// given and nothing adjacent to it.
 #[test]

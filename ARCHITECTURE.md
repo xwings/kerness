@@ -36,7 +36,7 @@ wrapper around the other's use case.
 | Python | **3.10+**, CPython, via the stable ABI (`abi3-py310`) |
 | Bindings | `pyo3` 0.23 with `extension-module` |
 | Build | `cargo` for the crate, `maturin` for the wheel |
-| Platform | Linux and macOS; developed on Linux x86-64. `ureq` + `rustls` reach further, but path confinement resolves every path from `/` — `crates/kerness/src/access.rs:473` — so the access boundary assumes POSIX paths |
+| Platform | Linux and macOS; developed on Linux x86-64. `ureq` + `rustls` reach further, but path confinement resolves every path from `/` — `crates/kerness/src/access.rs:580` — so the access boundary assumes POSIX paths |
 | Network | Outbound HTTPS only, to provider endpoints the caller names |
 | Runtime deps | None beyond the crate's Cargo dependencies; `pydantic` is optional and only for structured output |
 
@@ -59,10 +59,10 @@ root carries one manifest — `Cargo.toml`. A Python build starts from
 Cargo.toml                  workspace root, shared dependency versions
 crates/
   kerness/                  the framework — pure Rust, links no Python
-    src/                    29 top-level modules plus provider/ and skill/,
+    src/                    30 top-level modules plus provider/ and skill/,
                             documented by subsystem in the Index
     assets/                 built-in gameplans, roles, personas, skills
-    tests/                  101 integration tests over the crate's public surface
+    tests/                  109 integration tests over the crate's public surface
     examples/               8 harnesses driven from Rust alone
 bindings/
   python/                   everything the wheel is built from
@@ -136,13 +136,15 @@ directly.
 
 ### Inside `run()`
 
-`Session::run` (`crates/kerness/src/session.rs:646`) is the whole harness:
-it resolves the gameplan's harness spec against what was registered, builds the
-skill registry and access manager, seeds the `Conversation`, then either runs the
+`Session::run` (`crates/kerness/src/session.rs:788`) is the whole harness:
+it resolves the gameplan's harness spec against what was registered, fills every
+agent's unset option and narrows the tool and context lists each one may use,
+builds the skill registry and access manager, calls every permitted context
+source once per agent, seeds the `Conversation`, then either runs the
 round-robin participant loop or hands control to `OrchestratorLoop::run`
 (`crates/kerness/src/orchestrator.rs:462`) when the gameplan declares an
 orchestrator. Each agent turn goes through `AgentRunner::run`
-(`crates/kerness/src/agent_runtime.rs:110`), which is the provider-call /
+(`crates/kerness/src/agent_runtime.rs:129`), which is the provider-call /
 tool-call / feed-results cycle. A `SessionResult` comes back with the transcript,
 the phase reached, the end reason, and the parsed result fields.
 
@@ -154,10 +156,13 @@ Python package as well as the crate.
 | Constant | Value | Owner |
 | --- | --- | --- |
 | `SCHEMA_VERSION` | `1` | `crates/kerness/src/sessionfile.rs:33` |
-| `DEFAULT_MAX_CONTEXT_TOKENS` | `256_000` | `crates/kerness/src/session.rs:54` |
+| `DEFAULT_MAX_CONTEXT_TOKENS` | `256_000` | `crates/kerness/src/session.rs:56` |
 | `CHARS_PER_TOKEN` | `4` | `crates/kerness/src/compaction.rs:33` |
 | `COMPACT_TO_FRACTION` | `0.5` | `crates/kerness/src/compaction.rs:40` |
-| `MAX_INVALID_CALLS` | `3` | `crates/kerness/src/agent_runtime.rs:33` |
+| `OVERFLOW_RETRY_FRACTION` | `0.5` | `crates/kerness/src/session.rs:67` |
+| `MAX_INVALID_CALLS` | `3` | `crates/kerness/src/agent_runtime.rs:41` |
+| `MAX_REPEATED_FAILURES` | `3` | `crates/kerness/src/agent_runtime.rs:52` |
+| `MEMORY_STALE_AFTER_DAYS` | `1` | `crates/kerness/src/prompting.rs:50` |
 | `DEFAULT_ROLE_FILE` | `participant.md` | `crates/kerness/src/role.rs:66` |
 | `DEFAULT_TERMINATORS` | `CONSENSUS_REACHED`, `END_SESSION` | `crates/kerness/src/utils.rs:12` |
 | `RESERVED_TOOL_NAMES` | `["Skill"]` | `crates/kerness/src/harness.rs:25` |
@@ -199,11 +204,11 @@ its own status.
 
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
-cargo test --workspace -q                             # pass = 342 unit + 101 integration, 0 failed
+cargo test --workspace -q                             # pass = 369 unit + 109 integration, 0 failed
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key, no network
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 443 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 477 passed
 .venv/bin/python -m kerness.selfcheck                 # pass = "OK: all core checks passed", exit 0
 .venv/bin/ruff check bindings/python                  # pass = "All checks passed!"
 ```
@@ -653,6 +658,7 @@ reads exactly like a real one, which makes it worse than no review.
 - [bindings.md](ARCHITECTURE/bindings.md) — the Rust/Python boundary and the installed package.
 - [channel.md](ARCHITECTURE/channel.md) — where a session's messages are delivered.
 - [compaction.md](ARCHITECTURE/compaction.md) — the context ceiling and the summarize-the-prefix rewrite.
+- [context.md](ARCHITECTURE/context.md) — standing facts a source computes once per run.
 - [conversation.md](ARCHITECTURE/conversation.md) — turns, transcript, and what a provider actually sees.
 - [errors.md](ARCHITECTURE/errors.md) — the error enum and its Python exception hierarchy.
 - [gameplan.md](ARCHITECTURE/gameplan.md) — loading a Markdown gameplan and resolving built-in assets.

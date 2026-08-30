@@ -18,8 +18,8 @@ use std::sync::Arc;
 use kerness::error::{Error, Result};
 use kerness::http::{self, Headers, HttpTransport, UreqTransport};
 use kerness::provider::{
-    supplied_chat_dispatch, supplied_chat_with_retries, supplied_effective_dialect,
-    supplied_effective_effort, supplied_note_native_tools_rejected,
+    supplied_chat_dispatch, supplied_chat_with_retries, supplied_context_window,
+    supplied_effective_dialect, supplied_effective_effort, supplied_note_native_tools_rejected,
     supplied_note_reasoning_effort_rejected, ClaudeConfig, ClaudeCredential, ClaudeProvider,
     CustomConfig, CustomProvider, OpenAiConfig, OpenAiProvider, OpenRouterConfig,
     OpenRouterProvider, Provider, ProviderBase, ProviderResponse, ReasoningEffort, CLAUDE_BASE_URL,
@@ -120,14 +120,23 @@ impl PyProviderCore {
     /// A core with no backend, for a provider whose `chat` is written in
     /// Python.
     #[new]
-    #[pyo3(signature = (retries=DEFAULT_RETRIES, backoff_sec=DEFAULT_BACKOFF_SEC, interval_sec=None))]
-    fn new(retries: u32, backoff_sec: f64, interval_sec: Option<f64>) -> Self {
+    #[pyo3(signature = (
+        retries=DEFAULT_RETRIES,
+        backoff_sec=DEFAULT_BACKOFF_SEC,
+        interval_sec=None,
+        context_window=None,
+    ))]
+    fn new(
+        retries: u32,
+        backoff_sec: f64,
+        interval_sec: Option<f64>,
+        context_window: Option<usize>,
+    ) -> Self {
         PyProviderCore {
-            backing: Backing::Standalone(Arc::new(ProviderBase::new(
-                retries,
-                backoff_sec,
-                interval_sec,
-            ))),
+            backing: Backing::Standalone(Arc::new(
+                ProviderBase::new(retries, backoff_sec, interval_sec)
+                    .with_context_window(context_window),
+            )),
         }
     }
 
@@ -144,6 +153,7 @@ impl PyProviderCore {
         max_tokens=None,
         app_url=String::new(),
         app_name=String::new(),
+        context_window=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn openrouter(
@@ -158,6 +168,7 @@ impl PyProviderCore {
         max_tokens: Option<i64>,
         app_url: String,
         app_name: String,
+        context_window: Option<usize>,
     ) -> Self {
         PyProviderCore::backend(OpenRouterProvider::new(OpenRouterConfig {
             api_key,
@@ -171,6 +182,7 @@ impl PyProviderCore {
             max_tokens,
             app_url,
             app_name,
+            context_window,
         }))
     }
 
@@ -188,6 +200,7 @@ impl PyProviderCore {
         output_schema=None,
         strict_json_schema=true,
         output_schema_name=String::new(),
+        context_window=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn openai(
@@ -203,6 +216,7 @@ impl PyProviderCore {
         output_schema: Option<&Bound<'_, PyAny>>,
         strict_json_schema: bool,
         output_schema_name: String,
+        context_window: Option<usize>,
     ) -> PyResult<Self> {
         let output_schema = match output_schema.filter(|schema| !schema.is_none()) {
             Some(schema) => Some(value_from_py(schema)?),
@@ -222,6 +236,7 @@ impl PyProviderCore {
                 output_schema,
                 strict_json_schema,
                 output_schema_name,
+                context_window,
             })
             .raise()?,
         ))
@@ -240,6 +255,7 @@ impl PyProviderCore {
         temperature=DEFAULT_TEMPERATURE,
         max_tokens=DEFAULT_CLAUDE_MAX_TOKENS,
         oauth=false,
+        context_window=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn claude(
@@ -252,6 +268,7 @@ impl PyProviderCore {
         temperature: f64,
         max_tokens: i64,
         oauth: bool,
+        context_window: Option<usize>,
     ) -> Self {
         let credential = if oauth {
             ClaudeCredential::OAuth(api_key)
@@ -267,6 +284,7 @@ impl PyProviderCore {
             interval_sec,
             temperature,
             max_tokens,
+            context_window,
         }))
     }
 
@@ -284,6 +302,7 @@ impl PyProviderCore {
         max_tokens=None,
         extra_headers=None,
         extra_body=None,
+        context_window=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn custom(
@@ -299,6 +318,7 @@ impl PyProviderCore {
         max_tokens: Option<i64>,
         extra_headers: Option<&Bound<'_, PyAny>>,
         extra_body: Option<&Bound<'_, PyAny>>,
+        context_window: Option<usize>,
     ) -> PyResult<Self> {
         Ok(PyProviderCore::backend(CustomProvider::new(CustomConfig {
             url,
@@ -313,6 +333,7 @@ impl PyProviderCore {
             max_tokens,
             extra_headers: optional_headers(extra_headers)?,
             extra_body: optional_map(extra_body)?,
+            context_window,
         })))
     }
 
@@ -343,6 +364,15 @@ impl PyProviderCore {
         owner: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         dialect_to_py(py, supplied_effective_dialect(&self.view(owner)?))
+    }
+
+    /// The window the backend, or this core, was built with.
+    ///
+    /// *model* is carried so a subclass overriding `Provider.context_window`
+    /// can answer per model from a registry of its own; the supplied body
+    /// ignores it and reports the one figure it was given.
+    fn context_window(&self, owner: &Bound<'_, PyAny>, model: &str) -> PyResult<Option<usize>> {
+        Ok(supplied_context_window(&self.view(owner)?, model))
     }
 
     /// The effort *owner* should actually send, or `None` once latched off.
@@ -526,6 +556,20 @@ impl Provider for PyProvider {
                 .and_then(|value| dialect_from_py(&value))
         })
         .unwrap_or(ToolDialect::Text)
+    }
+
+    /// Routed back to Python so a subclass answering from its own model
+    /// registry is the one that answers. A subclass that says nothing usable
+    /// leaves the session on its own `max_context_tokens`.
+    fn context_window(&self, model: &str) -> Option<usize> {
+        Python::with_gil(|py| {
+            self.owner
+                .bind(py)
+                .call_method1("context_window", (model,))
+                .and_then(|value| value.extract::<Option<usize>>())
+                .ok()
+                .flatten()
+        })
     }
 
     fn note_native_tools_rejected(&self, error: &Error) -> bool {

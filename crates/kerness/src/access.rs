@@ -1,8 +1,9 @@
 //! Access control for tool execution and file system reads.
 //!
 //! This is the security boundary between model output and the host machine.
-//! Three command mechanisms and a path resolver whose whole job is to survive
-//! traversal live here, and nowhere else.
+//! Three command mechanisms, a path resolver whose whole job is to survive
+//! traversal, and a host list that narrows what an allowed command may reach,
+//! live here and nowhere else.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -133,6 +134,24 @@ pub struct AccessPolicy {
     /// [`AccessPolicy::allowed_files`].
     pub allowed_dirs: Vec<String>,
 
+    /// Hosts a command may name, as anchored globs over the hostname —
+    /// `"example.com"` exactly, `"*.example.com"` for its subdomains but not
+    /// itself, `"*"` for any.
+    ///
+    /// This *narrows*, and it is the one allowlist here that is empty-means-open
+    /// rather than empty-means-nothing. A command must already be permitted by
+    /// [`AccessPolicy::allowed_commands`] or an approver before this is
+    /// consulted at all, so an empty list leaves that decision exactly as it
+    /// was; a non-empty one takes URLs back off a command that was otherwise
+    /// allowed. Set it to confine a session that may run `agent-browser` or
+    /// `curl` to the sites it has business with.
+    ///
+    /// What is checked is the URLs written on the command line — see
+    /// [`AccessManager::check_command`]. A command that reaches the network
+    /// without naming one is not narrowed by this, and whether it runs at all
+    /// remains [`AccessPolicy::allowed_commands`]' decision.
+    pub allowed_hosts: Vec<String>,
+
     /// Whether activating a skill grants read access to the `scripts/` and
     /// `references/` directories it bundles. Activating a skill is a real
     /// privilege grant, so it is only ever extended to skills that ship inside
@@ -165,6 +184,7 @@ impl std::fmt::Debug for AccessPolicy {
             .field("allowed_command_patterns", &self.allowed_command_patterns)
             .field("allowed_files", &self.allowed_files)
             .field("allowed_dirs", &self.allowed_dirs)
+            .field("allowed_hosts", &self.allowed_hosts)
             .field("trust_skill_bundles", &self.trust_skill_bundles)
             .finish()
     }
@@ -182,6 +202,9 @@ pub struct AccessManager {
     allowed_command_regex: Vec<Regex>,
     allowed_files: Vec<PathBuf>,
     allowed_dirs: Vec<PathBuf>,
+    /// Lowercased, because a hostname is case-insensitive and the patterns are
+    /// matched as plain text.
+    allowed_hosts: Vec<String>,
 }
 
 impl Default for AccessManager {
@@ -204,6 +227,10 @@ impl AccessManager {
             allowed_command_regex: compile_patterns(&policy.allowed_command_patterns),
             allowed_files: resolve_paths(&policy.allowed_files),
             allowed_dirs: resolve_paths(&policy.allowed_dirs),
+            allowed_hosts: normalize_list(&policy.allowed_hosts)
+                .iter()
+                .map(|host| host.to_lowercase())
+                .collect(),
             policy,
         }
     }
@@ -248,10 +275,20 @@ impl AccessManager {
     }
 
     /// Validate a command execution request.
+    ///
+    /// Every URL written on the command line is held to
+    /// [`AccessPolicy::allowed_hosts`] first, and a refused host ends the check
+    /// there — the host list narrows, so it also narrows a command the
+    /// auto-approve prefixes would have waved through. This is what confines a
+    /// session running `agent-browser open <url>` to the sites it was given.
     pub fn check_command(&self, command: &str, actor: &str) -> Result<()> {
         let cmd = command.trim();
         if cmd.is_empty() {
             return Err(Error::AccessDenied("Empty command is not allowed.".into()));
+        }
+
+        for url in urls_in(cmd) {
+            self.check_host(url, actor)?;
         }
 
         if matches_prefix(cmd, &self.auto_prefixes)
@@ -262,6 +299,42 @@ impl AccessManager {
         }
 
         self.prompt_or_deny(&AccessRequest::new("command", "run", cmd, actor))
+    }
+
+    /// Validate a network destination against [`AccessPolicy::allowed_hosts`].
+    ///
+    /// *target* may be a URL or a bare hostname; the host is what is judged, so
+    /// the scheme, the userinfo, the port, and the path are all read off and
+    /// discarded. `https://good.example@evil.test/` is a request to `evil.test`,
+    /// which is the whole reason this does its own parsing rather than matching
+    /// the pattern against the URL.
+    ///
+    /// An empty host list allows everything: the framework ships no tool that
+    /// reaches the network, so a caller who registered one has already decided
+    /// that much, and this is here to narrow that decision rather than to
+    /// replace it.
+    ///
+    /// Refuses outright rather than prompting, as [`AccessManager::check_path`]
+    /// does. *actor* names the agent in the refusal.
+    pub fn check_host(&self, target: &str, actor: &str) -> Result<()> {
+        if self.allowed_hosts.is_empty() {
+            return Ok(());
+        }
+        let host = host_of(target).to_lowercase();
+        if matches_glob(&host, &self.allowed_hosts) {
+            return Ok(());
+        }
+        let who = if actor.is_empty() {
+            "this session".to_string()
+        } else {
+            pyfmt::repr_str(actor)
+        };
+        Err(Error::AccessDenied(format!(
+            "{target} names the host {}, which is not in allowed_hosts ({}). \
+             Name it there to let {who} reach it.",
+            pyfmt::repr_str(&host),
+            self.allowed_hosts.join(", ")
+        )))
     }
 
     /// Validate a file or directory access request.
@@ -395,6 +468,40 @@ fn glob_matches(text: &str, pattern: &str) -> bool {
         rest = &rest[at + segment.len()..];
     }
     true
+}
+
+/// Every `scheme://…` URL written on a command line.
+///
+/// The command is cut at the characters a shell word cannot carry through, and
+/// what is left holding a `://` is a URL. Cutting on `&` and `;` splits a query
+/// string as well as a command list, which costs nothing: the authority is over
+/// before either can appear, and a piece that ends up mangled is judged as the
+/// host it appears to name and refused, rather than skipped.
+///
+/// The scheme is not read. A host is narrowed the same way whether it is
+/// reached over `https`, `git`, or `ws`.
+fn urls_in(command: &str) -> impl Iterator<Item = &str> {
+    command
+        .split(|ch: char| ch.is_whitespace() || "\"'`<>|;&()".contains(ch))
+        .filter(|token| token.contains("://"))
+}
+
+/// The host named by *target*, which may be a URL or a bare hostname.
+fn host_of(target: &str) -> &str {
+    let authority = target.split_once("://").map_or(target, |(_, rest)| rest);
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or(authority);
+    // Userinfo runs to the *last* `@`, so `good.example@evil.test` is a request
+    // to evil.test and reading it any other way is the bug this guards against.
+    let host = authority.rsplit_once('@').map_or(authority, |(_, it)| it);
+    // A port is not part of the name being allowed. Splitting at the last colon
+    // leaves a bracketed IPv6 literal intact, since what follows its own colons
+    // is never all digits.
+    match host.rsplit_once(':') {
+        Some((before, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            before
+        }
+        _ => host,
+    }
 }
 
 /// A *search*, not a match: an unanchored pattern matches anywhere in the
@@ -643,6 +750,113 @@ mod tests {
         });
         assert!(manager.check_command("ls", "").is_ok());
         assert!(manager.check_command("rm", "").is_err());
+    }
+
+    /// A manager that allows every command, so only the host list can refuse.
+    fn hosts(allowed: &[&str]) -> AccessManager {
+        denying(|policy| {
+            policy.allowed_commands = vec!["*".into()];
+            policy.allowed_hosts = allowed.iter().map(|host| host.to_string()).collect();
+        })
+    }
+
+    #[test]
+    fn an_empty_host_list_leaves_a_permitted_command_alone() {
+        // Empty means *not narrowed*, unlike allowed_commands, where it means
+        // nothing at all is permitted.
+        let manager = denying(|policy| policy.allowed_commands = vec!["*".into()]);
+        assert!(manager
+            .check_command("agent-browser open https://anywhere.test/", "")
+            .is_ok());
+        assert!(manager.check_host("https://anywhere.test/", "").is_ok());
+    }
+
+    #[test]
+    fn a_host_list_narrows_a_command_that_was_otherwise_allowed() {
+        let manager = hosts(&["docs.example.com"]);
+        assert!(manager
+            .check_command("agent-browser open https://docs.example.com/guide", "")
+            .is_ok());
+
+        let error = manager
+            .check_command("agent-browser open https://evil.test/", "Alice")
+            .expect_err("the host is not listed");
+        let message = error.to_string();
+        assert!(message.contains("'evil.test'"), "{message}");
+        assert!(message.contains("allowed_hosts"), "{message}");
+        assert!(message.contains("docs.example.com"), "{message}");
+        assert!(message.contains("'Alice'"), "{message}");
+    }
+
+    #[test]
+    fn a_host_list_narrows_an_auto_approved_prefix_too() {
+        // A narrowing that any of the three command mechanisms could step over
+        // would not be one, so the hosts are checked before all of them.
+        let manager = denying(|policy| {
+            policy.auto_approve_prefixes = vec!["curl ".into()];
+            policy.allowed_command_patterns = vec!["*".into()];
+            policy.allowed_hosts = vec!["ok.test".into()];
+        });
+        assert!(manager.check_command("curl https://ok.test/x", "").is_ok());
+        assert!(manager
+            .check_command("curl https://evil.test/x", "")
+            .is_err());
+    }
+
+    #[test]
+    fn a_command_naming_no_url_is_not_narrowed_by_the_host_list() {
+        // The host list reads URLs. A command that carries none is decided by
+        // the command allowlist alone, which is what the doc promises.
+        let manager = hosts(&["ok.test"]);
+        assert!(manager.check_command("ls -la", "").is_ok());
+    }
+
+    #[test]
+    fn a_host_pattern_is_an_anchored_glob_over_the_hostname() {
+        let manager = hosts(&["*.example.com"]);
+        assert!(manager.check_host("https://api.example.com/v1", "").is_ok());
+        // The bare domain is not a subdomain of itself, and a suffix that
+        // merely ends the same way is a different site.
+        assert!(manager.check_host("https://example.com/", "").is_err());
+        assert!(manager.check_host("https://evil-example.com/", "").is_err());
+        // `notexample.com` would match an unanchored search for `example.com`.
+        assert!(manager.check_host("https://a.notexample.com/", "").is_err());
+    }
+
+    #[test]
+    fn the_host_is_read_past_userinfo_a_port_and_a_path() {
+        let manager = hosts(&["ok.test"]);
+        assert!(manager.check_host("ok.test", "").is_ok());
+        assert!(manager
+            .check_host("https://ok.test:8443/a?b=c#d", "")
+            .is_ok());
+        assert!(manager.check_host("https://user:pw@ok.test/", "").is_ok());
+        // Hostnames are case-insensitive; the pattern list is lowercased too.
+        assert!(manager.check_host("https://OK.Test/", "").is_ok());
+
+        // The attack this parsing exists for: a listed host in the userinfo,
+        // pointing at somewhere else entirely.
+        let error = manager
+            .check_host("https://ok.test@evil.test/", "")
+            .expect_err("the authority names evil.test");
+        assert!(error.to_string().contains("'evil.test'"), "{error}");
+        assert!(manager
+            .check_host("https://ok.test.evil.test/", "")
+            .is_err());
+    }
+
+    #[test]
+    fn every_url_on_the_line_is_checked_not_only_the_first() {
+        let manager = hosts(&["ok.test"]);
+        assert!(manager
+            .check_command("curl https://ok.test/a && curl https://evil.test/b", "")
+            .is_err());
+        assert!(manager
+            .check_command("curl \"https://evil.test/a\" https://ok.test/b", "")
+            .is_err());
+        assert!(manager
+            .check_command("curl $(echo https://evil.test/a)", "")
+            .is_err());
     }
 
     #[test]

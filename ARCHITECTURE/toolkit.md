@@ -19,8 +19,8 @@ its result shaped (`ToolDispatcher`).
 | ---- | ---- |
 | `crates/kerness/src/tooling.rs` | `ToolSpec`, `ToolCall`, `ToolHandler`, parsing, prompt rendering |
 | `crates/kerness/src/toolkit.rs` | `ToolDispatcher`, `ToolResult`, `resolve` |
-| `bindings/python/src/types.rs:70,166,180,296` | `PyToolCall`, `PyToolHandler`, `PyToolSpec`, `PyToolResult` |
-| `bindings/python/src/runtime.rs:162` | `PyToolDispatcher` |
+| `bindings/python/src/types.rs:68,165,179,294` | `PyToolCall`, `PyToolHandler`, `PyToolSpec`, `PyToolResult` |
+| `bindings/python/src/runtime.rs:161` | `PyToolDispatcher` |
 | `bindings/python/kerness/{tooling,toolkit}.py` | re-export shims |
 
 ## Key Types and Entry Points
@@ -52,6 +52,31 @@ its result shaped (`ToolDispatcher`).
 `ToolSpec` implements `PartialEq` (`tooling.rs:87`) and `Debug` (`:97`) by hand,
 because the handler is a trait object: equality is by name and schema, and
 `Debug` prints the name rather than nothing.
+
+### The catalog is whole, and narrowing is the lever
+
+Every tool a turn is offered is described in full on that turn — as native
+schemas in the request body, or, under `ToolDialect::Text`, as
+`format_tools_prompt` output inside the system message. Nothing is disclosed
+lazily: there is no summary catalog the model expands, and no tool it has to ask
+about before it can call it.
+
+That is a cost, and it is paid per turn. A session with thirty registered tools
+writes thirty descriptions on every call an agent makes, whether it needs two of
+them or none. The framework's answer is to make the set smaller rather than the
+description shorter, and there are four places to do it, all of them
+subtractive: a gameplan's `tools:` ([harness.md](harness.md)), an agent's own
+`tools` ([agent.md](agent.md)), a skill's `allowed-tools:`
+([skills.md](skills.md)), and the access policy's `allowed_commands`
+([access.md](access.md)) for what `run_command` can reach. `resolve`
+(`toolkit.rs:108`) is the shared body for the first three; `Shared::active_tools`
+in [session.md](session.md) is the order they compose in.
+
+Narrowing beats lazy disclosure here because it binds the dispatcher as well as
+the prompt. A tool an agent was not offered is not callable if the model asks
+for it anyway, which a hidden-but-present tool would still be — and a model that
+cannot see a tool it must not use is also a model that cannot be argued into
+using it.
 
 ## Interactions
 
@@ -95,3 +120,10 @@ cargo test -p kerness toolkit                                       # pass = 0 f
   and the model has to parse it back.
 - No per-tool timeout; only `run_command` bounds its own execution
   ([access.md](access.md)).
+- The catalog does not scale past what narrowing can reach. Four subtractive
+  levers are enough for a session whose tools are registered by its host
+  program, because whoever registers them knows which agent needs which. A tool
+  source the host program did not enumerate — the MCP client on the root
+  roadmap — would put that knowledge outside the session, and a summary catalog
+  the model expands on demand is the shape that answers it. Building it before
+  there is such a source would be an abstraction with one caller.

@@ -132,6 +132,17 @@ class AccessPolicy:
     #: :attr:`allowed_files`.
     allowed_dirs: list[str | Path] = field(default_factory=list)
 
+    #: Hosts a command may name, as anchored globs over the hostname —
+    #: ``"example.com"`` exactly, ``"*.example.com"`` for its subdomains but not
+    #: itself, ``"*"`` for any. This *narrows*, and it is the one allow-list here
+    #: that is empty-means-open rather than empty-means-nothing: a command must
+    #: already be permitted by :attr:`allowed_commands` or an approver before
+    #: this is consulted, so an empty list changes nothing and a non-empty one
+    #: takes URLs back off a command that was otherwise allowed. What is checked
+    #: is the URLs written on the command line, which is what confines a session
+    #: running ``agent-browser open <url>`` to the sites it has business with.
+    allowed_hosts: list[str] = field(default_factory=list)
+
     #: Whether activating a skill grants read access to the ``scripts/`` and
     #: ``references/`` directories it bundles. Activating a skill is a real
     #: privilege grant, so it is only ever extended to skills that ship inside

@@ -150,6 +150,7 @@ pub struct ProviderBase {
     retries: u32,
     backoff_sec: f64,
     interval_sec: Option<f64>,
+    context_window: Option<usize>,
     native_tools_disabled: AtomicBool,
     reasoning_effort_disabled: AtomicBool,
 }
@@ -161,9 +162,21 @@ impl ProviderBase {
             retries,
             backoff_sec,
             interval_sec,
+            context_window: None,
             native_tools_disabled: AtomicBool::new(false),
             reasoning_effort_disabled: AtomicBool::new(false),
         }
+    }
+
+    /// Declare how many tokens this backend's model can hold.
+    ///
+    /// Answered by [`Provider::context_window`], and the reason the four
+    /// built-in backends can answer it at all. A builder rather than a
+    /// constructor argument so that the caller who does not know the figure —
+    /// which is most of them — writes nothing.
+    pub fn with_context_window(mut self, tokens: Option<usize>) -> Self {
+        self.context_window = tokens;
+        self
     }
 }
 
@@ -202,6 +215,21 @@ pub trait Provider: Send + Sync {
     /// The dialect this backend speaks natively.
     fn tool_dialect(&self) -> ToolDialect {
         ToolDialect::Text
+    }
+
+    /// How many tokens *model* can hold, or `None` when nobody has said.
+    ///
+    /// The session takes the smaller of this and its own `max_context_tokens`,
+    /// so a mixed-provider session compacts each agent against the window its
+    /// own model actually has instead of one figure for all of them.
+    ///
+    /// The framework ships no table of published window sizes. A table is wrong
+    /// the week a vendor changes one and wrong silently, and it would have to be
+    /// maintained for models the framework has never heard of. The built-in
+    /// backends answer from the figure their config was given; a caller with a
+    /// model registry of their own overrides this and answers from that.
+    fn context_window(&self, model: &str) -> Option<usize> {
+        supplied_context_window(self, model)
     }
 
     /// Whether [`Provider::chat`] can actually carry tool specs.
@@ -299,6 +327,16 @@ pub fn supplied_effective_dialect<P: Provider + ?Sized>(provider: &P) -> ToolDia
         return ToolDialect::Text;
     }
     declared
+}
+
+/// The body of [`Provider::context_window`].
+///
+/// *model* goes unread here: a [`ProviderBase`] holds one figure, and a backend
+/// that serves several models with different windows is a backend whose owner
+/// overrides the trait method.
+pub fn supplied_context_window<P: Provider + ?Sized>(provider: &P, model: &str) -> Option<usize> {
+    let _ = model;
+    provider.base().context_window
 }
 
 /// The body of [`Provider::effective_effort`].
