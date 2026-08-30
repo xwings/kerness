@@ -1,22 +1,19 @@
-# Builds the release artifacts and attaches them to a GitHub Release. It does
-# not publish, anywhere. Uploading is a decision with a one-way door on it, and
-# a workflow that could take it accidentally is worse than one that cannot.
+# Builds the release artifacts, attaches them to a draft GitHub Release, and
+# uploads the wheels and the sdist to PyPI.
 #
-# To start publishing, add to the end of this file:
+# Nothing authenticates with a stored token. `publish-pypi` requests a GitHub
+# OIDC identity token and maturin exchanges it for a short-lived PyPI one at
+# upload time, so PyPI must carry a Trusted Publisher for owner `xwings`,
+# repository `kerness`, workflow `release.yml`, environment `pypi`. The four
+# have to match exactly or the exchange is refused.
 #
-#   publish-pypi:
-#     needs: [verify-sdist]
-#     runs-on: ubuntu-latest
-#     environment: pypi
-#     permissions:
-#       id-token: write        # PyPI Trusted Publishing — no token in secrets
-#     steps:
-#       - uses: actions/download-artifact@v4
-#         with: {pattern: 'wheels-*', path: dist, merge-multiple: true}
-#       - uses: actions/download-artifact@v4
-#         with: {name: sdist, path: dist}
-#       - uses: PyO3/maturin-action@v1
-#         with: {command: upload, args: '--non-interactive dist/*'}
+# Uploading is a one-way door — a version can be yanked but never re-uploaded
+# under the same number — so the job is fenced three ways: only on a `v*` tag,
+# only once every wheel and the from-clean sdist install have gone green, and
+# only through the `pypi` environment, which is where an approval rule holds it
+# for a human.
+#
+# The crate is not published from here. To start, add to the end of this file:
 #
 #   publish-crate:
 #     needs: [verify-sdist]
@@ -137,3 +134,33 @@ jobs:
           files: dist/*
           draft: true
           generate_release_notes: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    # Every wheel, not just the sdist check: the job uploads whatever `wheels-*`
+    # artifacts exist when it starts, so waiting on only one of the two would
+    # race the matrix and ship a partial set of platforms.
+    needs: [wheels, verify-sdist]
+    # The workflow also answers workflow_dispatch, which would otherwise publish
+    # from any branch a manual run was started on.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # PyPI Trusted Publishing — no token in secrets
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --non-interactive dist/*

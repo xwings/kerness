@@ -47,7 +47,7 @@ the pure-Rust caller the crate exists for unrepresented.
 | `crates/kerness/examples/*.rs` | 8 examples, compiled by CI |
 | `bindings/python/examples/` | 7 Python examples, walked by `bindings/python/tests/test_examples.py` |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
-| `.github/workflows/release.yml` | wheels, sdist, and the clean-interpreter check |
+| `.github/workflows/release.yml` | wheels, sdist, the clean-interpreter check, and the PyPI upload it gates |
 
 No test dependency was added. `common/mod.rs` carries its own temp directory
 rather than pulling in `tempfile`, which keeps the "no runtime deps beyond the
@@ -115,7 +115,8 @@ The eight integration files:
   include cannot be masked by the working tree. It is also the only check on the
   `LICENSE` and `README.md` symlinks in `bindings/python/`: `license-files` and
   `readme` resolve against that directory, and if they resolve to nothing the
-  build still succeeds and simply ships less.
+  build still succeeds and simply ships less. `publish-pypi` needs it, so a
+  distribution that cannot install from clean is never uploaded.
 
 ## How to Test
 

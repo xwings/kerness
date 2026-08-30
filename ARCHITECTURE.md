@@ -79,7 +79,8 @@ bindings/
       gameplans/ roles/ personas/ skills/   the same assets, installed
     tests/                  26 pytest modules over the Python surface
     examples/               runnable harnesses, walked by test_examples.py above
-.github/workflows/          CI on every push; release builds wheels and an sdist
+.github/workflows/          CI on every push; release builds wheels and an sdist,
+                            then uploads them to PyPI from a `v*` tag
 assets/                     project marks: logo.svg, logo-mark.svg
 README.md                   the public introduction
 LICENSE                     MIT

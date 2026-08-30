@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Kerness — Kernel for Harness" width="560">
+  <img src="https://raw.githubusercontent.com/xwings/kerness/main/assets/logo.svg" alt="Kerness — Kernel for Harness" width="560">
 </p>
 
 <p align="center">
@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/xwings/kerness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xwings/kerness/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F59E0B"></a>
+  <a href="https://github.com/xwings/kerness/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F59E0B"></a>
   <img alt="Rust 1.88+" src="https://img.shields.io/badge/rust-1.88%2B-B7410E">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB">
 </p>
@@ -306,11 +306,11 @@ println!("{:?}", result.fields.get("findings"));   // the gameplan's declared fi
 println!("{} rounds, ended on {}", result.rounds_run, result.end_reason);
 ```
 
-Full file: [`crates/kerness/examples/debate.rs`](crates/kerness/examples/debate.rs) —
+Full file: [`crates/kerness/examples/debate.rs`](https://github.com/xwings/kerness/blob/main/crates/kerness/examples/debate.rs) —
 `cargo run -p kerness --example debate`.
 
 To watch a session run without an API key, use
-[`offline_debate`](crates/kerness/examples/offline_debate.rs), which drives the
+[`offline_debate`](https://github.com/xwings/kerness/blob/main/crates/kerness/examples/offline_debate.rs), which drives the
 `debate` gameplan against a scripted provider:
 
 ```sh
@@ -445,11 +445,11 @@ Python 3.10 and 3.13.
 
 ## Documentation
 
-[`ARCHITECTURE.md`](ARCHITECTURE.md) is the entry point: mission, workspace
+[`ARCHITECTURE.md`](https://github.com/xwings/kerness/blob/main/ARCHITECTURE.md) is the entry point: mission, workspace
 layout, boot flow, well-known constants, and an index of one document per
-subsystem under [`ARCHITECTURE/`](ARCHITECTURE/). Each carries live `file:line`
+subsystem under [`ARCHITECTURE/`](https://github.com/xwings/kerness/tree/main/ARCHITECTURE). Each carries live `file:line`
 references and the commands that prove it works.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/xwings/kerness/blob/main/LICENSE).
