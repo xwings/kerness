@@ -43,7 +43,7 @@ the pure-Rust caller the crate exists for unrepresented.
 | `crates/kerness/tests/common/mod.rs` | the doubles all eight files share |
 | `crates/kerness/tests/*.rs` | one file per behaviour cluster, 109 tests |
 | `bindings/python/tests/conftest.py` | the Python suite's equivalent doubles |
-| `bindings/python/tests/test_*.py` | 26 modules, 477 tests |
+| `bindings/python/tests/test_*.py` | 26 modules, 487 tests |
 | `crates/kerness/examples/*.rs` | 8 examples, compiled by CI |
 | `bindings/python/examples/` | 7 Python examples, walked by `bindings/python/tests/test_examples.py` |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
@@ -60,6 +60,19 @@ the library. `crates/kerness/src/testing.rs` is the library-side copy, behind
 that want a scratch directory share it rather than each writing one. Two copies
 is the floor the crate boundary sets; eleven was drift, and it showed as one
 module canonicalizing its path and another not.
+
+The four seams in the control center's table are process-wide slots, and the
+unit suite runs concurrently in one process — so a test that installs a double
+is sharing that slot with whatever else is running. Two answers, picked by what
+the test needs to read back. A test that only checks its double was reached can
+tolerate a neighbour writing through the same slot, and asserts with `contains`
+rather than equality — `crates/kerness/src/channel.rs:443`. A test that reads
+back the exact question *its own* double recorded cannot, because a neighbour
+installing over the slot mid-body takes that recording away; those installs take
+turns on a static mutex — `crates/kerness/src/access.rs:1111`. Neither is
+optional. Skipping the second is not a flaky test but a race, and it fails as an
+index out of bounds on an empty recording, which names the assertion rather than
+the seam.
 
 ## Key Types and Entry Points
 
@@ -123,10 +136,10 @@ The eight integration files:
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-cargo test --workspace -q                             # pass = 369 unit + 109 integration, 0 failed
+cargo test --workspace -q                             # pass = 380 unit + 109 integration, 0 failed
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 477 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 487 passed
 ```
 
 The wheel is built from `bindings/python/`, where `pyproject.toml` lives:

@@ -38,7 +38,7 @@ from kerness.exceptions import (
     SessionError,
 )
 from kerness.gameplan_loader import GameplanConfig, load_gameplan
-from kerness.memory import Memory
+from kerness.memory import FileMemory, Memory, MemoryStore, SessionMemory
 from kerness.persona_loader import (
     PersonaConfig,
     format_persona_for_prompt,
@@ -122,6 +122,9 @@ __all__ = [
     "ToolDialect",
     # Memory
     "Memory",
+    "MemoryStore",
+    "FileMemory",
+    "SessionMemory",
     # Exceptions
     "KernessError",
     "AccessDeniedError",

@@ -27,7 +27,7 @@ persona says can change where its agent sits.
 | ---- | ---- |
 | `crates/kerness/src/persona.rs` | loading, path resolution, and prompt rendering |
 | `crates/kerness/assets/personas/*.md` | the built-in personas |
-| `bindings/python/src/types.rs:1041` | `PyPersonaConfig` |
+| `bindings/python/src/types.rs:1065` | `PyPersonaConfig` |
 | `bindings/python/kerness/persona_loader.py` | re-export shim |
 
 ## Key Types and Entry Points

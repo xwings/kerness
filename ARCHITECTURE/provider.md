@@ -171,7 +171,7 @@ cargo test -p kerness provider                                       # pass = 0 
   with (`:800`), a subclass answering per model from its own registry (`:804`),
   and a hand-written provider declaring one through `super().__init__` without
   overriding anything (`:822`).
-- `crates/kerness/src/session.rs:3180` —
+- `crates/kerness/src/session.rs:3528` —
   `the_smaller_of_the_session_and_the_provider_window_is_the_ceiling` — what a
   declared window is actually for, asserted both ways round.
 

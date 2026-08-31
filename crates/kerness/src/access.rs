@@ -7,8 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use fancy_regex::Regex;
 
@@ -41,9 +42,9 @@ impl AccessRequest {
 
 /// Answers "may this request proceed?".
 ///
-/// The console prompt that ships with the Python bindings is not here:
-/// it reads stdin, which belongs to the binding layer. An approver backed by a
-/// GUI, a webhook, or a config service implements this trait directly.
+/// [`prompt_on_console`] is the one implementation that ships. An approver
+/// backed by a GUI, a webhook, or a config service implements this trait
+/// directly.
 pub trait ApprovePrompt: Send + Sync {
     fn approve(&self, request: &AccessRequest) -> bool;
 }
@@ -54,6 +55,123 @@ where
 {
     fn approve(&self, request: &AccessRequest) -> bool {
         self(request)
+    }
+}
+
+/// Where [`prompt_on_console`] reads its answer and shows its question.
+///
+/// A seam for the same reason [`crate::channel::ConsoleWriter`] is one. The
+/// default is this process's own stdin and stdout, which needs no wiring from
+/// Rust. A binding replaces it because Python's `sys.stdin` and `sys.stdout`
+/// are not file descriptors 0 and 1, and a prompt that reads the descriptor
+/// would ignore a caller who redirected the stream. What is asked, how it is
+/// worded, and what counts as a yes stay in [`prompt_on_console`].
+pub trait ConsolePrompt: Send + Sync {
+    /// Whether a prompt has any chance of being answered.
+    ///
+    /// Off a terminal there is no human to answer, and the alternative to
+    /// saying so is a deployed session blocking on a pipe that never closes.
+    fn is_interactive(&self) -> bool;
+
+    /// Whether the console renders ANSI colour.
+    ///
+    /// A separate question from [`Self::is_interactive`]: that one is about
+    /// input and this one about output, and a run with a terminal on one and a
+    /// file on the other is answered differently by each.
+    fn renders_colour(&self) -> bool;
+
+    /// Show *question*, with no newline after it, and read one line back.
+    ///
+    /// `None` at end of input, which is the same answer as a refusal: an
+    /// approver that could not be asked has not approved anything.
+    fn ask(&self, question: &str) -> Option<String>;
+}
+
+/// The default: this process's own stdin and stdout.
+struct StdConsolePrompt;
+
+impl ConsolePrompt for StdConsolePrompt {
+    fn is_interactive(&self) -> bool {
+        std::io::stdin().is_terminal()
+    }
+
+    fn renders_colour(&self) -> bool {
+        std::io::stdout().is_terminal()
+    }
+
+    fn ask(&self, question: &str) -> Option<String> {
+        let mut stdout = std::io::stdout();
+        write!(stdout, "{question}").ok()?;
+        stdout.flush().ok()?;
+        let mut answer = String::new();
+        match std::io::stdin().read_line(&mut answer) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(answer),
+        }
+    }
+}
+
+fn console_prompt_slot() -> &'static RwLock<Arc<dyn ConsolePrompt>> {
+    static SLOT: OnceLock<RwLock<Arc<dyn ConsolePrompt>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(Arc::new(StdConsolePrompt)))
+}
+
+/// Send every later [`prompt_on_console`] question to *console*.
+pub fn set_console_prompt(console: Arc<dyn ConsolePrompt>) {
+    *console_prompt_slot()
+        .write()
+        .expect("console prompt lock poisoned") = console;
+}
+
+/// Ask a human on the console whether to approve *request*.
+///
+/// **Opt-in only.** A session is a one-off non-interactive cycle, so nothing
+/// reaches for this unless a caller names it:
+///
+/// ```no_run
+/// use kerness::access::{prompt_on_console, AccessPolicy};
+/// use std::sync::Arc;
+///
+/// let mut policy = AccessPolicy::new();
+/// policy.approve_prompt = Some(Arc::new(prompt_on_console));
+/// ```
+///
+/// Off a terminal there is nobody to answer, so this denies rather than
+/// blocking on a stream that never closes. That check lives here, in the one
+/// approver that needs a console — an approver backed by a GUI or an HTTP
+/// callback has nothing to do with stdin and is never gated on it.
+///
+/// An empty answer means yes. End of input, and a non-interactive stdin, mean
+/// no.
+pub fn prompt_on_console(request: &AccessRequest) -> bool {
+    let console = Arc::clone(
+        &*console_prompt_slot()
+            .read()
+            .expect("console prompt lock poisoned"),
+    );
+    if !console.is_interactive() {
+        return false;
+    }
+    let actor = if request.actor.is_empty() {
+        String::new()
+    } else {
+        format!("Agent: {}\n", request.actor)
+    };
+    let question = format!(
+        "Approve request\n{actor}Type: {} {}\nTarget: {}\nApprove? [Y/n]: ",
+        request.kind, request.action, request.target
+    );
+    let question = if console.renders_colour() {
+        format!("\x1b[34m{question}\x1b[0m")
+    } else {
+        question
+    };
+    match console.ask(&question) {
+        Some(answer) => {
+            let answer = answer.trim().to_lowercase();
+            answer.is_empty() || answer == "y" || answer == "yes"
+        }
+        None => false,
     }
 }
 
@@ -944,6 +1062,105 @@ mod tests {
             .check_path("list", &home, "")
             .expect("allowed")
             .is_absolute());
+    }
+
+    /// A console that answers whatever it was built with, and keeps the
+    /// question it was asked.
+    struct ScriptedConsole {
+        interactive: bool,
+        answer: Option<String>,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedConsole {
+        fn answering(answer: Option<&str>) -> Arc<ScriptedConsole> {
+            Arc::new(ScriptedConsole {
+                interactive: true,
+                answer: answer.map(str::to_string),
+                asked: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl ConsolePrompt for ScriptedConsole {
+        fn is_interactive(&self) -> bool {
+            self.interactive
+        }
+
+        fn renders_colour(&self) -> bool {
+            false
+        }
+
+        fn ask(&self, question: &str) -> Option<String> {
+            self.asked
+                .lock()
+                .expect("uncontended")
+                .push(question.into());
+            self.answer.clone()
+        }
+    }
+
+    /// Run *body* against *console*, then put the default back.
+    ///
+    /// The slot is process-wide, so a test that installed one and left would
+    /// decide what every later test's console does. Callers here read back the
+    /// question their own console recorded, which a second test installing over
+    /// the slot mid-body would take away — so the installs take turns rather
+    /// than overlapping.
+    fn with_console<T>(console: Arc<dyn ConsolePrompt>, body: impl FnOnce() -> T) -> T {
+        static TURN: Mutex<()> = Mutex::new(());
+        let _held = TURN.lock().unwrap_or_else(|held| held.into_inner());
+
+        set_console_prompt(console);
+        let outcome = body();
+        set_console_prompt(Arc::new(StdConsolePrompt));
+        outcome
+    }
+
+    #[test]
+    fn the_console_prompt_takes_yes_an_empty_line_and_nothing_else() {
+        // An empty answer means yes because the question says `[Y/n]`; anything
+        // the question did not offer is a no, rather than a second guess at
+        // what the human meant.
+        let request = AccessRequest::new("command", "run", "git status", "");
+        for (answer, approved) in [
+            (Some("y"), true),
+            (Some("YES\n"), true),
+            (Some("  \n"), true),
+            (Some("n"), false),
+            (Some("later"), false),
+            (None, false),
+        ] {
+            let console = ScriptedConsole::answering(answer);
+            let verdict = with_console(console, || prompt_on_console(&request));
+            assert_eq!(verdict, approved, "answer {answer:?}");
+        }
+    }
+
+    #[test]
+    fn the_console_prompt_names_the_agent_and_denies_without_a_terminal() {
+        // Two things one console answers. The question has to say who is
+        // asking and for what, or the human is approving a string. And off a
+        // terminal there is nobody to ask, so it must not reach the read at
+        // all — a deployed session would block there on a pipe that never
+        // closes.
+        let request = AccessRequest::new("command", "run", "rm -rf /", "Alice");
+
+        let asking = ScriptedConsole::answering(Some("n"));
+        with_console(asking.clone(), || prompt_on_console(&request));
+        let question = asking.asked.lock().expect("uncontended")[0].clone();
+        assert!(question.contains("Agent: Alice"), "{question}");
+        assert!(question.contains("Type: command run"), "{question}");
+        assert!(question.contains("Target: rm -rf /"), "{question}");
+
+        let silent = Arc::new(ScriptedConsole {
+            interactive: false,
+            answer: Some("y".into()),
+            asked: Mutex::new(Vec::new()),
+        });
+        let verdict = with_console(silent.clone(), || prompt_on_console(&request));
+        assert!(!verdict);
+        assert!(silent.asked.lock().expect("uncontended").is_empty());
     }
 
     #[test]

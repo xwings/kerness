@@ -27,42 +27,44 @@ the rest.
 ## Key Types and Entry Points
 
 - `crates/kerness/src/session.rs:106` — `SessionConfig` — everything a session
-  needs, as data; `Default` at `:180`. The session-level answers an agent
+  needs, as data; `Default` at `:187`. The session-level answers an agent
   inherits — `provider`, `model`, `reasoning_effort`, `persona`, `language` —
   sit here, ahead of any agent, because that is the order a caller writes them
   in.
-- `crates/kerness/src/session.rs:141` — `SessionConfig::memory_filter` — the
+- `crates/kerness/src/session.rs:148` — `SessionConfig::memory_filter` — the
   caller's filter over what agents write to memory; `None` stores notes as
-  written. See [memory.md](memory.md) for the boundary it is half of.
-- `crates/kerness/src/session.rs:437` — `Session` — the assembled run.
-- `crates/kerness/src/session.rs:478` — `new(config)` — where the gameplan is
+  written. `memory_store` at `:136` is the other half: where memory is kept, or
+  `None` for the bundled `FileMemory`. See [memory.md](memory.md).
+- `crates/kerness/src/session.rs:496` — `Session` — the assembled run.
+- `crates/kerness/src/session.rs:537` — `new(config)` — where the gameplan is
   loaded and the harness validated, so an impossible contract fails before any
-  provider call. Also where the session's own write paths — the memory file, the
-  session file, a channel's log — are checked against the workspace, so a
-  misplaced one fails at construction rather than mid-turn.
-- `crates/kerness/src/session.rs:788` — `run()` — the whole harness; returns
+  provider call. Also where the session's own write paths — whatever the memory
+  store names for the session scope, the session file, a channel's log — are
+  checked against the workspace, so a misplaced one fails at construction rather
+  than mid-turn.
+- `crates/kerness/src/session.rs:861` — `run()` — the whole harness; returns
   `SessionResult`.
-- `crates/kerness/src/session.rs:1343` — `resolve_agents()` — the first thing
+- `crates/kerness/src/session.rs:1438` — `resolve_agents()` — the first thing
   `run()` does after the pre-flight: every agent's unset option is filled from
   `AgentDefaults`, and every agent workspace is intersected with the session's.
   One mechanism, one place, so nothing downstream can forget a fallback.
-- `crates/kerness/src/session.rs:1276` — `resolve_agent_tools(permitted)` — every
+- `crates/kerness/src/session.rs:1371` — `resolve_agent_tools(permitted)` — every
   agent that declared its own tool list, checked against the harness-permitted
   set. An agent narrows, so a name outside *permitted* is refused here, named
   with the agent, before the first provider call.
-- `crates/kerness/src/session.rs:1308` — `resolve_context(permitted)` — every
+- `crates/kerness/src/session.rs:1403` — `resolve_context(permitted)` — every
   permitted context source called once per agent and cached; see
   [context.md](context.md).
-- `crates/kerness/src/session.rs:1751` — `check_required_tools(...)` — a skill
+- `crates/kerness/src/session.rs:1846` — `check_required_tools(...)` — a skill
   that declares `requires-tools:` for a tool nobody registered is refused here,
   before the first provider call.
-- `crates/kerness/src/session.rs:385` — `active_tools()` — the five steps that
+- `crates/kerness/src/session.rs:444` — `active_tools()` — the five steps that
   decide what a turn is offered, four of them subtractive and the last additive;
   the order is documented on the function and is what makes a skill's requirement
   outrank both a gameplan's list and an agent's own.
-- `crates/kerness/src/session.rs:1671` — `impl LoopHost for Session` — how the
+- `crates/kerness/src/session.rs:1766` — `impl LoopHost for Session` — how the
   orchestrator loop drives it.
-- `crates/kerness/src/session.rs:1086` — `build_orchestrator_prompt(participants)`
+- `crates/kerness/src/session.rs:1181` — `build_orchestrator_prompt(participants)`
   — the gameplan body, the roster, the phase block, and the rules. Which flow
   rules it carries depends on whether the harness declared phases: without them
   the orchestrator controls the flow and is told so, and with them the loop does,
@@ -70,16 +72,17 @@ the rest.
   to write a participant's turn for it. Granting both is a contradiction the
   model resolves by fabricating the turns it never called — see
   [loop.md](loop.md).
-- `crates/kerness/src/session.rs:650` — `add_agent(agent)` / `:685` `add_skill` /
-  `:698` `add_tool` / `:735` `add_context` — the registration chain; each returns
+- `crates/kerness/src/session.rs:723` — `add_agent(agent)` / `:758` `add_skill` /
+  `:771` `add_tool` / `:808` `add_context` — the registration chain; each returns
   `&mut Self` so registration composes. Agents are otherwise stored verbatim:
   nothing else is resolved until `run()`, so a session default written after the
   roster still fills it.
-- `crates/kerness/src/session.rs:214` — `Memories` — the per-agent memory store,
-  shared as `Arc<Mutex<_>>` so a `Memory` handle stays live after the run.
+- `crates/kerness/src/session.rs:226` — `Memories` — the installed store plus the
+  scope each agent addresses it by, shared as `Arc<Mutex<_>>` so a handle onto
+  the session's memory stays live after the run.
 - `crates/kerness/src/session.rs:71` — `SessionResult` — topic, turns, consensus,
   history, summary, parsed fields, rounds, phase reached, end reason.
-- `crates/kerness/src/session.rs:756` — `run_command` / `:774` `read_file` / `:779`
+- `crates/kerness/src/session.rs:829` — `run_command` / `:847` `read_file` / `:852`
   `list_dir` — the built-in tools, each going through the access manager. A
   command with no working directory of its own starts at the actor's workspace.
 - `crates/kerness/src/session.rs:56` — `DEFAULT_MAX_CONTEXT_TOKENS` — the
@@ -94,20 +97,20 @@ the rest.
 
 Tool handlers are `Arc<dyn ToolHandler>` and the dispatcher's tool source is an
 `Arc<dyn Fn>`: both are `Send + Sync + 'static`, so neither can hold a reference
-to the session that built them. `Shared` (`session.rs:268`) is what they close
+to the session that built them. `Shared` (`session.rs:313`) is what they close
 over instead — the access manager, the memories, the channel, and the per-turn
 state.
 
 Two fields exist only because the dispatcher is shared by every agent and takes
-no argument saying which one is speaking. `agent_tools` (`session.rs:284`) holds
-the list of each agent that declared one, and `turn_agent` (`session.rs:288`)
-records whose turn it is, written by `start_activation` (`session.rs:407`)
+no argument saying which one is speaking. `agent_tools` (`session.rs:329`) holds
+the list of each agent that declared one, and `turn_agent` (`session.rs:333`)
+records whose turn it is, written by `start_activation` (`session.rs:466`)
 alongside the skill activation it already recorded there. `active_tools` reads
 both, which is what makes an agent's narrowing bind the dispatcher as well as
 the prompt: a tool the agent gave up is neither advertised nor callable if the
 model asks for it anyway.
 
-`context_cache` (`session.rs:299`) is filled by `resolve_context` rather than
+`context_cache` (`session.rs:344`) is filled by `resolve_context` rather than
 read through on demand, so a source that walks a tree costs one call per agent
 per run and a source that fails does so before the first provider call.
 
@@ -129,15 +132,17 @@ moment it is written. See [role.md](role.md).
 
 `Session::new` sets `trust_skill_bundles` explicitly because `AccessPolicy`'s
 derived `Default` and `AccessPolicy::new()` disagree on it; the reason is
-recorded at `access.rs:166`.
+recorded at `access.rs:284`.
 
 On the Python side, `PySession` keeps the bound channel so that an exception a
 delivery raised can be re-raised out of `run()` instead of arriving as the
 framework error it had to be reduced to — see [channel.md](channel.md). A
 `memory_filter` given from Python is bound by `bind_memory_filter`
-(`bindings/python/src/session.rs:205`), which refuses a non-callable at
+(`bindings/python/src/session.rs:206`), which refuses a non-callable at
 construction rather than at the first note an agent writes, mid-run and with the
-session's work already spent.
+session's work already spent. A `memory_store` is bound by `bind_memory_store`
+(`bindings/python/src/memory.rs:109`), which takes the crate's store directly
+when it is one and wraps anything else — see [memory.md](memory.md).
 
 ## Interactions
 
@@ -161,8 +166,11 @@ cargo test -p kerness session                                        # pass = 0 
 .venv/bin/python -m pytest bindings/python/tests/test_examples.py -q # pass = 0 failed
 ```
 
-- The Rust tests drive a `SequenceProvider` (`session.rs:2018`) through a fixed
-  reply sequence with a `CaptureChannel` (`:2096`) recording what was delivered.
+- The Rust tests drive a `SequenceProvider` (`session.rs:2113`) through a fixed
+  reply sequence with a `CaptureChannel` (`:2191`) recording what was delivered.
+- `crates/kerness/src/session.rs:3120` — `an_installed_store_is_opened_read_written_and_closed`,
+  and the three beside it, cover the memory slot from the session's side:
+  [memory.md](memory.md) lists them.
 - `bindings/python/tests/test_session.py` is the suite's integration layer,
   covering access refusals mid-run, per-agent memory, resume across two runs,
   compaction of a long run, and the two `run()`-time resolutions: session
@@ -186,7 +194,7 @@ cargo test -p kerness session                                        # pass = 0 
 
 ## Open Gaps / Roadmap
 
-- `session.rs` is 3,374 lines. `run()` in particular carries both the
+- `session.rs` is 3,722 lines. `run()` in particular carries both the
   participant loop and the orchestrator handoff; splitting it would need a home
   for the shared setup that is not another module knowing about sessions.
 - One access manager and one skill registry per session, shared by every agent.

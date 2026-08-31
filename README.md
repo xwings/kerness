@@ -55,6 +55,14 @@ model for structured output.
 Neither surface is a wrapper around the other's use case, and neither is the
 "real" one. Pick the language; the framework is the same.
 
+That last part is a rule and not an aspiration: **a feature is written in
+Rust.** The installed Python package holds the classes callers subclass, the
+few the extension cannot declare, and re-exports — never behaviour. Where a
+feature needs something only the interpreter has, the crate names the need as a
+trait and the binding installs it at import, so `capsys` captures a console
+channel, `caplog` sees a warning, and `mock.patch` intercepts a request, with
+the decision still made in one place.
+
 ### The split
 
 | The kernel owns | Your harness declares |
@@ -87,7 +95,7 @@ swap in your own — the rest of the kernel does not notice.
 | **Personas** | `pragmatic_engineer`, `devils_advocate` | a `.md` file, or inline prose |
 | **Gameplans** | `debate`, `discussion`, `research` | a new Markdown file — see below |
 | **Access** | closed by default; a workspace that grants its own contents, glob and regex command allow-lists, and path allow-lists that reach past the workspace | an `AccessPolicy`, plus an approval callback |
-| **Memory** | a plain `.md` file, read-only unless asked | point `memory` anywhere; per-agent scopes supported |
+| **Memory** | `FileMemory` — a plain `.md` file per scope, read-only unless asked | implementing `MemoryStore` — two required methods, `read` and `append` — and passing it as `memory_store` |
 | **Session file** | JSON snapshot after every turn | `session_file` — absent means persist nothing |
 
 The names are the Rust ones. Python spells the two acronym providers the way
@@ -244,8 +252,9 @@ let mut session = Session::new(SessionConfig {
     model: Some("gpt-4o".to_string()),
     reasoning_effort: ReasoningEffort::High,
     channel: Some(Arc::new(ConsoleChannel::default())),
-    memory: "/srv/work/notes.md".to_string(),     // the shared file agents read
+    memory: "/srv/work/notes.md".to_string(),     // the scope the store is asked for
     memory_write: true,                           // ...and, here, may append to
+    memory_store: None,                           // None is FileMemory: a scope is a path
     session_file: Some("/srv/work/run.json".to_string()), // None persists nothing
     access_policy: Some(AccessPolicy {
         workspace: Some("/srv/work".to_string()),  // this tree, and nothing else
@@ -405,14 +414,14 @@ or a different agent roster is refused, not half-applied.
 ```text
 Cargo.toml       # the only manifest at the root
 crates/kerness/  # the kernel, pure Rust — no PyO3, no Python
-  src/           #   29 modules, 341 unit tests inline
-  tests/         #   101 integration tests, over the public API only
+  src/           #   30 modules, 380 unit tests inline
+  tests/         #   109 integration tests, over the public API only
   examples/      #   8 runnable Rust harnesses, one needing no key
   assets/        #   bundled gameplans, roles, personas, skills
 bindings/python/ # everything the wheel is built from
   pyproject.toml #   the wheel's manifest — `pip install .` runs here
   src/           #   the PyO3 extension module, kerness._core
-  kerness/       #   the Python package: shims, deliberate Python, assets
+  kerness/       #   the Python package: the subclassable classes, shims, assets
   tests/         #   pytest suite, over the binding
   examples/      #   runnable Python harnesses
 ARCHITECTURE/    # one document per subsystem
@@ -431,11 +440,11 @@ carries the kernel's behaviour across the FFI boundary intact.
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 341 unit + 101 integration
+cargo test --workspace                     # 380 unit + 109 integration
 cargo build -p kerness --examples          # every example still compiles
 cargo run -p kerness --example offline_debate   # a whole session, no key
 
-python -m pytest bindings/python/tests -q      # 442 tests
+python -m pytest bindings/python/tests -q      # 487 tests
 python -m kerness.selfcheck                    # exit 0
 ruff check bindings/python
 ```

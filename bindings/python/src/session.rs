@@ -30,8 +30,9 @@ use crate::access::policy_from_py;
 use crate::channel::{bind_channel, PyChannel};
 use crate::convert::{map_from_py, map_to_py, value_from_py};
 use crate::errors::Raise;
+use crate::memory::{bind_memory_store, PySessionMemory};
 use crate::provider::bind_provider;
-use crate::types::{PyAgent, PyMemory, PyMessage};
+use crate::types::{PyAgent, PyMessage};
 
 /// What a completed run reports.
 #[pyclass(name = "SessionResult", module = "kerness._core", frozen)]
@@ -247,9 +248,11 @@ impl ContextSource for PySource {
 #[pyclass(name = "Session", module = "kerness._core")]
 pub struct PySession {
     inner: Session,
-    /// The same channel the run writes to, kept so that an exception it raised
-    /// can be re-raised from [`PySession::run`] rather than reported as the
-    /// framework error it had to be reduced to on the way through.
+    /// The channel the run writes to, when the caller wrote it in Python, kept
+    /// so that an exception it raised can be re-raised from [`PySession::run`]
+    /// rather than reported as the framework error it had to be reduced to on
+    /// the way through. `None` for a bundled channel, which is Rust and reports
+    /// through `Result` like the rest of the crate.
     channel: Option<Arc<PyChannel>>,
 }
 
@@ -308,6 +311,7 @@ impl PySession {
         channel=None,
         memory="memory.md".to_string(),
         memory_write=false,
+        memory_store=None,
         session_file=None,
         max_context_tokens=DEFAULT_MAX_CONTEXT_TOKENS,
         access_policy=None,
@@ -333,6 +337,7 @@ impl PySession {
         channel: Option<Bound<'_, PyAny>>,
         memory: String,
         memory_write: bool,
+        memory_store: Option<Bound<'_, PyAny>>,
         session_file: Option<String>,
         max_context_tokens: usize,
         access_policy: Option<Bound<'_, PyAny>>,
@@ -361,8 +366,12 @@ impl PySession {
             reasoning_effort: ReasoningEffort::parse(&reasoning_effort).raise()?,
             persona,
             language,
-            channel: bound_channel.clone().map(|channel| channel as _),
+            channel: bound_channel.as_ref().map(|bound| bound.channel.clone()),
             memory,
+            memory_store: match memory_store {
+                Some(object) => bind_memory_store(&object)?,
+                None => None,
+            },
             memory_write,
             session_file,
             max_context_tokens,
@@ -382,7 +391,7 @@ impl PySession {
         };
         Ok(PySession {
             inner: Session::new(config).raise()?,
-            channel: bound_channel,
+            channel: bound_channel.and_then(|bound| bound.python),
         })
     }
 
@@ -399,11 +408,11 @@ impl PySession {
             .collect()
     }
 
-    /// The session-level memory file, live: reading it after `run()` reads
-    /// what the run wrote.
+    /// The session-level memory, live: reading it after `run()` reads what
+    /// the run wrote.
     #[getter]
-    fn memory(&self) -> PyMemory {
-        PyMemory::of_session(self.inner.memories())
+    fn memory(&self) -> PySessionMemory {
+        PySessionMemory::of_session(self.inner.memories())
     }
 
     /// The rounds limit in force, after the gameplan's default is applied.

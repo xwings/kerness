@@ -13,6 +13,36 @@ from kerness.channel import (
 )
 
 
+class TestTheBundledChannels:
+    """The four ship from the Rust crate. What the Python package still owns is
+    the base class callers subclass, and both directions of the join have to
+    keep holding."""
+
+    def test_each_one_is_a_channel(self):
+        assert isinstance(ConsoleChannel(), Channel)
+        assert isinstance(MultiChannel(), Channel)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assert isinstance(LogChannel(log_dir=tmpdir), Channel)
+            assert isinstance(FileChannel(Path(tmpdir) / "out.txt"), Channel)
+
+    def test_a_subclass_that_wraps_send_is_not_bypassed(self, capsys):
+        """Binding a bundled channel takes a shortcut past Python. A subclass
+        overriding ``send`` is a caller's channel that happens to inherit, so
+        the shortcut must not apply to it — taking it would call the base
+        implementation the subclass exists to wrap."""
+        seen = []
+
+        class Recording(ConsoleChannel):
+            def send(self, sender, message):
+                seen.append((sender, message))
+                super().send(sender, message)
+
+        MultiChannel(Recording()).send("Alice", "msg")
+
+        assert seen == [("Alice", "msg")]
+        assert "[Alice] msg" in capsys.readouterr().out
+
+
 class TestConsoleChannel:
     def test_agents_notices_and_a_custom_prefix_all_reach_stdout(self, capsys):
         ch = ConsoleChannel()

@@ -339,10 +339,12 @@ class TestTheDefaultIsNonInteractive:
     def test_the_console_prompt_denies_when_stdin_cannot_answer(self, monkeypatch):
         """Off a TTY there is nobody to ask.  Without this, a configured console
         prompt under a service either blocks on a pipe that never closes or
-        reads EOF several layers deeper than the cause."""
-        monkeypatch.setattr(
-            "kerness.access._stdin_is_interactive", lambda: False
-        )
+        reads EOF several layers deeper than the cause.
+
+        Nothing here is faked: under pytest ``sys.stdin`` really is not a
+        terminal, and the point is that the extension asks ``sys.stdin`` rather
+        than file descriptor 0 — which, run from a shell, *is* one.
+        """
         monkeypatch.setattr(
             "builtins.input",
             lambda *a: pytest.fail("input() must not be reached off a TTY"),
@@ -350,6 +352,29 @@ class TestTheDefaultIsNonInteractive:
         manager = AccessManager(AccessPolicy(approve_prompt=prompt_on_console))
         with pytest.raises(AccessDeniedError):
             manager.check_command("git status")
+
+    def test_the_console_prompt_reads_sys_stdin_and_not_the_descriptor(
+        self, monkeypatch
+    ):
+        """The prompt itself is Rust; what the binding supplies is the console
+        it reads through, and that has to be Python's.  Replacing ``sys.stdin``
+        and ``input`` is enough to drive it — a prompt reading file descriptor 0
+        would see neither, and under a shell would block on the real terminal
+        instead."""
+
+        class Terminal:
+            def isatty(self):
+                return True
+
+        asked = []
+        monkeypatch.setattr("sys.stdin", Terminal())
+        monkeypatch.setattr("builtins.input", lambda q: asked.append(q) or "y")
+
+        manager = AccessManager(AccessPolicy(approve_prompt=prompt_on_console))
+        assert manager.check_command("git status", actor="Alice") is None
+        assert len(asked) == 1
+        assert "Agent: Alice" in asked[0]
+        assert "Target: git status" in asked[0]
 
     def test_a_custom_approver_is_not_gated_on_stdin(self):
         """The TTY check belongs to the console prompt, not to the policy.  An

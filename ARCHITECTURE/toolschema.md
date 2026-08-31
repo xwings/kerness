@@ -69,7 +69,7 @@ cargo test -p kerness toolschema                                       # pass = 
 - `bindings/python/tests/test_toolschema.py:52` — `tool_schemas(ToolDialect.TEXT, [CMD]) is None`
   and `tool_schemas(ToolDialect.OPENAI, []) is None`: no native tools and no tools
   are both `None`, not an empty list.
-- `bindings/python/tests/test_provider.py:473` onward asserts `effective_dialect() is ToolDialect.OPENAI`
+- `bindings/python/tests/test_provider.py:479` onward asserts `effective_dialect() is ToolDialect.OPENAI`
   — identity, not equality. That is what requires the enum to be a real
   `enum.Enum` on the Python side rather than a pyclass.
 

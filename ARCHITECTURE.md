@@ -4,7 +4,7 @@
 
 Kerness is a framework for building **multi-agent harnesses**: sessions in which
 several language models hold a structured conversation, call tools, consult a
-shared memory file, and produce a result with named fields.
+shared memory, and produce a result with named fields.
 
 The organising idea is that a **Markdown gameplan is the program**. Its YAML
 frontmatter is a machine-readable contract — who the agents are, how many
@@ -25,8 +25,31 @@ Two properties follow from that and shape every decision below:
 Kerness ships as two artifacts from one repository: a **Rust crate** for callers
 who want the framework in a Rust program, and a **Python extension** for callers
 who want to subclass `Provider`, pass a lambda as a tool handler, and hand a
-`pydantic` model in for structured output. Both are first-class; neither is a
-wrapper around the other's use case.
+`pydantic` model in for structured output. Both are first-class surfaces;
+neither is a wrapper around the other's use case.
+
+What is not symmetrical is where the code lives. **A feature is written in
+Rust.** The crate implements it, the extension exposes it, and the installed
+Python package does one of five things and nothing else: declares a class
+callers subclass (`Provider`, `Channel`, `MemoryStore`), declares one the
+extension cannot
+(the exception hierarchy's two-argument constructors, `ToolDialect` as a real
+`enum.Enum`, `AccessPolicy` as a dataclass whose contract is written in Python
+list semantics), reads a signature with `inspect`, validates with `pydantic`,
+or re-exports a name. Every other `.py` in the package is a shim.
+
+Where a feature needs something only the interpreter has — `sys.stdout`, a
+logger, `input`, an HTTP client under a caller's `mock.patch` — the crate names
+the need as a trait, ships a default that works from Rust alone, and the
+binding installs a replacement at `bootstrap`. The behaviour stays in one place
+and only its delivery crosses:
+
+| Seam | Crate default | What the binding installs |
+| --- | --- | --- |
+| `HttpTransport` (`http.rs:24`) | `ureq` + `rustls` | `kerness.provider.http_post_json`, resolved per call so `mock.patch` reaches it |
+| `Logger` (`logging.rs:28`) | warnings and errors to stderr | `logging.getLogger("kerness")`, so `caplog` sees them |
+| `ConsoleWriter` (`channel.rs:54`) | this process's stdout | `builtins.print`, so `capsys` and a `StringIO` see it |
+| `ConsolePrompt` (`access.rs:69`) | `std::io::stdin` | `sys.stdin` / `builtins.input` |
 
 ## Target Environment
 
@@ -36,13 +59,14 @@ wrapper around the other's use case.
 | Python | **3.10+**, CPython, via the stable ABI (`abi3-py310`) |
 | Bindings | `pyo3` 0.23 with `extension-module` |
 | Build | `cargo` for the crate, `maturin` for the wheel |
-| Platform | Linux and macOS; developed on Linux x86-64. `ureq` + `rustls` reach further, but path confinement resolves every path from `/` — `crates/kerness/src/access.rs:580` — so the access boundary assumes POSIX paths |
+| Platform | Linux and macOS; developed on Linux x86-64. `ureq` + `rustls` reach further, but path confinement resolves every path from `/` — `crates/kerness/src/access.rs:698` — so the access boundary assumes POSIX paths |
 | Network | Outbound HTTPS only, to provider endpoints the caller names |
 | Runtime deps | None beyond the crate's Cargo dependencies; `pydantic` is optional and only for structured output |
 
 There is no daemon, no database, no listening socket, and no background thread.
-Filesystem writes are confined to paths the caller opts into: the memory file,
-the session file, channel logs, and directories added to the access policy.
+Filesystem writes are confined to paths the caller opts into: whatever the
+memory store names for a scope, the session file, channel logs, and directories
+added to the access policy.
 
 A built wheel is tagged `kerness-<version>-cp310-abi3-<platform>` — one wheel
 per platform covers every supported Python, and `<version>` is whatever the root
@@ -69,13 +93,17 @@ bindings/
     pyproject.toml          the wheel's manifest; `pip install .` runs here
     Cargo.toml              the `kerness-py` crate, a workspace member
     LICENSE  README.md      symlinks to the root copies
-    src/                    11 modules, one per boundary concern
+    src/                    12 modules, one per boundary concern
     kerness/                the installed Python package
       __init__.py           bootstrap + public surface
       *.py                  per-subsystem re-export shims
-      provider.py           deliberate Python (see ARCHITECTURE/provider.md)
-      access.py             deliberate Python (console prompt)
-      selfcheck.py          deliberate Python (import health)
+      provider.py           the subclassable ABC (see ARCHITECTURE/provider.md)
+      access.py             the AccessPolicy dataclass
+      channel.py            the subclassable ABC
+      memory.py             the subclassable ABC (see ARCHITECTURE/memory.md)
+      exceptions.py         the exception hierarchy
+      _enums.py             ToolDialect
+      selfcheck.py          import health
       gameplans/ roles/ personas/ skills/   the same assets, installed
     tests/                  26 pytest modules over the Python surface
     examples/               runnable harnesses, walked by test_examples.py above
@@ -122,8 +150,9 @@ directly.
    the exception classes (two-argument constructors a `create_exception!` cannot
    express), the `ToolDialect` enum (callers compare members with `is`, so it
    must be a real `enum.Enum`), and the assets root (only the package knows where
-   pip put it). `bootstrap` also installs the HTTP transport seam and the logger
-   — `bindings/python/src/lib.rs:34`.
+   pip put it). `bootstrap` then installs all four seams — transport, console
+   writer, logger, console prompt — at `bindings/python/src/lib.rs:34`, which is
+   why an import is enough and no caller wires anything.
 3. The remaining imports pull the public names out of the per-subsystem shims.
 4. The caller builds a `Session(...)`, registers agents, tools, and skills,
    and calls `run()`.
@@ -205,11 +234,11 @@ its own status.
 
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
-cargo test --workspace -q                             # pass = 369 unit + 109 integration, 0 failed
+cargo test --workspace -q                             # pass = 380 unit + 109 integration, 0 failed
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key, no network
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 477 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 487 passed
 .venv/bin/python -m kerness.selfcheck                 # pass = "OK: all core checks passed", exit 0
 .venv/bin/ruff check bindings/python                  # pass = "All checks passed!"
 ```
@@ -666,7 +695,7 @@ reads exactly like a real one, which makes it worse than no review.
 - [harness.md](ARCHITECTURE/harness.md) — the frontmatter contract: parse, validate, resolve.
 - [jsonschema.md](ARCHITECTURE/jsonschema.md) — strict-mode schemas and argument validation.
 - [loop.md](ARCHITECTURE/loop.md) — the orchestrator loop, phases, and end reasons.
-- [memory.md](ARCHITECTURE/memory.md) — the shared Markdown file agents read and append to.
+- [memory.md](ARCHITECTURE/memory.md) — what agents remember, and the store slot that keeps it.
 - [persona.md](ARCHITECTURE/persona.md) — loading a persona file into prompt text.
 - [prompting.md](ARCHITECTURE/prompting.md) — assembling a system prompt from its parts.
 - [provider.md](ARCHITECTURE/provider.md) — talking to a model, and the four built-in backends.

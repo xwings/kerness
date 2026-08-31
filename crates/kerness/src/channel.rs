@@ -8,7 +8,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
@@ -43,7 +43,54 @@ pub trait Channel: Send + Sync {
     }
 }
 
-/// Prints to stdout.
+/// Where [`ConsoleChannel`]'s lines are actually written.
+///
+/// A seam for the same reason [`crate::http::HttpTransport`] is one. The default
+/// writes to this process's stdout, which is what a Rust caller wants and needs
+/// no wiring. A binding replaces it: Python's `sys.stdout` is not file
+/// descriptor 1, so a notebook cell, a `StringIO` a caller installed, and
+/// pytest's `capsys` all see nothing at all if the framework writes to the
+/// descriptor. The line is composed here either way — only its delivery moves.
+pub trait ConsoleWriter: Send + Sync {
+    /// Write one line, adding the newline.
+    ///
+    /// Fallible because this is IO and [`Channel::send`] already reports it: a
+    /// closed pipe is something the caller can act on, and `println!` would
+    /// panic on it rather than say so.
+    fn write_line(&self, line: &str) -> Result<()>;
+}
+
+/// The default: this process's stdout.
+struct StdoutWriter;
+
+impl ConsoleWriter for StdoutWriter {
+    fn write_line(&self, line: &str) -> Result<()> {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{line}").map_err(|err| Error::Io(format!("stdout: {err}")))
+    }
+}
+
+fn console_slot() -> &'static RwLock<Arc<dyn ConsoleWriter>> {
+    static SLOT: OnceLock<RwLock<Arc<dyn ConsoleWriter>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(Arc::new(StdoutWriter)))
+}
+
+/// Send every later [`ConsoleChannel`] line to *writer*.
+pub fn set_console_writer(writer: Arc<dyn ConsoleWriter>) {
+    *console_slot().write().expect("console lock poisoned") = writer;
+}
+
+/// Write one line through the installed [`ConsoleWriter`].
+///
+/// The `Arc` is cloned out of the lock before the write, so a writer that
+/// re-enters — a Python one running arbitrary code under the GIL — cannot
+/// deadlock against a concurrent [`set_console_writer`].
+fn write_console_line(line: &str) -> Result<()> {
+    let writer = Arc::clone(&*console_slot().read().expect("console lock poisoned"));
+    writer.write_line(line)
+}
+
+/// Prints to stdout, or to whatever [`set_console_writer`] installed.
 pub struct ConsoleChannel {
     prefix_format: String,
 }
@@ -65,16 +112,14 @@ impl ConsoleChannel {
 
 impl Channel for ConsoleChannel {
     fn send(&self, sender: &str, message: &str) -> Result<()> {
-        println!(
+        write_console_line(&format!(
             "{} {message}",
             self.prefix_format.replace("{sender}", sender)
-        );
-        Ok(())
+        ))
     }
 
     fn send_system(&self, message: &str) -> Result<()> {
-        println!("[System] {message}");
-        Ok(())
+        write_console_line(&format!("[System] {message}"))
     }
 
     fn type_name(&self) -> String {
@@ -377,6 +422,43 @@ mod tests {
         multi.send_system("sys").expect("fan-out never fails");
 
         assert_eq!(good.messages(), vec!["Alice: msg", "system: sys"]);
+    }
+
+    /// A [`ConsoleWriter`] that keeps what it was given.
+    struct CaptureWriter {
+        lines: Mutex<Vec<String>>,
+    }
+
+    impl ConsoleWriter for CaptureWriter {
+        fn write_line(&self, line: &str) -> Result<()> {
+            self.lines.lock().expect("capture lock").push(line.into());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn console_lines_are_composed_here_and_delivered_through_the_writer() {
+        // The seam the binding replaces, proven at the layer that owns it: the
+        // prefix and the `[System]` label are the framework's, and only the
+        // final write moves. Asserted by `contains` rather than by equality,
+        // because the slot is process-wide and another test's session may be
+        // writing through it at the same time.
+        let capture = Arc::new(CaptureWriter {
+            lines: Mutex::new(Vec::new()),
+        });
+        set_console_writer(capture.clone());
+
+        let channel = ConsoleChannel::new("<{sender}>");
+        channel.send("Alice", "hello").expect("send");
+        channel.send_system("starting").expect("send");
+
+        set_console_writer(Arc::new(StdoutWriter));
+        let lines = capture.lines.lock().expect("capture lock").clone();
+        assert!(lines.contains(&"<Alice> hello".to_string()), "{lines:?}");
+        assert!(
+            lines.contains(&"[System] starting".to_string()),
+            "{lines:?}"
+        );
     }
 
     #[test]

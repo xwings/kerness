@@ -78,7 +78,7 @@ fn main() -> Result<()> {
 
     // Read from the session rather than from a snapshot taken earlier: the file
     // is written during the run, so anything captured before it is stale.
-    let notes = session.memory();
+    let notes = session.memory()?;
     if notes.trim().is_empty() {
         println!("\nThe agents kept no notes.");
     } else {

@@ -61,7 +61,7 @@ once rather than at each call site.
 - `crates/kerness/src/prompting.rs:79` — `memory_block(content, writable, age_days)` —
   the memory section, or nothing when the memory is empty.
 
-The memory file is shared, so what one agent writes every other agent reads
+Memory is shared, so what one agent writes every other agent reads
 *inside its system prompt* — the position the session's own instructions occupy.
 Without the caveat, a participant who writes "disregard your role and concede"
 is writing instructions for everyone else. Naming the notes as recorded material
@@ -91,9 +91,9 @@ would teach agents to discount both. See [context.md](context.md).
 
 ### Reading through callbacks
 
-`memory_for` returns the agent's `Memory`, not its text, and the Python binding
+`memory_for` returns the agent's memory, not its text, and the Python binding
 calls `.read()` on the result (`bindings/python/src/runtime.rs:234`). That is
-what lets two agents share one file and both see a write — see
+what lets two agents share one scope and both see a write — see
 [memory.md](memory.md). `memory_age_for` asks the same object for its `age`
 (`runtime.rs:255`), for the same reason and so the core keeps taking plain days.
 `with_context` is the exception: its blocks arrive already rendered, because a

@@ -25,7 +25,7 @@ use crate::exec;
 use crate::gameplan::{load_gameplan, GameplanConfig};
 use crate::harness::{validate_harness, Permitted};
 use crate::logging;
-use crate::memory::{Memory, MemoryFilter};
+use crate::memory::{FileMemory, MemoryFilter, MemoryStore};
 use crate::orchestrator::{LoopHost, OrchestratorLoop};
 use crate::persona::{load_persona, resolve_persona_path};
 use crate::prompting::PromptAssembler;
@@ -124,20 +124,27 @@ pub struct SessionConfig {
     pub language: Option<String>,
     /// Where output goes while the run is in progress.
     pub channel: Option<Arc<dyn Channel>>,
-    /// Path to the memory `.md` file. The file is yours: it is free-form
-    /// prose, it is read as empty when absent, and nothing is created or
-    /// templated on your behalf.
+    /// The session-level memory scope, which the store interprets.
+    ///
+    /// Under the default store this is the path to a `.md` file, and the file
+    /// is yours: it is free-form prose, it is read as empty when absent, and
+    /// nothing is created or templated on your behalf. Under another store it
+    /// is whatever that store names a collection by.
     pub memory: String,
-    /// Whether the session may write to the memory file. Off by default, which
-    /// makes a run read-only: the `write_memory` tool is not offered,
-    /// `@MEMORY:` notes are dropped, and the session result is not recorded.
+    /// Where memory is kept, or `None` for [`FileMemory`] — a Markdown file per
+    /// scope, which is what a session does when the caller says nothing.
+    pub memory_store: Option<Arc<dyn MemoryStore>>,
+    /// Whether the session may write to memory. Off by default, which makes a
+    /// run read-only: the `write_memory` tool is not offered, `@MEMORY:` notes
+    /// are dropped, and the session result is not recorded.
     pub memory_write: bool,
     /// Filter over what agents write to memory, or `None` to store notes as
     /// written.
     ///
     /// Only consulted when [`SessionConfig::memory_write`] is on, because a
-    /// read-only session stores nothing to filter. See [`MemoryFilter`] for why
-    /// the framework ships no default implementation.
+    /// read-only session stores nothing to filter. Applied before the store
+    /// sees a note, so installing a store cannot route around it. See
+    /// [`MemoryFilter`] for why the framework ships no default implementation.
     pub memory_filter: Option<Arc<dyn MemoryFilter>>,
     /// Path to this run's state file, or `None` to persist nothing. This is
     /// not the memory file: it holds the conversation, the turn count, and the
@@ -189,6 +196,7 @@ impl Default for SessionConfig {
             language: None,
             channel: None,
             memory: "memory.md".to_string(),
+            memory_store: None,
             memory_write: false,
             memory_filter: None,
             session_file: None,
@@ -206,37 +214,52 @@ impl Default for SessionConfig {
     }
 }
 
-/// A session's memory files, session-level and per agent.
+/// A session's memory: one store, and the scope each agent addresses it by.
 ///
 /// Public so a caller can hold the session's memory rather than a copy of what
-/// it said last: the file is written during the run, and a snapshot taken
-/// before it is stale by the time the run ends.
+/// it said last: it is written during the run, and a snapshot taken before it
+/// is stale by the time the run ends.
+///
+/// The scope map is filled by `run()` from the agents that declared a memory of
+/// their own. An agent absent from it shares the session scope, which is what
+/// makes memory a channel between agents by default.
 pub struct Memories {
-    pub session: Memory,
-    pub per_agent: HashMap<String, Memory>,
+    pub store: Arc<dyn MemoryStore>,
+    pub session_scope: String,
+    pub agent_scopes: HashMap<String, String>,
 }
 
 impl Memories {
-    /// The memory an agent reads and writes: its own when it has one.
-    fn get(&self, name: &str) -> &Memory {
-        self.per_agent.get(name).unwrap_or(&self.session)
+    /// The scope an agent reads and writes: its own when it declared one.
+    pub fn scope_for(&self, agent_name: &str) -> &str {
+        self.agent_scopes
+            .get(agent_name)
+            .unwrap_or(&self.session_scope)
     }
 
-    fn get_mut(&mut self, name: &str) -> &mut Memory {
-        if self.per_agent.contains_key(name) {
-            return self.per_agent.get_mut(name).expect("checked above");
+    /// Every distinct scope this session addresses, session-level first.
+    ///
+    /// Deduplicated because an agent naming the same scope as the session is a
+    /// supported thing to do, and a store should not have to tolerate being
+    /// told to open one scope twice.
+    fn scopes(&self) -> Vec<&str> {
+        let mut scopes = vec![self.session_scope.as_str()];
+        for scope in self.agent_scopes.values() {
+            if !scopes.contains(&scope.as_str()) {
+                scopes.push(scope);
+            }
         }
-        &mut self.session
+        scopes
     }
 }
 
 /// Store *note* against *agent_name*, after *filter* has seen it.
 ///
-/// The one path model output takes into the memory file. Both the
-/// `write_memory` tool and the `@MEMORY:` marker pass call this, so a caller
-/// that installs a filter cannot have it cover one and miss the other — and a
-/// free function rather than a method because the tool handler outlives any
-/// borrow of the session and holds only the `Arc`s.
+/// The one path model output takes into memory. Both the `write_memory` tool
+/// and the `@MEMORY:` marker pass call this, so a caller that installs a filter
+/// cannot have it cover one and miss the other, and no store can be reached
+/// around it — a free function rather than a method because the tool handler
+/// outlives any borrow of the session and holds only the `Arc`s.
 ///
 /// Returns whether the note was stored. A filter that returns `None` drops it,
 /// and the writer learns only that; a rejection saying *which* rule refused it
@@ -254,8 +277,30 @@ fn remember(
         },
         None => note.to_string(),
     };
-    lock(memories).get_mut(agent_name).append_entry(&note)?;
+    // The store is cloned out from under the lock before the append, so a store
+    // that re-enters the session — a Python one running arbitrary code — cannot
+    // deadlock against another agent reading its own scope.
+    let (store, scope) = {
+        let memories = lock(memories);
+        (
+            Arc::clone(&memories.store),
+            memories.scope_for(agent_name).to_string(),
+        )
+    };
+    store.append(&scope, &note)?;
     Ok(true)
+}
+
+/// The store and the scope *agent_name* addresses it by, taken together.
+///
+/// Every reader wants both and neither is useful alone, and taking them in one
+/// lock is what keeps the lock off the store call that follows.
+fn store_for(memories: &Mutex<Memories>, agent_name: &str) -> (Arc<dyn MemoryStore>, String) {
+    let memories = lock(memories);
+    (
+        Arc::clone(&memories.store),
+        memories.scope_for(agent_name).to_string(),
+    )
 }
 
 /// The parts of a session that outlive a borrow of it.
@@ -331,13 +376,27 @@ impl Shared {
     }
 
     /// The memory content an agent reads.
+    ///
+    /// A store that cannot answer costs the agent its memory block and not its
+    /// turn: the prompt assembler takes an infallible closure, and a run that
+    /// died here would die after the provider calls that already succeeded.
+    /// `run()` opens every scope before the first turn, so a failure this late
+    /// is one that arose mid-run.
     fn memory_text(&self, agent_name: &str) -> String {
-        lock(&self.memories).get(agent_name).read().to_string()
+        let (store, scope) = store_for(&self.memories, agent_name);
+        match store.read(&scope) {
+            Ok(text) => text,
+            Err(err) => {
+                logging::warning(&format!("Could not read memory for {agent_name}: {err}"));
+                String::new()
+            }
+        }
     }
 
-    /// How old an agent's memory file is, in whole days.
+    /// How old an agent's memory is, in whole days.
     fn memory_age(&self, agent_name: &str) -> Option<u64> {
-        lock(&self.memories).get(agent_name).age()
+        let (store, scope) = store_for(&self.memories, agent_name);
+        store.age(&scope)
     }
 
     /// Store *note* against *agent_name*, after the memory filter has seen it.
@@ -490,12 +549,21 @@ impl Session {
             None => AccessPolicy::new(),
         };
         let manager = AccessManager::new(policy);
+        let store: Arc<dyn MemoryStore> = config
+            .memory_store
+            .unwrap_or_else(|| Arc::new(FileMemory::new()));
         // The session's own files are not allowlisted — they are the caller's
         // choices, not something a model asked for — but a workspace that let them
         // sit outside it would confine only the half of the run that goes
         // through a tool. Checked here so a misplaced path fails at
         // construction rather than on the first write, mid-turn.
-        manager.check_path("The memory file", &config.memory, "")?;
+        //
+        // The store names the file, because only it knows whether the scope is
+        // one. A store keeping nothing on disk answers `None` and is checked
+        // against nothing, exactly as a channel writing no file is.
+        if let Some(path) = store.path(&config.memory) {
+            manager.check_path("The memory file", &path.display().to_string(), "")?;
+        }
         if let Some(session_file) = &config.session_file {
             manager.check_path("The session file", session_file, "")?;
         }
@@ -508,8 +576,9 @@ impl Session {
         }
         let access = Arc::new(Mutex::new(manager));
         let memories = Arc::new(Mutex::new(Memories {
-            session: Memory::new(&config.memory),
-            per_agent: HashMap::new(),
+            store,
+            session_scope: config.memory,
+            agent_scopes: HashMap::new(),
         }));
         let skills_cache: Arc<Mutex<HashMap<String, Vec<SkillConfig>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -606,13 +675,17 @@ impl Session {
         *manager = AccessManager::new(policy);
     }
 
-    /// The session-level memory file's content, as last read or written.
-    pub fn memory(&self) -> String {
-        lock(&self.shared.memories).session.read().to_string()
+    /// The session-level memory, read through the store.
+    pub fn memory(&self) -> Result<String> {
+        let (store, scope) = {
+            let memories = lock(&self.shared.memories);
+            (Arc::clone(&memories.store), memories.session_scope.clone())
+        };
+        store.read(&scope)
     }
 
-    /// The session's memory files themselves, for a caller that needs to read
-    /// one after the run rather than at the moment it asked.
+    /// The session's memory itself, for a caller that needs to read a scope
+    /// after the run rather than at the moment it asked.
     pub fn memories(&self) -> Arc<Mutex<Memories>> {
         Arc::clone(&self.shared.memories)
     }
@@ -872,22 +945,35 @@ impl Session {
 
         let orch_prompt = self.build_orchestrator_prompt(&participants)?;
 
-        // Load memory files: session-level, then every agent keeping its own.
-        {
+        // Collect the scopes: session-level, then every agent keeping its own,
+        // and open each through the store. Opening here rather than at the
+        // first read is what makes an unreadable scope fail before a single
+        // provider call has been paid for.
+        let scopes = {
             let mut memories = lock(&self.shared.memories);
-            memories.session.load()?;
-            memories.per_agent.clear();
+            memories.agent_scopes.clear();
             for agent in &self.agents {
-                let Some(path) = &agent.memory else { continue };
-                lock(&self.shared.access).check_path(
-                    &format!("The memory file for {}", agent.name),
-                    path,
-                    &agent.name,
-                )?;
-                let mut memory = Memory::new(path);
-                memory.load()?;
-                memories.per_agent.insert(agent.name.clone(), memory);
+                let Some(scope) = &agent.memory else { continue };
+                if let Some(path) = memories.store.path(scope) {
+                    lock(&self.shared.access).check_path(
+                        &format!("The memory file for {}", agent.name),
+                        &path.display().to_string(),
+                        &agent.name,
+                    )?;
+                }
+                memories
+                    .agent_scopes
+                    .insert(agent.name.clone(), scope.clone());
             }
+            memories
+                .scopes()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let store = Arc::clone(&lock(&self.shared.memories).store);
+        for scope in &scopes {
+            store.open(scope)?;
         }
 
         self.identity = identity_for(
@@ -933,8 +1019,17 @@ impl Session {
             if !state.final_summary.is_empty() {
                 block.push_str(&format!("\n- Summary: {}", state.final_summary));
             }
-            lock(&self.shared.memories).session.append_entry(&block)?;
+            let (store, scope) = {
+                let memories = lock(&self.shared.memories);
+                (Arc::clone(&memories.store), memories.session_scope.clone())
+            };
+            store.append(&scope, &block)?;
         }
+
+        // The store's last word, after everything that could write to it has.
+        // A store that consolidates, indexes, or flushes does it here; the
+        // default has nothing to do and says so by not overriding `close`.
+        Arc::clone(&lock(&self.shared.memories).store).close()?;
 
         Ok(SessionResult {
             topic: self.topic.clone(),
@@ -1916,13 +2011,13 @@ fn default_tools(
     tools.push(
         ToolSpec::new(
             "read_memory",
-            "Read this session's memory file and return it as written.",
+            "Read this session's memory and return it as written.",
             json!({"type": "object", "properties": {}}),
             {
                 let memories = Arc::clone(memories);
                 Arc::new(move |_arguments: &Arguments, actor: &str| {
-                    let memories = lock(&memories);
-                    let content = memories.get(actor).read().trim().to_string();
+                    let (store, scope) = store_for(&memories, actor);
+                    let content = store.read(&scope)?.trim().to_string();
                     Ok(if content.is_empty() {
                         "(memory is empty)".to_string()
                     } else {
@@ -1938,7 +2033,7 @@ fn default_tools(
         tools.push(
             ToolSpec::new(
                 "write_memory",
-                "Append a note to this session's memory file, which every agent \
+                "Append a note to this session's memory, which every agent \
                  in the session reads. The note is stored as written: include \
                  whoever and whenever matters, because nothing is added around \
                  it. A session may filter what it keeps, so a note is not \
@@ -2781,7 +2876,7 @@ mod tests {
             let channel = Arc::new(CaptureChannel::default());
             let mut session = debate(&temp, provider, channel, "T");
             let result = session.run().expect("a run");
-            (result, session.memory())
+            (result, session.memory().expect("memory reads"))
         };
         let spoken = read_only
             .0
@@ -2972,6 +3067,259 @@ mod tests {
         assert!(written.contains("Alice: Ship it."), "{written}");
         assert!(written.contains("Alice: Bob dissented."), "{written}");
         assert!(!written.contains("sk-"), "{written}");
+    }
+
+    // ---- the memory store --------------------------------------------------
+
+    /// A store that keeps nothing and remembers everything it was asked to do.
+    #[derive(Default)]
+    struct RecordingStore {
+        calls: Mutex<Vec<String>>,
+        notes: Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingStore {
+        fn calls(&self) -> Vec<String> {
+            lock(&self.calls).clone()
+        }
+
+        fn notes(&self) -> Vec<(String, String)> {
+            lock(&self.notes).clone()
+        }
+    }
+
+    impl MemoryStore for RecordingStore {
+        fn read(&self, scope: &str) -> Result<String> {
+            lock(&self.calls).push(format!("read {scope}"));
+            Ok(lock(&self.notes)
+                .iter()
+                .filter(|(seen, _)| seen == scope)
+                .map(|(_, note)| note.clone())
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+
+        fn append(&self, scope: &str, note: &str) -> Result<()> {
+            lock(&self.calls).push(format!("append {scope}"));
+            lock(&self.notes).push((scope.to_string(), note.to_string()));
+            Ok(())
+        }
+
+        fn open(&self, scope: &str) -> Result<()> {
+            lock(&self.calls).push(format!("open {scope}"));
+            Ok(())
+        }
+
+        fn close(&self) -> Result<()> {
+            lock(&self.calls).push("close".to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_installed_store_is_opened_read_written_and_closed() {
+        // The whole slot in one run: every scope opened before the first turn,
+        // notes routed to it instead of to a file, and closed once at the end.
+        let temp = TempDir::new("store-lifecycle");
+        let store = Arc::new(RecordingStore::default());
+        let provider = Arc::new(SequenceProvider::new(&[
+            "@Alice, go.",
+            "My view.\n@MEMORY: Alice prefers Rust.",
+            "END_SESSION",
+            "Done.",
+        ]));
+        let config = SessionConfig {
+            topic: "T".to_string(),
+            provider: Some(provider),
+            channel: Some(Arc::new(CaptureChannel::default())),
+            memory: "session".to_string(),
+            memory_store: Some(Arc::clone(&store) as Arc<dyn MemoryStore>),
+            memory_write: true,
+            access_policy: confined(&temp),
+            turn_delay: Duration::ZERO,
+            ..SessionConfig::default()
+        };
+        let mut session = Session::new(config).expect("loads");
+        let mut alice = Agent::new("Alice").with_model("m");
+        alice.memory = Some("alice".to_string());
+        session.add_agent(alice).expect("add agent");
+        session
+            .add_agent(Agent::new("Bob").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
+            .expect("accepted");
+        session.run().expect("a run");
+
+        let calls = store.calls();
+        assert_eq!(calls.first().map(String::as_str), Some("open session"));
+        assert!(calls.contains(&"open alice".to_string()), "{calls:?}");
+        assert_eq!(calls.last().map(String::as_str), Some("close"));
+        // Every open precedes every read: a scope that cannot be opened fails
+        // the run before a provider is paid for a turn against it.
+        let first_read = calls
+            .iter()
+            .position(|call| call.starts_with("read "))
+            .expect("the prompt read memory");
+        assert!(calls[..first_read]
+            .iter()
+            .all(|call| call.starts_with("open")));
+
+        // Alice's marker went to her own scope; the result block to the
+        // session's. Neither reached the filesystem.
+        let notes = store.notes();
+        assert!(
+            notes
+                .iter()
+                .any(|(scope, note)| scope == "alice" && note == "Alice prefers Rust."),
+            "{notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|(scope, note)| scope == "session" && note.contains("## Session Result")),
+            "{notes:?}"
+        );
+        assert!(!temp.0.join("session").exists());
+    }
+
+    #[test]
+    fn the_filter_runs_before_an_installed_store_sees_a_note() {
+        // A third-party store must not be a way around the caller's filter, so
+        // the filter runs on the way in and the store never sees a refusal.
+        struct NoSecrets;
+        impl MemoryFilter for NoSecrets {
+            fn filter(&self, note: &str, actor: &str) -> Option<String> {
+                if note.contains("sk-") {
+                    return None;
+                }
+                Some(format!("{actor}: {note}"))
+            }
+        }
+
+        let temp = TempDir::new("store-filter");
+        let store = Arc::new(RecordingStore::default());
+        let mut session = Session::new(SessionConfig {
+            topic: "T".to_string(),
+            memory: "session".to_string(),
+            memory_store: Some(Arc::clone(&store) as Arc<dyn MemoryStore>),
+            memory_write: true,
+            memory_filter: Some(Arc::new(NoSecrets)),
+            access_policy: confined(&temp),
+            ..SessionConfig::default()
+        })
+        .expect("loads");
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+
+        let tools = session.shared.active_tools();
+        let write = tools
+            .iter()
+            .find(|tool| tool.name == "write_memory")
+            .expect("write_memory is registered");
+        let note = |text: &str| {
+            let mut arguments = Map::new();
+            arguments.insert("note".to_string(), Value::String(text.to_string()));
+            write.handler.call(&arguments, "Alice").expect("a write")
+        };
+
+        assert_eq!(note("Ship it."), "Saved to memory.");
+        assert_eq!(
+            note("The key is sk-4242."),
+            "Not saved: this session did not keep that note."
+        );
+
+        // Rewritten on the way in, and the refusal never reached the store at
+        // all: one append for two calls to the tool.
+        let notes = store.notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(
+            notes[0],
+            ("session".to_string(), "Alice: Ship it.".to_string())
+        );
+        assert_eq!(
+            store
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("append"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_store_that_names_no_file_is_checked_against_no_workspace() {
+        // The workspace confines files, and only the store knows whether a
+        // scope is one. The default says it is and the path is rejected; a
+        // store that keeps nothing on disk answers `None` and is left alone.
+        let temp = TempDir::new("store-paths");
+        let outside = "/nowhere/kerness-memory.md".to_string();
+
+        let denied = Session::new(SessionConfig {
+            topic: "T".to_string(),
+            memory: outside.clone(),
+            access_policy: confined(&temp),
+            ..SessionConfig::default()
+        });
+        assert!(
+            error_text(&denied.err().expect("the file is outside the workspace"))
+                .contains("memory file")
+        );
+
+        Session::new(SessionConfig {
+            topic: "T".to_string(),
+            memory: outside,
+            memory_store: Some(Arc::new(RecordingStore::default())),
+            access_policy: confined(&temp),
+            ..SessionConfig::default()
+        })
+        .expect("a store keeping no file has no path to confine");
+    }
+
+    #[test]
+    fn a_store_that_cannot_open_stops_the_run_before_the_first_turn() {
+        struct Sealed;
+        impl MemoryStore for Sealed {
+            fn read(&self, _scope: &str) -> Result<String> {
+                Ok(String::new())
+            }
+            fn append(&self, _scope: &str, _note: &str) -> Result<()> {
+                Ok(())
+            }
+            fn open(&self, scope: &str) -> Result<()> {
+                Err(Error::Io(format!("{scope} is sealed")))
+            }
+        }
+
+        let temp = TempDir::new("store-sealed");
+        let provider = Arc::new(SequenceProvider::new(&["END_SESSION", "Done."]));
+        let mut session = Session::new(SessionConfig {
+            topic: "T".to_string(),
+            provider: Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            channel: Some(Arc::new(CaptureChannel::default())),
+            memory: "session".to_string(),
+            memory_store: Some(Arc::new(Sealed)),
+            access_policy: confined(&temp),
+            turn_delay: Duration::ZERO,
+            ..SessionConfig::default()
+        })
+        .expect("loads");
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Bob").with_model("m"))
+            .expect("add agent");
+        session
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
+            .expect("accepted");
+
+        let error = session
+            .run()
+            .expect_err("an unopenable scope fails the run");
+        assert!(error_text(&error).contains("sealed"), "{error}");
+        assert!(provider.calls().is_empty());
     }
 
     // ---- harness narrowing ------------------------------------------------

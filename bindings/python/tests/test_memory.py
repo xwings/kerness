@@ -1,6 +1,12 @@
 """Tests for kerness.memory."""
 
-from kerness.memory import Memory
+from pathlib import Path
+
+import pytest
+
+from kerness.access import AccessPolicy
+from kerness.memory import FileMemory, Memory, MemoryStore
+from kerness.session import Session
 
 
 class TestMemory:
@@ -95,3 +101,75 @@ class TestMemory:
         os.utime(path, (week, week))
         mem.load()
         assert mem.age == 7
+
+
+class TestMemoryStore:
+    """The slot: a store the caller wrote, seen by the framework."""
+
+    def test_the_base_class_answers_for_a_store_that_keeps_no_file(self):
+        """Only ``read`` and ``append`` are required. The rest have answers a
+        store keeping nothing on disk can live with, so the smallest possible
+        store is two methods."""
+
+        class Ephemeral(MemoryStore):
+            def __init__(self):
+                self.notes = []
+
+            def read(self, scope):
+                return "\n".join(self.notes)
+
+            def append(self, scope, note):
+                self.notes.append(note)
+
+        store = Ephemeral()
+        assert store.open("anything") is None
+        assert store.age("anything") is None
+        assert store.path("anything") is None
+        assert store.close() is None
+
+    def test_the_bundled_store_is_a_memory_store(self):
+        """Registered rather than inherited, so ``isinstance`` holds against
+        an extension type the ABC cannot be a base of."""
+        assert isinstance(FileMemory(), MemoryStore)
+        assert issubclass(FileMemory, MemoryStore)
+
+    def test_the_bundled_store_keeps_one_file_per_scope(self, tmp_path):
+        """A scope is a name the store interprets, and this one reads it as a
+        path: two scopes are two files and neither sees the other's notes."""
+        store = FileMemory()
+        alice = str(tmp_path / "alice.md")
+        bob = str(tmp_path / "bob.md")
+
+        store.open(alice)
+        store.append(alice, "Alice was here.")
+        store.append(bob, "Bob was here.")
+
+        assert store.read(alice) == "Alice was here.\n"
+        assert store.read(bob) == "Bob was here.\n"
+        assert store.path(alice) == Path(alice)
+        assert store.age(alice) == 0
+        assert store.close() is None
+
+    def test_a_store_that_raises_reaches_the_caller_as_what_it_raised(
+        self, tmp_path
+    ):
+        """``read`` and ``append`` are fallible on both sides, so the class the
+        store raised is the class the caller catches — not a framework error
+        the exception was flattened into."""
+
+        class Sealed(MemoryStore):
+            def read(self, scope):
+                raise ValueError("sealed")
+
+            def append(self, scope, note):
+                raise ValueError("sealed")
+
+        session = Session(
+            gameplan="debate",
+            topic="T",
+            memory="anywhere",
+            memory_store=Sealed(),
+            access_policy=AccessPolicy(workspace=tmp_path),
+        )
+        with pytest.raises(ValueError, match="sealed"):
+            session.memory.read()

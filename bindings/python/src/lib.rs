@@ -17,6 +17,7 @@ mod channel;
 mod convert;
 mod errors;
 mod funcs;
+mod memory;
 mod provider;
 mod runtime;
 mod session;
@@ -40,7 +41,9 @@ fn bootstrap(
     types::register_dialect(dialect);
     kerness::assets::set_root(assets_root);
     provider::install_transport();
+    channel::install_console_writer();
     channel::install_logger();
+    access::install_console();
     Ok(())
 }
 
@@ -48,6 +51,7 @@ fn bootstrap(
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("VERSION", kerness::VERSION)?;
     module.add_function(wrap_pyfunction!(bootstrap, module)?)?;
+    module.add_function(wrap_pyfunction!(access::prompt_on_console, module)?)?;
     module.add_function(wrap_pyfunction!(provider::http_post_json, module)?)?;
     module.add_function(wrap_pyfunction!(
         provider::convert_messages_for_claude,
@@ -62,6 +66,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<types::PyTurn>()?;
     module.add_class::<types::PyAgent>()?;
     module.add_class::<types::PyMemory>()?;
+    module.add_class::<memory::PyFileMemory>()?;
+    module.add_class::<memory::PySessionMemory>()?;
     module.add_class::<types::PyPersonaConfig>()?;
     module.add_class::<types::PyRoleConfig>()?;
     module.add_class::<types::PySkillConfig>()?;
@@ -75,6 +81,10 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<types::PyPermitted>()?;
     module.add_class::<types::PyGameplanConfig>()?;
     module.add_class::<provider::PyProviderCore>()?;
+    module.add_class::<channel::PyConsoleChannel>()?;
+    module.add_class::<channel::PyFileChannel>()?;
+    module.add_class::<channel::PyLogChannel>()?;
+    module.add_class::<channel::PyMultiChannel>()?;
     module.add_class::<access::PyAccessRequest>()?;
     module.add_class::<access::PyAccessManager>()?;
     module.add_class::<skill::PySkillActivation>()?;

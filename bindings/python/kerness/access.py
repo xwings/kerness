@@ -4,7 +4,7 @@ The policy is a Python dataclass rather than an extension class, because its
 contract is written in Python list semantics: a caller may build one, hand it
 to a manager, and then append to one of its lists — and the manager is
 required *not* to see that, because it snapshots at construction. The manager
-itself, and every decision it makes, is Rust.
+itself, every decision it makes, and the console approver below are Rust.
 """
 
 from __future__ import annotations
@@ -13,70 +13,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kerness._core import AccessManager, AccessRequest
+from kerness._core import AccessManager, AccessRequest, prompt_on_console
 
 ApprovePrompt = Callable[[AccessRequest], bool]
-
-
-def prompt_on_console(req: AccessRequest) -> bool:
-    """Ask a human on the console whether to approve *req*.
-
-    **Opt-in only.** A session is a one-off non-interactive cycle, so nothing
-    reaches for this unless a caller passes it explicitly::
-
-        AccessPolicy(approve_prompt=prompt_on_console)
-
-    Off a TTY there is no human to answer, so this denies rather than reading a
-    piped stdin or blocking on one that never closes. The check lives here, in
-    the one approver that actually needs a console — a caller whose approver is
-    a GUI dialog or an HTTP callback has nothing to do with stdin and is never
-    gated on it.
-
-    Args:
-        req: The access request to approve.
-
-    Returns:
-        True when the human approved. An empty answer means yes; EOF, and a
-        non-interactive stdin, mean no.
-    """
-    if not _stdin_is_interactive():
-        return False
-    actor = f"Agent: {req.actor}\n" if req.actor else ""
-    message = (
-        "Approve request\n"
-        f"{actor}"
-        f"Type: {req.kind} {req.action}\n"
-        f"Target: {req.target}\n"
-    )
-    message = _blue(message)
-    try:
-        answer = input(f"{message}{_blue('Approve? [Y/n]: ')}")
-    except EOFError:
-        return False
-    if not answer.strip():
-        return True
-    return answer.strip().lower() in {"y", "yes"}
-
-
-def _stdin_is_interactive() -> bool:
-    """Whether a console prompt has any chance of being answered."""
-    try:
-        import sys
-
-        return bool(sys.stdin) and sys.stdin.isatty()
-    except Exception:
-        return False
-
-
-def _blue(text: str) -> str:
-    try:
-        import sys
-
-        if sys.stdout.isatty():
-            return f"\033[34m{text}\033[0m"
-    except Exception:
-        pass
-    return text
 
 
 @dataclass

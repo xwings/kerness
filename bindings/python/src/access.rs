@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use kerness::access::{AccessManager, AccessPolicy, AccessRequest, ApprovePrompt};
+use kerness::access::{AccessManager, AccessPolicy, AccessRequest, ApprovePrompt, ConsolePrompt};
 use kerness::pyfmt::repr_str;
 use pyo3::prelude::*;
 
@@ -84,6 +84,80 @@ impl PyAccessRequest {
             repr_str(&self.actor),
         )
     }
+}
+
+// -------------------------------------------------------------- console prompt
+
+/// Ask a human on the console whether to approve *request*.
+///
+/// The whole of the prompt — the wording, the terminal check, and what counts
+/// as a yes — is `kerness::access::prompt_on_console`. What the binding adds is
+/// the console it reads and writes through, installed by [`install_console`].
+///
+/// **Opt-in only**: `AccessPolicy(approve_prompt=prompt_on_console)`.
+#[pyfunction]
+#[pyo3(name = "prompt_on_console")]
+pub fn prompt_on_console(request: PyAccessRequest) -> bool {
+    kerness::access::prompt_on_console(&AccessRequest::new(
+        &request.kind,
+        &request.action,
+        request.target,
+        &request.actor,
+    ))
+}
+
+/// Reads and writes through `sys.stdin` and `sys.stdout`.
+///
+/// Not file descriptors 0 and 1: a caller who redirected either stream, and a
+/// test that replaced them, mean something by it, and reading the descriptor
+/// would go past them both.
+struct PyConsole;
+
+impl PyConsole {
+    /// Whether *stream* on `sys` is a terminal.
+    ///
+    /// Anything at all going wrong is a no. `sys.stdin` can be `None` under a
+    /// windowed launcher, a replacement stream need not implement `isatty`, and
+    /// a console question is not worth raising from: the honest reading of a
+    /// stream that cannot say whether it is a terminal is that it is not one.
+    fn is_terminal(stream: &str) -> bool {
+        Python::with_gil(|py| -> PyResult<bool> {
+            let stream = py.import("sys")?.getattr(stream)?;
+            if stream.is_none() {
+                return Ok(false);
+            }
+            stream.call_method0("isatty")?.extract()
+        })
+        .unwrap_or(false)
+    }
+}
+
+impl ConsolePrompt for PyConsole {
+    fn is_interactive(&self) -> bool {
+        PyConsole::is_terminal("stdin")
+    }
+
+    fn renders_colour(&self) -> bool {
+        PyConsole::is_terminal("stdout")
+    }
+
+    fn ask(&self, question: &str) -> Option<String> {
+        // `input` rather than a read of `sys.stdin`, because a caller who
+        // replaced it may have replaced `input` instead — and because `EOFError`
+        // is what end of input arrives as here, which `ok()` turns into the
+        // `None` the trait asks for.
+        Python::with_gil(|py| -> PyResult<String> {
+            py.import("builtins")?
+                .call_method1("input", (question,))?
+                .extract()
+        })
+        .ok()
+    }
+}
+
+/// Route the console approver's question through `sys.stdin` and `sys.stdout`.
+pub fn install_console() {
+    kerness::access::set_console_prompt(Arc::new(PyConsole));
 }
 
 // --------------------------------------------------------------- AccessPolicy

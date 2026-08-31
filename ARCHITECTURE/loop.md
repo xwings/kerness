@@ -17,14 +17,14 @@ different control flow implements `LoopHost` and keeps everything else.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/orchestrator.rs` | `LoopHost`, `LoopState`, `PhaseTracker`, `OrchestratorLoop`, result parsing |
-| `bindings/python/src/runtime.rs:493,619` | `PyLoopState`, `PyOrchestratorLoop` |
+| `bindings/python/src/runtime.rs:524,650` | `PyLoopState`, `PyOrchestratorLoop` |
 | `bindings/python/kerness/loop.py` | re-export shim |
 
 ## Key Types and Entry Points
 
 - `crates/kerness/src/orchestrator.rs:49` — `LoopHost` — what the loop needs from
   whatever is running it: run an agent turn, deliver a message, read the roster.
-  `Session` implements it at `session.rs:1400`.
+  `Session` implements it at `session.rs:1766`.
 - `crates/kerness/src/orchestrator.rs:396` — `OrchestratorLoop` — the loop itself,
   built with `new` (`:415`) and the `with_*` options at `:435`–`:453`.
 - `crates/kerness/src/orchestrator.rs:462` — `run(host)` — one call, returns the

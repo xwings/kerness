@@ -17,7 +17,6 @@ use kerness::persona::PersonaConfig;
 use kerness::provider::{ProviderResponse, ReasoningEffort};
 use kerness::pyfmt::repr_str;
 use kerness::role::{Position, RoleConfig};
-use kerness::session::Memories;
 use kerness::skill::loader::SkillConfig;
 use kerness::tooling::{Arguments, ToolCall, ToolHandler, ToolSpec};
 use kerness::toolkit::ToolResult;
@@ -965,47 +964,13 @@ impl PyAgent {
 
 // --------------------------------------------------------------------- Memory
 
-/// Where a [`PyMemory`] keeps its file.
+/// One Markdown file, read and appended to.
 ///
-/// A memory a caller built stands alone. A session's does not: the session
-/// writes to it during the run, so `session.memory.read()` afterwards has to
-/// reach the session's own file and not a copy taken when the attribute was
-/// first read.
-enum Store {
-    Owned(Memory),
-    Session(Arc<std::sync::Mutex<Memories>>),
-}
-
-impl Store {
-    /// Run *act* against the file this memory stands for.
-    fn with<T>(&mut self, act: impl FnOnce(&mut Memory) -> T) -> T {
-        match self {
-            Store::Owned(memory) => act(memory),
-            Store::Session(memories) => act(&mut lock(memories).session),
-        }
-    }
-}
-
-/// Take a session lock, treating poisoning as the panic it reports.
-fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// A file-backed note the session can read and, when allowed, append to.
+/// The file primitive [`FileMemory`](kerness::memory::FileMemory) is built out
+/// of, for a caller who wants the file and not the store around it.
 #[pyclass(name = "Memory", module = "kerness._core")]
 pub struct PyMemory {
-    store: Store,
-}
-
-impl PyMemory {
-    /// A handle on the session-level memory of a running session.
-    pub fn of_session(memories: Arc<std::sync::Mutex<Memories>>) -> Self {
-        PyMemory {
-            store: Store::Session(memories),
-        }
-    }
+    inner: Memory,
 }
 
 #[pymethods]
@@ -1014,46 +979,45 @@ impl PyMemory {
     #[pyo3(signature = (path=PathBuf::from("memory.md")))]
     fn new(path: PathBuf) -> Self {
         PyMemory {
-            store: Store::Owned(Memory::new(path)),
+            inner: Memory::new(path),
         }
     }
 
     #[getter]
-    fn path(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let path = self.store.with(|memory| memory.path().to_path_buf());
-        path_to_py(py, path.to_string_lossy().as_ref())
+    fn path(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        path_to_py(py, self.inner.path().to_string_lossy().as_ref())
     }
 
     /// Whole days since the file was last written, or ``None`` when there is
     /// no file to date.
     #[getter]
-    fn age(&mut self) -> Option<u64> {
-        self.store.with(|memory| memory.age())
+    fn age(&self) -> Option<u64> {
+        self.inner.age()
     }
 
     /// Read the file into memory, treating an absent file as empty.
     fn load(&mut self) -> PyResult<()> {
-        self.store.with(Memory::load).raise()
+        self.inner.load().raise()
     }
 
     /// The loaded text.
-    fn read(&mut self) -> String {
-        self.store.with(|memory| memory.read().to_string())
+    fn read(&self) -> String {
+        self.inner.read().to_string()
     }
 
     /// Append *text* verbatim.
     fn append(&mut self, text: &str) -> PyResult<()> {
-        self.store.with(|memory| memory.append(text)).raise()
+        self.inner.append(text).raise()
     }
 
     /// Append *text* as its own block.
     fn append_entry(&mut self, text: &str) -> PyResult<()> {
-        self.store.with(|memory| memory.append_entry(text)).raise()
+        self.inner.append_entry(text).raise()
     }
 
     /// Replace the file's contents.
     fn write(&mut self, content: &str) -> PyResult<()> {
-        self.store.with(|memory| memory.write(content)).raise()
+        self.inner.write(content).raise()
     }
 }
 

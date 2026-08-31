@@ -35,7 +35,7 @@ prompt, a different loop, and the authority to address participants by name. See
 
 - `crates/kerness/src/agent.rs:22` — `Agent` — name, model, reasoning effort,
   provider, persona, role and position, system prompt, skills, tools, the
-  per-agent memory path, and the per-agent workspace.
+  per-agent memory scope, and the per-agent workspace.
 - `crates/kerness/src/agent.rs:61` — `skills` / `:72` `tools` — the two
   tri-state lists: `None` takes what the session permits, a list selects out of
   it, and `[]` opts out. Both narrow — see below.
@@ -172,6 +172,6 @@ cargo test -p kerness agent::                                     # pass = 0 fai
   model *silently crossing a provider boundary*, which is the failure the
   framework can see; whether a given backend has heard of a given name is still
   answered by the first call.
-- Per-agent memory paths are supported, but the session's shared memory is the
-  common case; two agents pointed at one file both see each other's writes (see
+- Per-agent memory scopes are supported, but the session's shared memory is the
+  common case; two agents pointed at one scope both see each other's writes (see
   [memory.md](memory.md)).

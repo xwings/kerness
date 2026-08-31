@@ -9,6 +9,7 @@ from kerness.access import AccessPolicy
 from kerness.channel import ConsoleChannel, FileChannel, MultiChannel
 from kerness.exceptions import AccessDeniedError, ProviderHTTPError, SessionError
 from kerness.gameplan_loader import list_builtin_gameplans
+from kerness.memory import MemoryStore
 from kerness.provider import Provider, ProviderResponse
 from kerness.session import Session, SessionResult
 from kerness.skill_loader import load_skill
@@ -2370,6 +2371,140 @@ class TestMemoryTools:
         prompt = provider.calls[0]["messages"][0]["content"]
         assert "- read_memory:" in prompt
         assert "- write_memory:" not in prompt
+
+
+class TestAStoreTheCallerWrote:
+    """`memory_store=` is the slot: the session's notes go wherever the caller
+    put them, and the file the default writes is one choice among others."""
+
+    def test_a_python_store_is_opened_read_written_and_closed(self, tmp_path):
+        """The whole lifecycle in one run, from Python: every scope opened
+        before the first turn, notes routed to the store instead of a file,
+        and closed once at the end."""
+
+        class Recording(MemoryStore):
+            def __init__(self):
+                self.calls = []
+                self.notes = []
+
+            def read(self, scope):
+                self.calls.append(f"read {scope}")
+                return "\n".join(n for s, n in self.notes if s == scope)
+
+            def append(self, scope, note):
+                self.calls.append(f"append {scope}")
+                self.notes.append((scope, note))
+
+            def open(self, scope):
+                self.calls.append(f"open {scope}")
+
+            def close(self):
+                self.calls.append("close")
+
+        store = Recording()
+        provider = SequenceMockProvider(responses=[
+            "@Alice, speak.",
+            "My opinion.\n@MEMORY: Alice prefers Rust.",
+            "END_SESSION",
+            "Final summary text.",
+        ])
+        session = Session(
+            gameplan="debate",
+            topic="T",
+            provider=provider,
+            channel=CaptureChannel(),
+            turn_delay_sec=0,
+            memory="session",
+            memory_store=store,
+            memory_write=True,
+            access_policy=confined(tmp_path),
+        )
+        session.add_agent("Alice", model="m", memory="alice")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
+        session.run()
+
+        assert store.calls[0] == "open session"
+        assert "open alice" in store.calls
+        assert store.calls[-1] == "close"
+        assert ("alice", "Alice prefers Rust.") in store.notes
+        assert any(
+            scope == "session" and "Session Result" in note
+            for scope, note in store.notes
+        )
+        # Nothing was written to disk, because nothing asked the store to.
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_filter_runs_before_the_store_sees_a_note(self, tmp_path):
+        """A store the caller wrote is not a way around the filter the caller
+        installed: the filter runs on the way in, and a refusal never reaches
+        the store at all."""
+
+        class Recording(MemoryStore):
+            def __init__(self):
+                self.notes = []
+
+            def read(self, scope):
+                return "\n".join(self.notes)
+
+            def append(self, scope, note):
+                self.notes.append(note)
+
+        store = Recording()
+        provider = SequenceMockProvider(responses=[
+            "@Alice, speak.",
+            "Noted.\n@MEMORY: Ship it.\n@MEMORY: The key is sk-4242.",
+            "END_SESSION",
+            "Summary.",
+        ])
+        session = Session(
+            gameplan="debate",
+            topic="T",
+            provider=provider,
+            channel=CaptureChannel(),
+            turn_delay_sec=0,
+            memory="session",
+            memory_store=store,
+            memory_write=True,
+            memory_filter=lambda note, actor: (
+                None if "sk-" in note else f"{actor}: {note}"
+            ),
+            access_policy=confined(tmp_path),
+        )
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
+        session.run()
+
+        # Rewritten on the way in, and the refusal never arrived: the only note
+        # from an agent is the one the filter passed.
+        agent_notes = [n for n in store.notes if not n.startswith("## Session")]
+        assert agent_notes == ["Alice: Ship it."]
+
+    def test_a_store_naming_no_file_is_confined_against_nothing(self, tmp_path):
+        """The workspace confines files, and only the store knows whether a
+        scope is one. The default says it is; a store keeping nothing on disk
+        answers ``None`` and is left alone."""
+
+        class Ephemeral(MemoryStore):
+            def read(self, scope):
+                return ""
+
+            def append(self, scope, note):
+                pass
+
+        outside = str(tmp_path.parent / "escape.md")
+        with pytest.raises(AccessDeniedError):
+            Session(topic="T", memory=outside, access_policy=confined(tmp_path))
+
+        session = Session(
+            topic="T",
+            memory=outside,
+            memory_store=Ephemeral(),
+            access_policy=confined(tmp_path),
+        )
+        assert session.memory.path is None
+        assert session.memory.scope == outside
 
 
 class TestParticipantCountIsEnforcedAtRun:

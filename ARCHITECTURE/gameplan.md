@@ -22,7 +22,7 @@ ship with the framework, and the three-step resolution of where they live.
 | `crates/kerness/src/gameplan.rs` | loading, splitting, and the built-in list |
 | `crates/kerness/src/assets.rs` | the assets root and Markdown-stem enumeration |
 | `crates/kerness/assets/gameplans/*.md` | the built-in gameplans |
-| `bindings/python/src/types.rs:1819` | `PyGameplanConfig` |
+| `bindings/python/src/types.rs:1900` | `PyGameplanConfig` |
 | `bindings/python/kerness/gameplan_loader.py` | re-export shim |
 
 ## Key Types and Entry Points
@@ -63,7 +63,7 @@ cargo test -p kerness gameplan                                              # pa
 .venv/bin/python -m pytest bindings/python/tests/test_packaging.py -q       # pass = 0 failed
 ```
 
-- `bindings/python/tests/test_packaging.py:30` asserts the crate's assets and the package's
+- `bindings/python/tests/test_packaging.py:42` asserts the crate's assets and the package's
   assets are byte-identical; nothing in the build enforces it.
 - `bindings/python/tests/test_gameplan_loader.py:32` — `test_every_discovered_gameplan_loads_under_its_own_name` —
   the discovery assertion: every file on disk is loaded, not merely listed.
