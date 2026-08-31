@@ -166,11 +166,12 @@ directly.
 
 ### Inside `run()`
 
-`Session::run` (`crates/kerness/src/session.rs:788`) is the whole harness:
+`Session::run` (`crates/kerness/src/session.rs:891`) is the whole harness:
 it resolves the gameplan's harness spec against what was registered, fills every
 agent's unset option and narrows the tool and context lists each one may use,
-builds the skill registry and access manager, calls every permitted context
-source once per agent, seeds the `Conversation`, then either runs the
+builds the skill registry and access manager, opens every memory scope through
+the installed store, calls every permitted context source once per agent, seeds
+the `Conversation`, then either runs the
 round-robin participant loop or hands control to `OrchestratorLoop::run`
 (`crates/kerness/src/orchestrator.rs:462`) when the gameplan declares an
 orchestrator. Each agent turn goes through `AgentRunner::run`
@@ -193,6 +194,9 @@ Python package as well as the crate.
 | `MAX_INVALID_CALLS` | `3` | `crates/kerness/src/agent_runtime.rs:41` |
 | `MAX_REPEATED_FAILURES` | `3` | `crates/kerness/src/agent_runtime.rs:52` |
 | `MEMORY_STALE_AFTER_DAYS` | `1` | `crates/kerness/src/prompting.rs:50` |
+| `DEFAULT_KEEP_ENTRIES` | `20` | `crates/kerness/src/memory.rs:420` |
+| `DEFAULT_MEMORY_BUDGET` | `2_200` | `crates/kerness/src/memory.rs:676` |
+| `ENTRY_SEPARATOR` | `§` | `crates/kerness/src/memory.rs:685` |
 | `DEFAULT_ROLE_FILE` | `participant.md` | `crates/kerness/src/role.rs:66` |
 | `DEFAULT_TERMINATORS` | `CONSENSUS_REACHED`, `END_SESSION` | `crates/kerness/src/utils.rs:12` |
 | `RESERVED_TOOL_NAMES` | `["Skill"]` | `crates/kerness/src/harness.rs:25` |
@@ -234,11 +238,11 @@ its own status.
 
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
-cargo test --workspace -q                             # pass = 380 unit + 109 integration, 0 failed
+cargo test --workspace -q                             # pass = 401 unit + 109 integration, 0 failed
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key, no network
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 487 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 494 passed
 .venv/bin/python -m kerness.selfcheck                 # pass = "OK: all core checks passed", exit 0
 .venv/bin/ruff check bindings/python                  # pass = "All checks passed!"
 ```

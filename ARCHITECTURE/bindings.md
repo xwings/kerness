@@ -66,12 +66,12 @@ that keep it true when a feature needs the interpreter.
 `Channel`, and `MemoryStore` are subclassed by user code, so they are Python
 classes (`bindings/python/kerness/provider.py:99`,
 `bindings/python/kerness/channel.py:21`,
-`bindings/python/kerness/memory.py:19`). `Provider` holds a `_core` handle and
+`bindings/python/kerness/memory.py:27`). `Provider` holds a `_core` handle and
 its methods forward `self` back down, so a subclass override wins by ordinary
 Python method resolution rather than by anything the binding does. The other two
-have no logic to forward — the four bundled channels and the bundled
-`FileMemory` are crate types registered against their ABC at `channel.py:50` and
-`memory.py:78`, so `isinstance` holds without inheritance.
+have no logic to forward — the four bundled channels and the two bundled stores
+are crate types registered against their ABC at `channel.py:50` and
+`memory.py:86`, so `isinstance` holds without inheritance.
 
 **Own the pieces, build the borrowing value transiently.** `PromptAssembler<'a>`
 and `AgentRunner<'a>` borrow their inputs, which no `#[pyclass]` can express.
@@ -87,8 +87,8 @@ method boundary. See [channel.md](channel.md) for the full account.
 Python code reaches the framework as five traits, and each is bound at a
 different moment. `Provider`, `Channel`, and `MemoryStore` are subclassed, so
 the binding takes the instance — a store through `bind_memory_store`
-(`bindings/python/src/memory.rs:109`), which passes the bundled `FileMemory`
-straight through rather than round-tripping every call through the interpreter.
+(`bindings/python/src/memory.rs:136`), which passes a bundled store straight
+through rather than round-tripping every call through the interpreter.
 A tool handler is any callable and is bound by `Session.add_tool`. A context
 source is a callable too, bound by `add_context`
 (`bindings/python/src/session.rs:524`), called once per agent at the top of

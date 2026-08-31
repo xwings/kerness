@@ -43,7 +43,7 @@ the pure-Rust caller the crate exists for unrepresented.
 | `crates/kerness/tests/common/mod.rs` | the doubles all eight files share |
 | `crates/kerness/tests/*.rs` | one file per behaviour cluster, 109 tests |
 | `bindings/python/tests/conftest.py` | the Python suite's equivalent doubles |
-| `bindings/python/tests/test_*.py` | 26 modules, 487 tests |
+| `bindings/python/tests/test_*.py` | 26 modules, 494 tests |
 | `crates/kerness/examples/*.rs` | 8 examples, compiled by CI |
 | `bindings/python/examples/` | 7 Python examples, walked by `bindings/python/tests/test_examples.py` |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
@@ -136,10 +136,10 @@ The eight integration files:
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-cargo test --workspace -q                             # pass = 380 unit + 109 integration, 0 failed
+cargo test --workspace -q                             # pass = 401 unit + 109 integration, 0 failed
 cargo build -p kerness --examples                     # pass = all 8 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 487 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 494 passed
 ```
 
 The wheel is built from `bindings/python/`, where `pyproject.toml` lives:

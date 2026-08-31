@@ -5,8 +5,18 @@ from pathlib import Path
 import pytest
 
 from kerness.access import AccessPolicy
-from kerness.memory import FileMemory, Memory, MemoryStore
+from kerness.memory import (
+    CONSOLIDATED_PREFIX,
+    DEFAULT_MEMORY_BUDGET,
+    REVISE_UNSUPPORTED,
+    CuratedMemory,
+    FileMemory,
+    Memory,
+    MemoryStore,
+    SummarizingMemory,
+)
 from kerness.session import Session
+from tests.conftest import MockProvider
 
 
 class TestMemory:
@@ -126,12 +136,23 @@ class TestMemoryStore:
         assert store.age("anything") is None
         assert store.path("anything") is None
         assert store.close() is None
+        assert store.budget() is None
+        with pytest.raises(ValueError, match="cannot be revised"):
+            store.revise("anything", "old", "new")
+        # The refusal is the crate's own message, imported rather than
+        # respelled here, so the two halves of the default cannot drift.
+        assert REVISE_UNSUPPORTED.endswith("cannot be revised or removed")
 
-    def test_the_bundled_store_is_a_memory_store(self):
+    def test_the_bundled_stores_are_memory_stores(self, tmp_path):
         """Registered rather than inherited, so ``isinstance`` holds against
         an extension type the ABC cannot be a base of."""
+        summarizing = SummarizingMemory(tmp_path, MockProvider(), "m")
         assert isinstance(FileMemory(), MemoryStore)
         assert issubclass(FileMemory, MemoryStore)
+        assert isinstance(summarizing, MemoryStore)
+        assert issubclass(SummarizingMemory, MemoryStore)
+        assert isinstance(CuratedMemory(tmp_path), MemoryStore)
+        assert issubclass(CuratedMemory, MemoryStore)
 
     def test_the_bundled_store_keeps_one_file_per_scope(self, tmp_path):
         """A scope is a name the store interprets, and this one reads it as a
@@ -173,3 +194,136 @@ class TestMemoryStore:
         )
         with pytest.raises(ValueError, match="sealed"):
             session.memory.read()
+
+
+class TestSummarizingMemory:
+    """The second bundled store: recent notes verbatim, the rest summarised."""
+
+    def test_entries_stay_verbatim_until_the_run_closes(self, tmp_path):
+        """Nothing is rewritten while the session is still writing: the store
+        summarises once, at the end, when the whole run is known."""
+        provider = MockProvider(responses=["a compact recap"])
+        store = SummarizingMemory(tmp_path, provider, "test-model", keep=2)
+
+        for note in ["oldest", "older", "recent", "newest"]:
+            store.append("shared", note)
+
+        assert store.read("shared") == "oldest\n\nolder\n\nrecent\n\nnewest"
+        assert provider.calls == []
+
+    def test_closing_folds_the_overflow_into_one_summary(self, tmp_path):
+        """One provider call, carrying only what overflowed, and the kept
+        entries survive it word for word."""
+        provider = MockProvider(responses=["a compact recap"])
+        store = SummarizingMemory(tmp_path, provider, "test-model", keep=2)
+
+        for note in ["oldest", "older", "recent", "newest"]:
+            store.append("shared", note)
+        store.close()
+
+        assert store.read("shared") == (
+            f"{CONSOLIDATED_PREFIX}\na compact recap\n\nrecent\n\nnewest"
+        )
+        assert len(provider.calls) == 1
+        assert provider.calls[0]["messages"][-1]["content"] == "oldest\n\nolder"
+
+    def test_the_scope_is_a_key_and_the_file_is_under_the_root(self, tmp_path):
+        """A store handed a scope that reads like a path must not follow it:
+        the encoding leaves one filename, and the workspace confines it."""
+        store = SummarizingMemory(tmp_path, MockProvider(), "test-model")
+
+        assert store.path("shared") == tmp_path / "shared.json"
+        assert store.path("../../elsewhere") == (
+            tmp_path / "%2E%2E%2F%2E%2E%2Felsewhere.json"
+        )
+        assert store.age("shared") is None
+        store.append("shared", "a note")
+        assert store.age("shared") == 0
+
+    def test_a_session_can_be_told_to_keep_its_memory_in_one(self, tmp_path):
+        """The whole point of the slot: the session addresses it by scope and
+        never learns it is not a file of prose."""
+        store = SummarizingMemory(tmp_path, MockProvider(), "test-model")
+        session = Session(
+            gameplan="debate",
+            topic="T",
+            memory="the-session",
+            memory_store=store,
+            access_policy=AccessPolicy(workspace=tmp_path),
+        )
+
+        session.memory.append("something worth keeping")
+        assert session.memory.read() == "something worth keeping"
+        assert session.memory.path == tmp_path / "the-session.json"
+
+
+class TestCuratedMemory:
+    """The third bundled store: a ceiling the agents are held to.
+
+    What the ceiling *does* is decided in the crate and asserted there. What
+    is left for this suite is the constructor's own keyword and the two
+    directions the store can be handed across the boundary.
+    """
+
+    def test_the_ceiling_is_the_crate_default_or_the_keyword_that_overrides_it(
+        self, tmp_path
+    ):
+        """The default is written into the pyo3 signature rather than repeated
+        in Python, so a caller omitting it and one naming it both have to come
+        back with the figure the crate holds."""
+        assert CuratedMemory(tmp_path).budget() == DEFAULT_MEMORY_BUDGET
+        assert CuratedMemory(tmp_path, budget=40).budget() == 40
+
+    def test_a_session_can_be_told_to_keep_its_memory_in_one(self, tmp_path):
+        """The slot again, with the store that has a ceiling: the session
+        addresses it by scope and reads back what the prompt would quote."""
+        store = CuratedMemory(tmp_path)
+        session = Session(
+            gameplan="debate",
+            topic="T",
+            memory="the-session",
+            memory_store=store,
+            access_policy=AccessPolicy(workspace=tmp_path),
+        )
+
+        session.memory.append("something worth keeping")
+        assert session.memory.read().endswith("something worth keeping")
+        assert session.memory.path == tmp_path / "the-session.md"
+
+    def test_a_store_written_in_python_is_asked_for_its_ceiling(self, tmp_path):
+        """``budget`` is what decides whether the session offers ``edit_memory``
+        at all, so a store subclassed in Python has to be asked — the answer
+        crosses back as ``None`` or an ``int``."""
+
+        class Counted(MemoryStore):
+            def __init__(self):
+                self.asked = 0
+                self.notes = []
+
+            def read(self, scope):
+                return "\n".join(self.notes)
+
+            def append(self, scope, note):
+                self.notes.append(note)
+
+            def budget(self):
+                self.asked += 1
+                return 600
+
+        store = Counted()
+        session = Session(
+            gameplan="debate",
+            topic="T",
+            provider=MockProvider(responses=["END_SESSION"]),
+            turn_delay_sec=0,
+            memory="the-session",
+            memory_store=store,
+            memory_write=True,
+            access_policy=AccessPolicy(workspace=tmp_path),
+        )
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
+        session.run()
+
+        assert store.asked > 0

@@ -17,6 +17,7 @@ use kerness::compaction::{CHARS_PER_TOKEN, COMPACT_TO_FRACTION};
 use kerness::exec::DEFAULT_TIMEOUT;
 use kerness::gameplan::{list_builtin_gameplans, load_gameplan};
 use kerness::harness::RESERVED_TOOL_NAMES;
+use kerness::memory::{DEFAULT_KEEP_ENTRIES, DEFAULT_MEMORY_BUDGET, ENTRY_SEPARATOR};
 use kerness::persona::{format_persona_for_prompt, list_builtin_personas, load_persona};
 use kerness::prompting::MEMORY_STALE_AFTER_DAYS;
 use kerness::provider::{
@@ -48,6 +49,9 @@ fn the_documented_constants_hold_their_documented_values() {
     assert_eq!(MAX_INVALID_CALLS, 3);
     assert_eq!(MAX_REPEATED_FAILURES, 3);
     assert_eq!(MEMORY_STALE_AFTER_DAYS, 1);
+    assert_eq!(DEFAULT_KEEP_ENTRIES, 20);
+    assert_eq!(DEFAULT_MEMORY_BUDGET, 2_200);
+    assert_eq!(ENTRY_SEPARATOR, "§");
     assert_eq!(DEFAULT_ROLE_FILE, "participant.md");
     assert_eq!(DEFAULT_TERMINATORS, ["CONSENSUS_REACHED", "END_SESSION"]);
     assert_eq!(RESERVED_TOOL_NAMES, ["Skill"]);

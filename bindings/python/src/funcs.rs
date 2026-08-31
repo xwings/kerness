@@ -16,6 +16,7 @@ use kerness::exec;
 use kerness::gameplan;
 use kerness::harness;
 use kerness::jsonschema;
+use kerness::memory;
 use kerness::persona;
 use kerness::provider;
 use kerness::role;
@@ -717,6 +718,12 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "MEMORY_STALE_AFTER_DAYS",
         prompting::MEMORY_STALE_AFTER_DAYS,
     )?;
+    module.add("DEFAULT_KEEP_ENTRIES", memory::DEFAULT_KEEP_ENTRIES)?;
+    module.add("CONSOLIDATED_PREFIX", memory::CONSOLIDATED_PREFIX)?;
+    module.add("CONSOLIDATE_PROMPT", memory::CONSOLIDATE_PROMPT)?;
+    module.add("DEFAULT_MEMORY_BUDGET", memory::DEFAULT_MEMORY_BUDGET)?;
+    module.add("ENTRY_SEPARATOR", memory::ENTRY_SEPARATOR)?;
+    module.add("REVISE_UNSUPPORTED", memory::REVISE_UNSUPPORTED)?;
     module.add("CONTEXT_HEADER", prompting::CONTEXT_HEADER)?;
     module.add("FORCED_END_NOTE", orchestrator::FORCED_END_NOTE)?;
     module.add("FOLLOWUP_PROMPT", agent_runtime::FOLLOWUP_PROMPT)?;

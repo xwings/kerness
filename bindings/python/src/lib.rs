@@ -67,6 +67,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<types::PyAgent>()?;
     module.add_class::<types::PyMemory>()?;
     module.add_class::<memory::PyFileMemory>()?;
+    module.add_class::<memory::PySummarizingMemory>()?;
+    module.add_class::<memory::PyCuratedMemory>()?;
     module.add_class::<memory::PySessionMemory>()?;
     module.add_class::<types::PyPersonaConfig>()?;
     module.add_class::<types::PyRoleConfig>()?;

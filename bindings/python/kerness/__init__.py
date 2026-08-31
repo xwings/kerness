@@ -38,7 +38,14 @@ from kerness.exceptions import (
     SessionError,
 )
 from kerness.gameplan_loader import GameplanConfig, load_gameplan
-from kerness.memory import FileMemory, Memory, MemoryStore, SessionMemory
+from kerness.memory import (
+    CuratedMemory,
+    FileMemory,
+    Memory,
+    MemoryStore,
+    SessionMemory,
+    SummarizingMemory,
+)
 from kerness.persona_loader import (
     PersonaConfig,
     format_persona_for_prompt,
@@ -124,6 +131,8 @@ __all__ = [
     "Memory",
     "MemoryStore",
     "FileMemory",
+    "SummarizingMemory",
+    "CuratedMemory",
     "SessionMemory",
     # Exceptions
     "KernessError",

@@ -27,8 +27,8 @@ about the world is exactly the part a framework cannot guess.
 | ---- | ---- |
 | `crates/kerness/src/context.rs` | the `ContextSource` trait and its closure impl |
 | `crates/kerness/src/prompting.rs:96` | `CONTEXT_HEADER` and `context_block` |
-| `crates/kerness/src/session.rs:735` | `add_context`, registration and name checks |
-| `crates/kerness/src/session.rs:1308` | `resolve_context`, the once-per-agent render |
+| `crates/kerness/src/session.rs:808` | `add_context`, registration and name checks |
+| `crates/kerness/src/session.rs:1403` | `resolve_context`, the once-per-agent render |
 | `bindings/python/src/session.rs` | `add_context`, wrapping a Python callable |
 
 ## Key Types and Entry Points
@@ -39,7 +39,7 @@ about the world is exactly the part a framework cannot guess.
 - `crates/kerness/src/context.rs:41` — the blanket impl over `Fn(&str) -> Result<String>`,
   which is what lets a caller pass a closure where the signature asks for the
   trait, as the access approver does.
-- `crates/kerness/src/session.rs:735` — `Session::add_context(name, source)` — a name
+- `crates/kerness/src/session.rs:808` — `Session::add_context(name, source)` — a name
   is required and must be unique; it becomes the `###` subheading the block is
   rendered under, because a model given two unlabelled blocks cannot say which
   one it is quoting.
@@ -54,7 +54,7 @@ about the world is exactly the part a framework cannot guess.
 
 ### Once per agent, at the top of the run
 
-`resolve_context` (`session.rs:1308`) calls every permitted source once for every
+`resolve_context` (`session.rs:1403`) calls every permitted source once for every
 agent and caches the result in `Shared.context_cache`. Two consequences, both
 deliberate:
 

@@ -21,8 +21,8 @@ every call, and a retry after a provider says the check was wrong.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/compaction.rs` | estimation, the rewrite, and the summary request |
-| `crates/kerness/src/session.rs:1586` | `fit_conversation`, the ceiling and the overhead it leaves |
-| `crates/kerness/src/session.rs:960` | `turn`, the one retry after a provider refusal |
+| `crates/kerness/src/session.rs:1681` | `fit_conversation`, the ceiling and the overhead it leaves |
+| `crates/kerness/src/session.rs:1055` | `turn`, the one retry after a provider refusal |
 | `bindings/python/src/funcs.rs` | the four functions and four constants, re-exported |
 | `bindings/python/kerness/compaction.py` | re-export shim |
 
@@ -54,34 +54,34 @@ cheaper model than the one running the session.
 
 ### The ceiling is per agent, and the conversation gets what is left
 
-`fit_conversation` (`session.rs:1586`) is called before every provider call, not
+`fit_conversation` (`session.rs:1681`) is called before every provider call, not
 after the previous one, so the turn about to be sent is the one that fits. It
 works out two figures:
 
-- The **ceiling** (`context_ceiling`, `session.rs:1570`) is the smaller of
+- The **ceiling** (`context_ceiling`, `session.rs:1665`) is the smaller of
   `max_context_tokens` — what the caller is willing to spend — and the
   provider's own window for that agent's model
   ([`Provider::context_window`](provider.md)). A mixed-provider session has one
   figure per model, and compacting the whole run against the largest of them
   would fail on every turn taken by the smallest.
-- The **overhead** (`prompt_overhead`, `session.rs:1525`) is the assembled
+- The **overhead** (`prompt_overhead`, `session.rs:1620`) is the assembled
   system message plus, under a native dialect, the tool schemas that travel in
   the request body. Under text the schemas are already inside the system message,
   so counting them again would charge the caller twice.
 
-The conversation may use the difference. That is why the memory file, the
+The conversation may use the difference. That is why memory, the
 persona, the skill index, the context blocks, and the permitted tool set all
 narrow what history survives, and why the measurement is per turn rather than
-once: those differ by agent, and the memory file grows during the run. An
+once: those differ by agent, and memory grows during the run. An
 overhead that meets or exceeds the ceiling is a named session error
-(`session.rs:1593`) rather than something to hand to the provider — compaction
+(`session.rs:1688`) rather than something to hand to the provider — compaction
 cannot touch the system prompt, so no amount of summarizing would make it fit,
 and continuing would buy a summary call per turn and still fail.
 
 ### The reactive pass
 
 The estimate can be wrong in the direction that matters, and the provider is the
-authority. `Session::turn` (`session.rs:960`) catches a refusal that
+authority. `Session::turn` (`session.rs:1055`) catches a refusal that
 [errors.md](errors.md)'s `is_context_overflow` recognises, compacts to
 `OVERFLOW_RETRY_FRACTION` of the allowance, and calls once more.
 

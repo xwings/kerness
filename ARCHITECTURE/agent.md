@@ -100,7 +100,7 @@ which can refuse it — see [access.md](access.md).
 
 `tools` is the third field that does not simply override the session's. A name
 the gameplan did not permit is refused when the session resolves its agents
-(`session.rs:1276`), before the first provider call and named with the agent, so
+(`session.rs:1371`), before the first provider call and named with the agent, so
 an agent cannot hand itself a tool the harness withheld. The reasoning is
 [access.md](access.md)'s: a per-agent list under override semantics turns a
 config file into a way around the contract, and the same syntax would spell both

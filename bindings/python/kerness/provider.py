@@ -510,11 +510,10 @@ class CustomProvider(Provider):
         extra_body: dict[str, Any] | None = None,
         context_window: int | None = None,
     ) -> None:
-        self._model_config: dict[str, Any] = dict(model_config) if model_config else {}
         self._core = ProviderCore.custom(
             url,
             api_key,
-            self._model_config,
+            model_config,
             timeout_sec,
             retries,
             backoff_sec,
@@ -529,8 +528,12 @@ class CustomProvider(Provider):
 
     @property
     def model_config(self) -> dict[str, Any]:
-        """Return a copy of the model configuration dict."""
-        return dict(self._model_config)
+        """Return a copy of the model configuration dict.
+
+        Read back from the backend that holds it rather than from a copy kept
+        here, so there is one owner of the value and nothing to drift.
+        """
+        return self._core.model_config
 
     def chat(self, model: str, messages: list[dict[str, str]],
              tools: list["ToolSpec"] | None = None,

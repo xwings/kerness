@@ -31,7 +31,7 @@ use kerness::toolschema::ToolDialect;
 use pyo3::exceptions::PyBaseException;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::convert::{optional_map, value_from_py, value_to_py};
 use crate::errors::{from_py, to_py, Catch, Raise};
@@ -89,12 +89,17 @@ fn raised_error(py: Python<'_>, error: &Bound<'_, PyAny>) -> Option<Error> {
 #[pyclass(name = "ProviderCore", module = "kerness._core", frozen)]
 pub struct PyProviderCore {
     backing: Backing,
+    /// The vendor dict a custom backend was built from, empty for every other
+    /// core. Held so `CustomProvider.model_config` answers from what the crate
+    /// stores rather than from a second copy the package keeps beside it.
+    model_config: Map<String, Value>,
 }
 
 impl PyProviderCore {
     fn backend(provider: impl Provider + 'static) -> Self {
         PyProviderCore {
             backing: Backing::Backend(Arc::new(provider)),
+            model_config: Map::new(),
         }
     }
 
@@ -137,7 +142,18 @@ impl PyProviderCore {
                 ProviderBase::new(retries, backoff_sec, interval_sec)
                     .with_context_window(context_window),
             )),
+            model_config: Map::new(),
         }
+    }
+
+    /// The vendor dict this core's backend was built from.
+    ///
+    /// Empty for every backend but the custom one, which is the only one that
+    /// takes such a dict. Read from the backend rather than from a copy kept
+    /// in Python, so the two cannot say different things.
+    #[getter]
+    fn model_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        value_to_py(py, &Value::Object(self.model_config.clone()))
     }
 
     #[staticmethod]
@@ -320,7 +336,7 @@ impl PyProviderCore {
         extra_body: Option<&Bound<'_, PyAny>>,
         context_window: Option<usize>,
     ) -> PyResult<Self> {
-        Ok(PyProviderCore::backend(CustomProvider::new(CustomConfig {
+        let provider = CustomProvider::new(CustomConfig {
             url,
             api_key,
             model_config: optional_map(model_config)?,
@@ -334,7 +350,12 @@ impl PyProviderCore {
             extra_headers: optional_headers(extra_headers)?,
             extra_body: optional_map(extra_body)?,
             context_window,
-        })))
+        });
+        let model_config = provider.model_config().clone();
+        Ok(PyProviderCore {
+            backing: Backing::Backend(Arc::new(provider)),
+            model_config,
+        })
     }
 
     /// Send one request through the Rust backend.

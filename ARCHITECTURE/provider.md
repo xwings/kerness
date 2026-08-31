@@ -141,6 +141,18 @@ binding installs an `HttpTransport` that looks up
 `@patch` on the module attribute intercepts every provider. Payload construction
 and response parsing stay in Rust either way.
 
+### What the Python classes hold
+
+Nothing. `Provider` is the ABC callers subclass and the built-in classes are
+thin: each holds a `_core` and forwards. `CustomProvider.model_config` is the
+case that shows why — the vendor dict it answers with is the one
+`CustomProvider::new` (`crates/kerness/src/provider/custom.rs:108`) already
+stores, read back through `PyProviderCore`'s getter
+(`bindings/python/src/provider.rs:155`) rather than from a second copy kept
+beside it. The property still returns a fresh dict per call, so a caller
+mutating what it got does not reach the backend; what it no longer does is give
+the value two owners that can disagree.
+
 ## Interactions
 
 - Called by [agent-runtime.md](agent-runtime.md) for every turn.

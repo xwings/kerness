@@ -95,7 +95,7 @@ swap in your own — the rest of the kernel does not notice.
 | **Personas** | `pragmatic_engineer`, `devils_advocate` | a `.md` file, or inline prose |
 | **Gameplans** | `debate`, `discussion`, `research` | a new Markdown file — see below |
 | **Access** | closed by default; a workspace that grants its own contents, glob and regex command allow-lists, and path allow-lists that reach past the workspace | an `AccessPolicy`, plus an approval callback |
-| **Memory** | `FileMemory` — a plain `.md` file per scope, read-only unless asked | implementing `MemoryStore` — two required methods, `read` and `append` — and passing it as `memory_store` |
+| **Memory** | `FileMemory` — a plain `.md` file per scope, read-only unless asked; `SummarizingMemory` — recent notes verbatim, the rest folded into a running summary at the end of the run | implementing `MemoryStore` — two required methods, `read` and `append` — and passing it as `memory_store` |
 | **Session file** | JSON snapshot after every turn | `session_file` — absent means persist nothing |
 
 The names are the Rust ones. Python spells the two acronym providers the way

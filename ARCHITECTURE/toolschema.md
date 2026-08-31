@@ -17,7 +17,7 @@ framework falls back to the prompt rendering in [toolkit.md](toolkit.md), and
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/toolschema.rs` | `ToolDialect` and the per-dialect conversions |
-| `bindings/python/src/types.rs:39` | `register_dialect`, and dialect conversion both ways |
+| `bindings/python/src/types.rs:38` | `register_dialect`, and dialect conversion both ways |
 | `bindings/python/kerness/_enums.py:14` | `ToolDialect` as a real `enum.Enum` |
 | `bindings/python/kerness/toolschema.py` | re-export shim |
 

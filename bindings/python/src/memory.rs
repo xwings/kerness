@@ -1,9 +1,10 @@
 //! Where a session keeps what its agents remember.
 //!
-//! The default store is the crate's — [`kerness::memory::FileMemory`] decides
-//! how a note is separated from the one before it, what an absent file reads
-//! as, and which scope an agent addresses — and what lives here is only the
-//! wrapper that lets a caller pass it, subclass around it, or replace it.
+//! The stores are the crate's — [`kerness::memory::FileMemory`] decides how a
+//! note is separated from the one before it, what an absent file reads as, and
+//! which scope an agent addresses; [`CuratedMemory`] decides when a scope is
+//! full and what an agent is told about it — and what lives here is only the
+//! wrapper that lets a caller pass one, subclass around it, or replace it.
 //!
 //! The other direction is here too: a store the caller wrote in Python, seen by
 //! the framework as a [`MemoryStore`].
@@ -12,11 +13,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use kerness::error::Result;
-use kerness::memory::{FileMemory, MemoryStore};
+use kerness::memory::{
+    CuratedMemory, FileMemory, MemoryStore, SummarizingMemory, DEFAULT_KEEP_ENTRIES,
+    DEFAULT_MEMORY_BUDGET,
+};
 use kerness::session::Memories;
 use pyo3::prelude::*;
 
 use crate::errors::{Catch, Raise};
+use crate::provider::bind_provider;
 use crate::types::path_to_py;
 
 /// A Python memory store, seen as a framework [`MemoryStore`].
@@ -32,23 +37,31 @@ impl PyStore {
     /// Read an optional attribute that the trait's own default answers `None`
     /// for, treating a raise as that same `None`.
     ///
-    /// The trait cannot report a failure here — `age` and `path` return
-    /// `Option`, not `Result` — and the honest reading of a store that cannot
-    /// name its file is a store that names none, which is what a store keeping
-    /// nothing on disk answers anyway. Logged, because it is a bug in the
-    /// store and silence would hide it.
-    fn optional<T>(&self, method: &str, scope: &str) -> Option<T>
+    /// The trait cannot report a failure here — `age`, `path`, and `budget`
+    /// return `Option`, not `Result` — and the honest reading of a store that
+    /// cannot name its file is a store that names none, which is what a store
+    /// keeping nothing on disk answers anyway. Logged, because it is a bug in
+    /// the store and silence would hide it.
+    ///
+    /// *scope* is `None` for the one of the three that takes no argument.
+    fn optional<T>(&self, method: &str, scope: Option<&str>) -> Option<T>
     where
         T: for<'py> FromPyObject<'py>,
     {
+        let named = scope.unwrap_or_default();
         Python::with_gil(|py| {
-            match self.inner.bind(py).call_method1(method, (scope,)) {
+            let store = self.inner.bind(py);
+            let called = match scope {
+                Some(scope) => store.call_method1(method, (scope,)),
+                None => store.call_method0(method),
+            };
+            match called {
                 Ok(value) if value.is_none() => None,
                 Ok(value) => match value.extract::<T>() {
                     Ok(value) => Some(value),
                     Err(error) => {
                         kerness::logging::warning(&format!(
-                            "memory store {method}({scope}) returned something \
+                            "memory store {method}({named}) returned something \
                              unusable; treating it as None: {error}"
                         ));
                         None
@@ -56,7 +69,7 @@ impl PyStore {
                 },
                 Err(error) => {
                     kerness::logging::warning(&format!(
-                        "memory store {method}({scope}) raised; treating it as \
+                        "memory store {method}({named}) raised; treating it as \
                          None: {error}"
                     ));
                     None
@@ -89,12 +102,26 @@ impl MemoryStore for PyStore {
         Python::with_gil(|py| self.inner.bind(py).call_method1("open", (scope,)).map(drop)).catch()
     }
 
+    fn revise(&self, scope: &str, old: &str, new: &str) -> Result<()> {
+        Python::with_gil(|py| {
+            self.inner
+                .bind(py)
+                .call_method1("revise", (scope, old, new))
+                .map(drop)
+        })
+        .catch()
+    }
+
     fn age(&self, scope: &str) -> Option<u64> {
-        self.optional("age", scope)
+        self.optional("age", Some(scope))
     }
 
     fn path(&self, scope: &str) -> Option<PathBuf> {
-        self.optional("path", scope)
+        self.optional("path", Some(scope))
+    }
+
+    fn budget(&self) -> Option<usize> {
+        self.optional("budget", None)
     }
 
     fn close(&self) -> Result<()> {
@@ -114,6 +141,12 @@ pub fn bind_memory_store(object: &Bound<'_, PyAny>) -> PyResult<Option<Arc<dyn M
     // subclass overriding `read` is a caller's store that happens to inherit,
     // and the shortcut past it would call the base the subclass exists to wrap.
     if let Ok(native) = object.downcast_exact::<PyFileMemory>() {
+        return Ok(Some(native.get().inner.clone()));
+    }
+    if let Ok(native) = object.downcast_exact::<PySummarizingMemory>() {
+        return Ok(Some(native.get().inner.clone()));
+    }
+    if let Ok(native) = object.downcast_exact::<PyCuratedMemory>() {
         return Ok(Some(native.get().inner.clone()));
     }
     Ok(Some(Arc::new(PyStore {
@@ -144,6 +177,10 @@ impl PyFileMemory {
         self.inner.append(scope, note).raise()
     }
 
+    fn revise(&self, scope: &str, old: &str, new: &str) -> PyResult<()> {
+        self.inner.revise(scope, old, new).raise()
+    }
+
     fn open(&self, scope: &str) -> PyResult<()> {
         self.inner.open(scope).raise()
     }
@@ -157,6 +194,127 @@ impl PyFileMemory {
             Some(path) => Ok(Some(path_to_py(py, path.to_string_lossy().as_ref())?)),
             None => Ok(None),
         }
+    }
+
+    fn budget(&self) -> Option<usize> {
+        self.inner.budget()
+    }
+
+    fn close(&self) -> PyResult<()> {
+        self.inner.close().raise()
+    }
+}
+
+/// Keeps the most recent entries verbatim and summarises the rest.
+///
+/// The provider is bound the way an agent's is, so a `Provider` subclass
+/// written in Python is what does the summarising when one is passed.
+#[pyclass(name = "SummarizingMemory", module = "kerness._core", frozen, subclass)]
+pub struct PySummarizingMemory {
+    inner: Arc<dyn MemoryStore>,
+}
+
+#[pymethods]
+impl PySummarizingMemory {
+    #[new]
+    #[pyo3(signature = (root, provider, model, keep = DEFAULT_KEEP_ENTRIES))]
+    fn new(
+        root: PathBuf,
+        provider: Bound<'_, PyAny>,
+        model: String,
+        keep: usize,
+    ) -> PyResult<Self> {
+        let provider = bind_provider(&provider)?.ok_or_else(|| {
+            crate::errors::to_py(kerness::Error::Value(
+                "SummarizingMemory needs a provider to summarize with".to_string(),
+            ))
+        })?;
+        Ok(PySummarizingMemory {
+            inner: Arc::new(SummarizingMemory::new(root, provider, model).with_keep(keep)),
+        })
+    }
+
+    fn read(&self, scope: &str) -> PyResult<String> {
+        self.inner.read(scope).raise()
+    }
+
+    fn append(&self, scope: &str, note: &str) -> PyResult<()> {
+        self.inner.append(scope, note).raise()
+    }
+
+    fn revise(&self, scope: &str, old: &str, new: &str) -> PyResult<()> {
+        self.inner.revise(scope, old, new).raise()
+    }
+
+    fn open(&self, scope: &str) -> PyResult<()> {
+        self.inner.open(scope).raise()
+    }
+
+    fn age(&self, scope: &str) -> Option<u64> {
+        self.inner.age(scope)
+    }
+
+    fn path(&self, py: Python<'_>, scope: &str) -> PyResult<Option<Py<PyAny>>> {
+        match self.inner.path(scope) {
+            Some(path) => Ok(Some(path_to_py(py, path.to_string_lossy().as_ref())?)),
+            None => Ok(None),
+        }
+    }
+
+    fn budget(&self) -> Option<usize> {
+        self.inner.budget()
+    }
+
+    fn close(&self) -> PyResult<()> {
+        self.inner.close().raise()
+    }
+}
+
+/// Bounds a scope by characters and has the agents curate it.
+#[pyclass(name = "CuratedMemory", module = "kerness._core", frozen, subclass)]
+pub struct PyCuratedMemory {
+    inner: Arc<dyn MemoryStore>,
+}
+
+#[pymethods]
+impl PyCuratedMemory {
+    #[new]
+    #[pyo3(signature = (root, budget = DEFAULT_MEMORY_BUDGET))]
+    fn new(root: PathBuf, budget: usize) -> Self {
+        PyCuratedMemory {
+            inner: Arc::new(CuratedMemory::new(root).with_budget(budget)),
+        }
+    }
+
+    fn read(&self, scope: &str) -> PyResult<String> {
+        self.inner.read(scope).raise()
+    }
+
+    fn append(&self, scope: &str, note: &str) -> PyResult<()> {
+        self.inner.append(scope, note).raise()
+    }
+
+    fn revise(&self, scope: &str, old: &str, new: &str) -> PyResult<()> {
+        self.inner.revise(scope, old, new).raise()
+    }
+
+    fn open(&self, scope: &str) -> PyResult<()> {
+        self.inner.open(scope).raise()
+    }
+
+    fn age(&self, scope: &str) -> Option<u64> {
+        self.inner.age(scope)
+    }
+
+    fn path(&self, py: Python<'_>, scope: &str) -> PyResult<Option<Py<PyAny>>> {
+        match self.inner.path(scope) {
+            Some(path) => Ok(Some(path_to_py(py, path.to_string_lossy().as_ref())?)),
+            None => Ok(None),
+        }
+    }
+
+    fn budget(&self) -> Option<usize> {
+        self.inner.budget()
     }
 
     fn close(&self) -> PyResult<()> {
@@ -185,10 +343,7 @@ impl PySessionMemory {
             .memories
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (
-            Arc::clone(&memories.store),
-            memories.session_scope.clone(),
-        )
+        (Arc::clone(&memories.store), memories.session_scope.clone())
     }
 }
 

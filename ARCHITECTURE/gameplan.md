@@ -22,7 +22,7 @@ ship with the framework, and the three-step resolution of where they live.
 | `crates/kerness/src/gameplan.rs` | loading, splitting, and the built-in list |
 | `crates/kerness/src/assets.rs` | the assets root and Markdown-stem enumeration |
 | `crates/kerness/assets/gameplans/*.md` | the built-in gameplans |
-| `bindings/python/src/types.rs:1900` | `PyGameplanConfig` |
+| `bindings/python/src/types.rs:1864` | `PyGameplanConfig` |
 | `bindings/python/kerness/gameplan_loader.py` | re-export shim |
 
 ## Key Types and Entry Points

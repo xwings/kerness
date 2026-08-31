@@ -291,6 +291,36 @@ fn remember(
     Ok(true)
 }
 
+/// Replace the entry *old* addresses with *new*, after *filter* has seen it.
+///
+/// The revising half of [`remember`], and here for the same reason: *new* is
+/// model output that lands in every other agent's system prompt, so a store
+/// reached around the filter through this path would be a route around it. The
+/// store is cloned out from under the lock before the call for `remember`'s
+/// reason as well.
+///
+/// A removal — an empty *new* — is not filtered and is always attempted. The
+/// filter's contract is the text to store, and a removal stores none; a filter
+/// asked to vet one would have nothing to answer about.
+fn revise_memory(
+    memories: &Mutex<Memories>,
+    filter: Option<&Arc<dyn MemoryFilter>>,
+    agent_name: &str,
+    old: &str,
+    new: &str,
+) -> Result<bool> {
+    let new = match (new.trim().is_empty(), filter) {
+        (false, Some(filter)) => match filter.filter(new, agent_name) {
+            Some(new) => new,
+            None => return Ok(false),
+        },
+        _ => new.to_string(),
+    };
+    let (store, scope) = store_for(memories, agent_name);
+    store.revise(&scope, old, &new)?;
+    Ok(true)
+}
+
 /// The store and the scope *agent_name* addresses it by, taken together.
 ///
 /// Every reader wants both and neither is useful alone, and taking them in one
@@ -1691,7 +1721,7 @@ impl Session {
                  ceiling of {ceiling}. Compaction shrinks the conversation \
                  only, so nothing it can do would make this request fit. Raise \
                  max_context_tokens, or cut the persona, skill index, tool set, \
-                 context sources, or memory file.",
+                 context sources, or memory.",
                 agent.name
             )));
         }
@@ -1917,8 +1947,11 @@ fn run_and_log(
 /// log, and per-agent memory all identify who asked; `add_tool` handlers do
 /// not, so the specs are built here rather than through the public method.
 ///
-/// `write_memory` is registered only for a writing session. Advertising a tool
-/// whose every call would be discarded is worse than not offering it. Both
+/// `write_memory` is registered only for a writing session, and `edit_memory`
+/// only for one whose store also answers
+/// [`budget`](crate::memory::MemoryStore::budget). Advertising a tool whose
+/// every call would be discarded is worse than not offering it, and under a
+/// store that keeps notes as they were written every revision is refused. The
 /// memory tools are ordinary registered tools rather than reserved
 /// runtime-owned names, which is what lets a gameplan narrow them away through
 /// its `tools:` list — `tools: [cmd, read_memory]` is read-only memory with no
@@ -2065,6 +2098,63 @@ fn default_tools(
             )
             .with_actor(),
         );
+
+        if let Some(budget) = lock(memories).store.budget() {
+            tools.push(
+                ToolSpec::new(
+                    "edit_memory",
+                    format!(
+                        "Revise this session's memory, which is capped at {budget} \
+                         characters. `old_text` is any fragment appearing in exactly \
+                         one stored entry and is how that entry is found; giving a \
+                         fragment that matches none or several changes nothing and \
+                         says so. `new_text` replaces that entry whole — not just \
+                         the fragment — and leaving it out removes the entry \
+                         instead. Use this when a write is refused for want of \
+                         room: merge two overlapping entries into one shorter \
+                         entry, or remove one that no longer matters, then write \
+                         the note again.",
+                    ),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "old_text": {
+                                "type": "string",
+                                "description": "A fragment appearing in exactly one stored entry.",
+                            },
+                            "new_text": {
+                                "type": "string",
+                                "description": "The entry's replacement. Omit to remove the entry.",
+                            },
+                        },
+                        "required": ["old_text"],
+                    }),
+                    {
+                        let memories = Arc::clone(memories);
+                        let filter = memory_filter.cloned();
+                        Arc::new(move |arguments: &Arguments, actor: &str| {
+                            let new = argument(arguments, "new_text");
+                            let revised = revise_memory(
+                                &memories,
+                                filter.as_ref(),
+                                actor,
+                                &argument(arguments, "old_text"),
+                                &new,
+                            )?;
+                            Ok(match (revised, new.trim().is_empty()) {
+                                (true, true) => "Entry removed from memory.".to_string(),
+                                (true, false) => "Entry replaced in memory.".to_string(),
+                                (false, _) => {
+                                    "Not changed: this session did not keep that revision."
+                                        .to_string()
+                                }
+                            })
+                        })
+                    },
+                )
+                .with_actor(),
+            );
+        }
     }
 
     tools
@@ -2105,6 +2195,7 @@ mod tests {
 
     use super::*;
 
+    use crate::memory::CuratedMemory;
     use crate::provider::{ProviderBase, ProviderResponse, ReasoningEffort};
     use crate::testing::TempDir;
 
@@ -3067,6 +3158,134 @@ mod tests {
         assert!(written.contains("Alice: Ship it."), "{written}");
         assert!(written.contains("Alice: Bob dissented."), "{written}");
         assert!(!written.contains("sk-"), "{written}");
+    }
+
+    #[test]
+    fn edit_memory_is_offered_only_where_the_store_sets_a_ceiling() {
+        // Under a store that keeps notes as they were written every revision is
+        // refused, so the tool would be one whose every call fails.
+        let temp = TempDir::new("edit-memory-tools");
+        let names = |store: Option<Arc<dyn MemoryStore>>| {
+            Session::new(SessionConfig {
+                topic: "T".to_string(),
+                memory: temp.child("memory.md"),
+                access_policy: confined(&temp),
+                memory_write: true,
+                memory_store: store,
+                ..SessionConfig::default()
+            })
+            .expect("loads")
+            .shared
+            .active_tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<String>>()
+        };
+
+        assert!(!names(None).contains(&"edit_memory".to_string()));
+
+        let curated: Arc<dyn MemoryStore> = Arc::new(CuratedMemory::new(&temp.0));
+        let offered = names(Some(curated));
+        assert!(offered.contains(&"edit_memory".to_string()));
+        let description = Session::new(SessionConfig {
+            topic: "T".to_string(),
+            memory: temp.child("memory.md"),
+            access_policy: confined(&temp),
+            memory_write: true,
+            memory_store: Some(Arc::new(CuratedMemory::new(&temp.0).with_budget(600))),
+            ..SessionConfig::default()
+        })
+        .expect("loads")
+        .shared
+        .active_tools()
+        .iter()
+        .find(|tool| tool.name == "edit_memory")
+        .expect("registered")
+        .description
+        .clone();
+        assert!(
+            description.contains("capped at 600 characters"),
+            "the ceiling the agent is curating towards is in the tool: {description}"
+        );
+    }
+
+    #[test]
+    fn edit_memory_revises_through_the_filter_and_removes_without_it() {
+        struct NoSecrets;
+        impl MemoryFilter for NoSecrets {
+            fn filter(&self, note: &str, _actor: &str) -> Option<String> {
+                (!note.contains("sk-")).then(|| note.to_string())
+            }
+        }
+
+        let temp = TempDir::new("edit-memory");
+        let mut session = Session::new(SessionConfig {
+            topic: "T".to_string(),
+            memory: "shared".to_string(),
+            access_policy: confined(&temp),
+            memory_write: true,
+            memory_filter: Some(Arc::new(NoSecrets)),
+            memory_store: Some(Arc::new(CuratedMemory::new(&temp.0))),
+            ..SessionConfig::default()
+        })
+        .expect("loads");
+        session
+            .add_agent(Agent::new("Alice").with_model("m"))
+            .expect("add agent");
+
+        let tools = session.shared.active_tools();
+        let call = |name: &str, arguments: Map<String, Value>| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("registered")
+                .handler
+                .call(&arguments, "Alice")
+        };
+        let one = |key: &str, value: &str| {
+            let mut arguments = Map::new();
+            arguments.insert(key.to_string(), Value::String(value.to_string()));
+            arguments
+        };
+        let edit = |old: &str, new: &str| {
+            let mut arguments = one("old_text", old);
+            arguments.insert("new_text".to_string(), Value::String(new.to_string()));
+            arguments
+        };
+
+        call("write_memory", one("note", "Alice chose blue")).expect("a write");
+        call("write_memory", one("note", "Bob chose green")).expect("a write");
+
+        assert_eq!(
+            call("edit_memory", edit("Alice", "Alice and Bob chose blue")).expect("a revision"),
+            "Entry replaced in memory."
+        );
+        // The revision is model output landing in every agent's system prompt,
+        // so it goes through the same filter an appended note does.
+        assert_eq!(
+            call("edit_memory", edit("green", "The key is sk-4242.")).expect("a refusal"),
+            "Not changed: this session did not keep that revision."
+        );
+        // "Bob" now appears in both entries, so it addresses neither of them.
+        let ambiguous =
+            call("edit_memory", edit("Bob", "one entry")).expect_err("two entries contain it");
+        assert!(
+            ambiguous.to_string().contains("2 entries contain"),
+            "{ambiguous}"
+        );
+        // A removal writes no text, so there is nothing for a filter to vet.
+        assert_eq!(
+            call("edit_memory", one("old_text", "green")).expect("a removal"),
+            "Entry removed from memory."
+        );
+        // A fragment matching nothing is an error the agent reads and retries on.
+        let missed = call("edit_memory", edit("Carol", "who?")).expect_err("no such entry");
+        assert!(missed.to_string().contains("No entry"), "{missed}");
+
+        let stored = call("read_memory", Map::new()).expect("a read");
+        assert!(stored.contains("1 entries"), "{stored}");
+        assert!(stored.contains("Alice and Bob chose blue"), "{stored}");
+        assert!(!stored.contains("sk-"), "{stored}");
     }
 
     // ---- the memory store --------------------------------------------------
