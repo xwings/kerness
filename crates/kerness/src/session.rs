@@ -1,10 +1,7 @@
-//! The public facade: configure a run, then hand control to the loop.
-//!
-//! A [`Session`] holds the cast, the toolkit, the memory files and the access
-//! policy; [`Session::run`] validates all of it before the first provider call
-//! and then implements [`LoopHost`] for [`OrchestratorLoop`]. Who speaks, when
-//! the run ends and what it returns come from the gameplan's harness contract,
-//! not from here.
+//! Session configuration, registration, and preparation for [`SessionRun`].
+//! [`Session::run`] drives the owned engine with compatibility defaults;
+//! [`Session::start`] transfers control to the host. [`LoopHost`] remains an
+//! adapter for callers driving an [`OrchestratorLoop`] directly.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -45,6 +42,19 @@ use crate::toolkit::{resolve, ToolDispatcher, ToolsFor};
 use crate::toolschema::{tool_schemas, ToolDialect};
 use crate::utils::parse_memory_markers;
 
+mod capabilities;
+mod outcome;
+mod run;
+
+pub use capabilities::{
+    ContextToolHandler, ContextToolSpec, PreflightAction, ToolContext, ToolIdentity,
+};
+pub use outcome::{ResultDiagnostics, ResultIssue, ResultValidation};
+pub use run::{
+    ApprovalMode, ApprovalRequest, EventSink, RunControl, RunEvent, RunEventKind, RunInput,
+    RunMode, RunOptions, RunOutcome, RunReason, SessionRun, StepOutcome, WaitReason,
+};
+
 /// Default ceiling on one request, in estimated tokens.
 ///
 /// This stands for what the model can hold, so it is not the framework's number
@@ -67,7 +77,7 @@ pub const DEFAULT_MAX_CONTEXT_TOKENS: usize = 256_000;
 pub const OVERFLOW_RETRY_FRACTION: f64 = 0.5;
 
 /// Result of a completed session.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionResult {
     pub topic: String,
     pub turns_completed: i64,
@@ -95,13 +105,8 @@ impl SessionResult {
     }
 }
 
-/// Everything a session is configured with, before any agent is added.
-///
-/// A struct rather than a builder, because several of these decide what the
-/// session is built *out of*: `memory_write` picks the default toolkit and
-/// `access_policy` builds the access manager. Both have to be settled before
-/// construction rather than patched onto a half-built session, and builder
-/// methods would advertise an ordering freedom that does not exist.
+/// Session configuration. `memory_write` and `access_policy` determine the
+/// toolkit and access manager at construction; agent defaults resolve at start.
 #[derive(Clone)]
 pub struct SessionConfig {
     /// Gameplan name or path.
@@ -220,9 +225,8 @@ impl Default for SessionConfig {
 /// it said last: it is written during the run, and a snapshot taken before it
 /// is stale by the time the run ends.
 ///
-/// The scope map is filled by `run()` from the agents that declared a memory of
-/// their own. An agent absent from it shares the session scope, which is what
-/// makes memory a channel between agents by default.
+/// Preparation fills the scope map from agents with their own memory. An agent
+/// absent from it shares the session scope.
 pub struct Memories {
     pub store: Arc<dyn MemoryStore>,
     pub session_scope: String,
@@ -277,16 +281,7 @@ fn remember(
         },
         None => note.to_string(),
     };
-    // The store is cloned out from under the lock before the append, so a store
-    // that re-enters the session — a Python one running arbitrary code — cannot
-    // deadlock against another agent reading its own scope.
-    let (store, scope) = {
-        let memories = lock(memories);
-        (
-            Arc::clone(&memories.store),
-            memories.scope_for(agent_name).to_string(),
-        )
-    };
+    let (store, scope) = store_for(memories, agent_name);
     store.append(&scope, &note)?;
     Ok(true)
 }
@@ -348,13 +343,13 @@ struct Shared {
     access: Arc<Mutex<AccessManager>>,
     memories: Arc<Mutex<Memories>>,
     tools: Mutex<Vec<ToolSpec>>,
-    /// Tool names the harness permits, set by `validate_harness` in `run()`.
+    /// Tool names the harness permits, resolved during preparation.
     /// `None` means "not yet resolved"; an empty list is a real answer (a
     /// gameplan declaring `tools: []` grants none), so the two cannot share a
     /// representation.
     allowed_tools: Mutex<Option<Vec<String>>>,
-    /// Tool names each agent that declared its own may call, resolved by
-    /// `run()`. An agent absent from the map declared nothing and takes the
+    /// Tool names each agent that declared its own may call. An agent absent
+    /// from the map declared nothing and takes the
     /// harness-permitted set whole.
     agent_tools: Mutex<HashMap<String, Vec<String>>>,
     /// The agent whose turn is in progress, recorded alongside its activation.
@@ -367,21 +362,14 @@ struct Shared {
     activation: Mutex<Option<Arc<SkillActivation>>>,
     skills_cache: Arc<Mutex<HashMap<String, Vec<SkillConfig>>>>,
     skills_registry: SkillRegistry,
-    /// The context blocks each agent reads, rendered once by `run()`. A source
-    /// is called there and not here so a walker or a query costs one call per
-    /// agent per run rather than one per prompt, and so a source that fails
-    /// does so before the first provider call.
+    /// Context blocks rendered once per agent during preparation, so sources
+    /// are not called again for each prompt.
     context_cache: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// Filter over what agents write to memory; `None` stores notes as written.
     memory_filter: Option<Arc<dyn MemoryFilter>>,
 }
 
-/// Take a session lock, treating poisoning as the panic it reports.
-///
-/// A poisoned lock means an earlier turn panicked while holding it. That is a
-/// bug in the framework rather than a state the caller can act on, and the
-/// alternative — propagating a lock error out of every accessor — would put an
-/// impossible failure in every signature.
+/// Recover access to session state after a lock holder unwinds.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -405,13 +393,8 @@ impl Shared {
             .unwrap_or_default()
     }
 
-    /// The memory content an agent reads.
-    ///
-    /// A store that cannot answer costs the agent its memory block and not its
-    /// turn: the prompt assembler takes an infallible closure, and a run that
-    /// died here would die after the provider calls that already succeeded.
-    /// `run()` opens every scope before the first turn, so a failure this late
-    /// is one that arose mid-run.
+    /// Memory for the prompt. Read failures are logged and omit the block;
+    /// they do not abort the agent's turn.
     fn memory_text(&self, agent_name: &str) -> String {
         let (store, scope) = store_for(&self.memories, agent_name);
         match store.read(&scope) {
@@ -544,22 +527,21 @@ pub struct Session {
     skills: Vec<SkillConfig>,
     /// Registered context sources, in registration order — which is the order
     /// their blocks appear in a prompt. Kept here rather than in `Shared`
-    /// because nothing but `run()` calls them.
+    /// because only preparation calls them.
     context: Vec<(String, Arc<dyn ContextSource>)>,
     conversation: Conversation,
     dispatcher: ToolDispatcher,
     shared: Arc<Shared>,
 
-    /// `LoopHost` state, populated by `run()` before the loop is constructed.
+    /// Resolved prompt and checkpoint identity, populated during preparation.
     orch_prompt: String,
-    participants: Vec<String>,
     identity: Map<String, Value>,
-    /// The loop's last published position, for `save()`.
-    ///
-    /// The loop is a local in [`Session::run`] and borrows the session for
-    /// the whole run, so its position cannot be read back out of it. It
-    /// pushes instead, through [`LoopHost::record_position`].
+    /// Loaded or last published scheduler position, used by the compatibility
+    /// adapter's saves. The owned run checkpoints its live scheduler directly.
     loop_position: Map<String, Value>,
+    contextual_tools: HashMap<String, Arc<dyn ContextToolHandler>>,
+    store_open: bool,
+    prepared_prompts: HashMap<String, String>,
 }
 
 impl Session {
@@ -683,9 +665,11 @@ impl Session {
             dispatcher,
             shared,
             orch_prompt: String::new(),
-            participants: Vec::new(),
             identity: Map::new(),
             loop_position: Map::new(),
+            contextual_tools: HashMap::new(),
+            store_open: false,
+            prepared_prompts: HashMap::new(),
         })
     }
 
@@ -805,6 +789,12 @@ impl Session {
         parameters: Value,
         handler: Arc<dyn ToolHandler>,
     ) -> Result<&mut Self> {
+        self.add_tool_spec(ToolSpec::new(name, description, parameters, handler))
+    }
+
+    /// Register a complete specification, preserving its actor contract.
+    pub fn add_tool_spec(&mut self, spec: ToolSpec) -> Result<&mut Self> {
+        let name = spec.name.as_str();
         if name == SKILL_TOOL_NAME {
             return Err(Error::session(format!(
                 "'{SKILL_TOOL_NAME}' is a reserved tool name — the runtime \
@@ -818,8 +808,28 @@ impl Session {
                  be unique."
             )));
         }
-        tools.push(ToolSpec::new(name, description, parameters, handler));
+        tools.push(spec);
         drop(tools);
+        Ok(self)
+    }
+
+    /// Register a tool whose capabilities and identity are supplied by the run.
+    pub fn add_contextual_tool(&mut self, tool: ContextToolSpec) -> Result<&mut Self> {
+        let name = tool.name.clone();
+        self.add_tool_spec(
+            ToolSpec::new(
+                &name,
+                tool.description,
+                tool.parameters,
+                Arc::new(|_: &Arguments, _: &str| {
+                    Err(Error::session(
+                        "This tool requires a running session context.",
+                    ))
+                }),
+            )
+            .with_actor(),
+        )?;
+        self.contextual_tools.insert(name, tool.handler);
         Ok(self)
     }
 
@@ -827,7 +837,7 @@ impl Session {
     ///
     /// *name* becomes the subheading the block arrives under, and a gameplan's
     /// `context:` key narrows by it. The source is called once per agent at the
-    /// top of [`Session::run`], in registration order.
+    /// start of a run, in registration order.
     ///
     /// # Errors
     ///
@@ -885,10 +895,62 @@ impl Session {
 
     /// Execute the session, blocking until the loop terminates.
     ///
-    /// Validates, assembles, and hands control to [`OrchestratorLoop`]. The
-    /// flow itself — who speaks, when it ends, what the result contains — comes
-    /// from the gameplan's harness contract, not from this method.
+    /// Drives [`SessionRun`] with legacy result, approval and provider-error
+    /// behavior, then returns the committed result.
     pub fn run(&mut self) -> Result<SessionResult> {
+        let mut run = SessionRun::new(self.run_copy(), RunOptions::legacy(), true)?;
+        let finished = run.run_to_completion();
+        *self = run.session.run_copy();
+        match finished? {
+            RunOutcome {
+                error: Some(error), ..
+            } => Err(error),
+            outcome => Ok(outcome.result),
+        }
+    }
+
+    /// Prepare an owned run. Consuming the session freezes its configuration;
+    /// subsequent control goes through the returned run and its control handle.
+    pub fn start(self, options: RunOptions) -> Result<SessionRun> {
+        SessionRun::new(self, options, false)
+    }
+
+    // Used only by the blocking adapter while it exclusively borrows self.
+    // No independently accessible Session shares mutable configuration with a run.
+    fn run_copy(&self) -> Self {
+        Self {
+            gameplan: self.gameplan.clone(),
+            topic: self.topic.clone(),
+            max_rounds: self.max_rounds,
+            max_turns: self.max_turns,
+            max_tool_iterations: self.max_tool_iterations,
+            orchestrator_retries: self.orchestrator_retries,
+            turn_delay: self.turn_delay,
+            system_prompt: self.system_prompt.clone(),
+            defaults: self.defaults.clone(),
+            tool_results_in_history: self.tool_results_in_history,
+            max_context_tokens: self.max_context_tokens,
+            session_file: self.session_file.clone(),
+            compactions: self.compactions,
+            agents: self.agents.clone(),
+            skills: self.skills.clone(),
+            context: self.context.clone(),
+            conversation: self.conversation.clone(),
+            dispatcher: ToolDispatcher::new({
+                let shared = Arc::clone(&self.shared);
+                Arc::new(move || shared.active_tools())
+            }),
+            shared: Arc::clone(&self.shared),
+            orch_prompt: self.orch_prompt.clone(),
+            identity: self.identity.clone(),
+            loop_position: self.loop_position.clone(),
+            contextual_tools: self.contextual_tools.clone(),
+            store_open: false,
+            prepared_prompts: self.prepared_prompts.clone(),
+        }
+    }
+
+    fn prepare(&mut self, mode: RunMode, legacy: bool) -> Result<OrchestratorLoop> {
         let missing: Vec<&str> = self
             .agents
             .iter()
@@ -921,9 +983,7 @@ impl Session {
         }
         let orchestrator = match self.agents.iter().find(|agent| agent.is_orchestrator()) {
             Some(agent) => agent.name.clone(),
-            // Only one loop shape exists and it is orchestrator-driven, so a
-            // harness may make an orchestrator optional but a *run* cannot do
-            // without one.
+            None if mode == RunMode::HostDriven => String::new(),
             None => {
                 return Err(Error::session(
                     "No orchestrator agent added. The session loop is \
@@ -946,7 +1006,7 @@ impl Session {
         let permitted = validate_harness(
             &harness,
             &participants,
-            Some(orchestrator.as_str()),
+            (!orchestrator.is_empty()).then_some(orchestrator.as_str()),
             &registered,
             &registered_context,
         )?;
@@ -973,35 +1033,46 @@ impl Session {
         check_required_tools(&cache, &registered)?;
         *lock(&self.shared.skills_cache) = cache;
 
-        let orch_prompt = self.build_orchestrator_prompt(&participants)?;
+        self.prepared_prompts.clear();
+        for agent in &self.agents {
+            if agent.is_participant() {
+                self.prepared_prompts
+                    .insert(agent.name.clone(), self.participant_prompt(agent)?);
+            }
+        }
+        let orch_prompt = if orchestrator.is_empty() {
+            String::new()
+        } else {
+            self.build_orchestrator_prompt(&participants)?
+        };
 
         // Collect the scopes: session-level, then every agent keeping its own,
         // and open each through the store. Opening here rather than at the
         // first read is what makes an unreadable scope fail before a single
         // provider call has been paid for.
+        let store = Arc::clone(&lock(&self.shared.memories).store);
+        let mut agent_scopes = HashMap::new();
+        for agent in &self.agents {
+            let Some(scope) = &agent.memory else { continue };
+            if let Some(path) = store.path(scope) {
+                lock(&self.shared.access).check_path(
+                    &format!("The memory file for {}", agent.name),
+                    &path.display().to_string(),
+                    &agent.name,
+                )?;
+            }
+            agent_scopes.insert(agent.name.clone(), scope.clone());
+        }
         let scopes = {
             let mut memories = lock(&self.shared.memories);
-            memories.agent_scopes.clear();
-            for agent in &self.agents {
-                let Some(scope) = &agent.memory else { continue };
-                if let Some(path) = memories.store.path(scope) {
-                    lock(&self.shared.access).check_path(
-                        &format!("The memory file for {}", agent.name),
-                        &path.display().to_string(),
-                        &agent.name,
-                    )?;
-                }
-                memories
-                    .agent_scopes
-                    .insert(agent.name.clone(), scope.clone());
-            }
+            memories.agent_scopes = agent_scopes;
             memories
                 .scopes()
                 .into_iter()
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         };
-        let store = Arc::clone(&lock(&self.shared.memories).store);
+        self.store_open = true;
         for scope in &scopes {
             store.open(scope)?;
         }
@@ -1015,13 +1086,30 @@ impl Session {
 
         // Continue a previous run, or seed the conversation with the topic.
         self.conversation = Conversation::new();
-        let resume_state = self.resume()?;
+        let resume_state = self.resume()?.map(|mut state| {
+            // The blocking API historically continued at the saved phase with
+            // a new closing verdict, including when its turn ceiling increased.
+            if legacy {
+                let terminal = state.get("runtime").and_then(|value| value.get("terminal"));
+                let kind = terminal
+                    .and_then(|value| value.get("reason"))
+                    .and_then(|value| value.get("kind"))
+                    .and_then(Value::as_str);
+                if matches!(kind, Some("completed" | "invalid_result")) {
+                    state.retain(|key, _| key == "turn_count" || key == "phases");
+                } else if terminal.is_some_and(|value| !value.is_null()) {
+                    if let Some(runtime) = state.get_mut("runtime").and_then(Value::as_object_mut) {
+                        runtime.insert("terminal".into(), Value::Null);
+                    }
+                }
+            }
+            state
+        });
         if resume_state.is_none() {
             self.conversation.directive(self.topic.clone());
         }
 
         self.orch_prompt = orch_prompt;
-        self.participants = participants.clone();
 
         let mut loop_spec = harness.loop_spec.clone();
         loop_spec.max_rounds = self.max_rounds;
@@ -1034,44 +1122,11 @@ impl Session {
             orchestrator_loop = orchestrator_loop.with_retries(retries);
         }
         if let Some(state) = resume_state {
+            self.loop_position = state.clone();
             orchestrator_loop = orchestrator_loop.with_resume_state(state);
         }
 
-        let state = orchestrator_loop.run(self)?;
-        self.loop_position = orchestrator_loop.snapshot();
-        self.save()?;
-
-        if self.shared.memory_write {
-            let mut block = format!(
-                "## Session Result\n- Consensus: {}",
-                pyfmt::repr(&Value::Bool(state.consensus_reached))
-            );
-            if !state.final_summary.is_empty() {
-                block.push_str(&format!("\n- Summary: {}", state.final_summary));
-            }
-            let (store, scope) = {
-                let memories = lock(&self.shared.memories);
-                (Arc::clone(&memories.store), memories.session_scope.clone())
-            };
-            store.append(&scope, &block)?;
-        }
-
-        // The store's last word, after everything that could write to it has.
-        // A store that consolidates, indexes, or flushes does it here; the
-        // default has nothing to do and says so by not overriding `close`.
-        Arc::clone(&lock(&self.shared.memories).store).close()?;
-
-        Ok(SessionResult {
-            topic: self.topic.clone(),
-            turns_completed: state.turn_count,
-            consensus_reached: state.consensus_reached,
-            history: self.conversation.transcript().to_vec(),
-            final_summary: state.final_summary,
-            fields: state.fields,
-            rounds_run: state.rounds_run,
-            phase_reached: state.phase_reached,
-            end_reason: state.end_reason.as_str().to_string(),
-        })
+        Ok(orchestrator_loop)
     }
 
     /// Run one agent's turn, and compact and try again if the provider says the
@@ -1116,7 +1171,8 @@ impl Session {
         instruction: Option<&str>,
     ) -> Result<String> {
         self.shared.start_activation(&agent.name);
-        let history = self.history_for_turn(agent, base_prompt)?;
+        self.fit_conversation(agent, base_prompt, 1.0)?;
+        let history = as_values(&self.conversation.render());
 
         let provider = self.shared.provider_for(agent).ok_or_else(|| {
             Error::session(format!(
@@ -1176,6 +1232,9 @@ impl Session {
     /// [`Agent::build_system_prompt`], which is what keeps an agent's own
     /// prompt beating an agent's own role.
     fn participant_prompt(&self, agent: &Agent) -> Result<String> {
+        if let Some(prompt) = self.prepared_prompts.get(&agent.name) {
+            return Ok(prompt.clone());
+        }
         if agent.role.is_none() {
             if let Some(prompt) = &self.system_prompt {
                 return Ok(prompt.clone());
@@ -1570,9 +1629,6 @@ impl Session {
     ) -> Result<()> {
         self.conversation.say(sender, content, turn_idx, msg_type);
         self.shared.channel.send(sender, content)?;
-        // Every routed turn passes through here, which makes it the one place a
-        // save covers the whole loop — including the retry path, which is where
-        // the session is most likely to be interrupted.
         self.save()?;
         if !self.turn_delay.is_zero() {
             std::thread::sleep(self.turn_delay);
@@ -1670,21 +1726,6 @@ impl Session {
         Ok(total)
     }
 
-    /// Render the conversation for a provider, compacting it if it grew.
-    ///
-    /// Checked before the call rather than after the previous one so that the
-    /// turn about to be sent is the one that fits, not the one before it.
-    ///
-    /// `max_context_tokens` bounds the whole request, but the conversation is
-    /// the only part of it compaction can shrink, so the fixed part is measured
-    /// first and the remainder is what the conversation may use. Measured per
-    /// turn rather than once: personas, skill indexes and permitted tool sets
-    /// differ by agent, and the memory file grows during the run.
-    fn history_for_turn(&mut self, agent: &Agent, base_prompt: &str) -> Result<Vec<Value>> {
-        self.fit_conversation(agent, base_prompt, 1.0)?;
-        Ok(as_values(&self.conversation.render()))
-    }
-
     /// The context ceiling for one agent's turn.
     ///
     /// `max_context_tokens` is what the caller is willing to spend and the
@@ -1763,19 +1804,30 @@ impl Session {
     /// as "leave the conversation alone", which is the right outcome when the
     /// alternative is trading real turns for nothing.
     fn summarize(&self, turns: &[Turn]) -> Result<String> {
-        let Ok(agent) = self.orchestrator_agent() else {
+        let Some(agent) = self
+            .orchestrator_agent()
+            .ok()
+            .or_else(|| self.agents.first().cloned())
+        else {
             return Ok(String::new());
         };
         let Some(provider) = self.shared.provider_for(&agent) else {
             return Ok(String::new());
         };
         let messages = as_values(&summary_request(turns));
-        match provider.chat_with_retries(
+        match crate::usage::observe_provider_call(
+            provider.name(),
             agent.model_name(),
-            &messages,
             "compaction",
-            None,
-            agent.effort(),
+            || {
+                provider.chat_with_retries(
+                    agent.model_name(),
+                    &messages,
+                    "compaction",
+                    None,
+                    agent.effort(),
+                )
+            },
         ) {
             Ok(response) => Ok(response.content),
             Err(error) if error.is_provider() => {
@@ -1789,9 +1841,7 @@ impl Session {
 
 // ---- LoopHost -----------------------------------------------------------
 //
-// The loop owns control flow; these methods are everything it is allowed to
-// reach back for. Keeping the surface this narrow is what lets the loop be
-// tested without a provider.
+// Compatibility adapter for callers using OrchestratorLoop directly.
 
 impl LoopHost for Session {
     fn orchestrator_turn(&mut self, purpose: &str, instruction: Option<&str>) -> Result<String> {
@@ -1922,23 +1972,31 @@ fn run_and_log(
     timeout: Option<Duration>,
     actor: &str,
 ) -> Result<String> {
-    let manager = lock(access);
+    let manager = lock(access).clone();
     // A command with no working directory of its own starts at the session
     // workspace, so a confined session's commands are *in* the confinement
     // rather than merely unable to name their way out of it.
     let cwd = cwd.unwrap_or_else(|| manager.workspace_for(actor));
     let outcome = exec::run_command(&manager, command, Some(cwd), timeout, actor);
-    drop(manager);
     if actor.is_empty() {
         return outcome;
     }
-    let status = match &outcome {
+    log_command(channel, command, actor, &outcome)?;
+    outcome
+}
+
+fn log_command(
+    channel: &dyn Channel,
+    command: &str,
+    actor: &str,
+    outcome: &Result<String>,
+) -> Result<()> {
+    let status = match outcome {
         Ok(_) => "approved",
         Err(Error::AccessDenied(_)) => "denied",
         Err(_) => "failed",
     };
-    channel.send_system(&format!("[Command:{status}] {actor}: {command}"))?;
-    outcome
+    channel.send_system(&format!("[Command:{status}] {actor}: {command}"))
 }
 
 /// Register the built-in tools: `cmd`, `read_file`, `list_dir`, and memory.
@@ -2199,7 +2257,6 @@ mod tests {
     use crate::provider::{ProviderBase, ProviderResponse, ReasoningEffort};
     use crate::testing::TempDir;
 
-    /// A scratch directory that removes itself.
     /// Replies in order, repeating the last one, recording every request.
     struct SequenceProvider {
         base: ProviderBase,
@@ -2612,10 +2669,23 @@ mod tests {
 
         // A built-in name collides on the same rule.
         let error = session
-            .add_tool("cmd", "d", schema, handler)
+            .add_tool("cmd", "d", schema.clone(), Arc::clone(&handler))
             .map(|_| ())
             .expect_err("a built-in name is refused");
         assert!(error_text(&error).contains("already registered"));
+        for (name, expected) in [
+            (SKILL_TOOL_NAME, "reserved tool name"),
+            ("mine", "already registered"),
+            ("cmd", "already registered"),
+        ] {
+            let error = session
+                .add_tool_spec(
+                    ToolSpec::new(name, "d", schema.clone(), Arc::clone(&handler)).with_actor(),
+                )
+                .map(|_| ())
+                .expect_err("complete specs obey the same collision rules");
+            assert!(error_text(&error).contains(expected), "{name}: {error}");
+        }
     }
 
     #[test]
@@ -3295,6 +3365,7 @@ mod tests {
     struct RecordingStore {
         calls: Mutex<Vec<String>>,
         notes: Mutex<Vec<(String, String)>>,
+        path_probe: Mutex<Option<std::sync::Weak<Mutex<Memories>>>>,
     }
 
     impl RecordingStore {
@@ -3308,6 +3379,18 @@ mod tests {
     }
 
     impl MemoryStore for RecordingStore {
+        fn path(&self, _: &str) -> Option<PathBuf> {
+            if let Some(memories) = lock(&self.path_probe)
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+            {
+                let _guard = memories
+                    .try_lock()
+                    .expect("store callbacks run outside the memories lock");
+            }
+            None
+        }
+
         fn read(&self, scope: &str) -> Result<String> {
             lock(&self.calls).push(format!("read {scope}"));
             Ok(lock(&self.notes)
@@ -3358,7 +3441,7 @@ mod tests {
             turn_delay: Duration::ZERO,
             ..SessionConfig::default()
         };
-        let mut session = Session::new(config).expect("loads");
+        let mut session = Session::new(config.clone()).expect("loads");
         let mut alice = Agent::new("Alice").with_model("m");
         alice.memory = Some("alice".to_string());
         session.add_agent(alice).expect("add agent");
@@ -3400,6 +3483,74 @@ mod tests {
             "{notes:?}"
         );
         assert!(!temp.0.join("session").exists());
+
+        for mode in ["complete", "cancel", "drop", "failure"] {
+            let store = Arc::new(RecordingStore::default());
+            let mut session = Session::new(SessionConfig {
+                memory_store: Some(store.clone()),
+                ..config.clone()
+            })
+            .unwrap();
+            let memories = session.memories();
+            *lock(&store.path_probe) = Some(Arc::downgrade(&memories));
+            session
+                .add_agent(Agent {
+                    memory: Some("alice".into()),
+                    ..Agent::new("Alice").with_model("m")
+                })
+                .unwrap();
+            session
+                .add_agent(Agent::new("Bob").with_model("m"))
+                .unwrap();
+            session
+                .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
+                .unwrap();
+            let mut options = RunOptions {
+                mode: RunMode::HostDriven,
+                ..Default::default()
+            };
+            if mode == "failure" {
+                options.event_sink = Some(Arc::new(|_: &RunEvent| {
+                    Err(Error::Value("sink failure".into()))
+                }));
+            }
+            let mut run = session.start(options).unwrap();
+            if mode == "cancel" {
+                run.control().cancel();
+            }
+            if mode != "drop" {
+                let input = if mode == "complete" {
+                    RunInput::Finish {
+                        result: json!({"consensus": false, "summary": "Host result"}),
+                    }
+                } else {
+                    RunInput::Continue
+                };
+                let StepOutcome::Finished { outcome } = run.step(input).unwrap() else {
+                    panic!("expected terminal {mode}")
+                };
+                assert_eq!(
+                    outcome.reason,
+                    match mode {
+                        "complete" => RunReason::Completed,
+                        "cancel" => RunReason::Cancelled,
+                        _ => RunReason::Failed,
+                    }
+                );
+                assert!(matches!(
+                    run.step(RunInput::Continue).unwrap(),
+                    StepOutcome::Finished { .. }
+                ));
+            }
+            drop(run);
+            let calls = store.calls();
+            assert!(calls.contains(&"open alice".into()), "{mode}: {calls:?}");
+            assert_eq!(
+                calls.iter().filter(|call| call.as_str() == "close").count(),
+                1,
+                "{mode}: {calls:?}"
+            );
+        }
     }
 
     #[test]

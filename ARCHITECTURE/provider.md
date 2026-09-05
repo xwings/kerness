@@ -7,7 +7,7 @@ model name, messages, a reasoning effort level, and optionally tool schemas, and
 get a `ProviderResponse` back. Four backends ship — OpenAI, OpenRouter,
 Anthropic, and a `CustomProvider` for an endpoint the caller describes — and the
 retry, dialect selection, and the two degrade latches are supplied once for all
-of them.
+of them. M3 adds run accounting and budgets at the supplied dispatch boundary.
 
 `http.rs` underneath is the transport, and it is a seam on purpose: the default
 is pure Rust (`ureq` over `rustls`), and the Python binding replaces it with one
@@ -15,7 +15,9 @@ that resolves `kerness.provider.http_post_json` at call time so `@patch` works.
 
 ## Status
 
-`done`
+`done` — M3 supplies normalized accounting, host pricing, explicit measurement
+limits, and pre-dispatch budget checks without changing existing provider
+response fields.
 
 ## Code Structure
 
@@ -26,45 +28,23 @@ that resolves `kerness.provider.http_post_json` at call time so `@patch` works.
 | `crates/kerness/src/provider/openrouter.rs` | OpenRouter |
 | `crates/kerness/src/provider/claude.rs` | Anthropic messages, API key or OAuth |
 | `crates/kerness/src/provider/custom.rs` | a caller-described endpoint |
+| `crates/kerness/src/usage.rs` | normalized usage, host pricing, run accounting, cooperative budgets |
 | `crates/kerness/src/http.rs` | `HttpTransport`, `UreqTransport`, `post_json` |
 | `bindings/python/src/provider.rs` | `PyProviderCore`, `PyProvider`, the transport seam |
 | `bindings/python/kerness/provider.py` | the base class and six concrete providers, in Python |
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/provider/mod.rs:193` — `Provider` — `chat` is required;
-  everything else is defaulted.
-- `crates/kerness/src/provider/mod.rs:114` — `ProviderResponse` — text, tool calls,
-  and an optional `structured` value for structured output.
-- `crates/kerness/src/provider/mod.rs:149` — `ProviderBase` — retries, backoff,
-  minimum interval, the declared context window, and the two latches, shared by
-  every backend.
-- `crates/kerness/src/provider/mod.rs:177` — `with_context_window(tokens)` — a
-  builder, because most callers do not know the figure and write nothing.
-- `crates/kerness/src/provider/mod.rs:231` — `context_window(model)` — how many
-  tokens the model can hold, or `None` for "nobody has said".
-- `crates/kerness/src/provider/mod.rs:57` — `ReasoningEffort` — `Minimal`, `Low`,
-  `Medium`, `High`, `XHigh`, `Max`, defaulting to `High`; a closed enum with
-  `as_str`, `parse`, and `Display`, like `Position`.
-- `crates/kerness/src/provider/mod.rs:317`–`:510` — `supplied_effective_dialect`,
-  `supplied_context_window`, `supplied_effective_effort`,
-  `supplied_note_native_tools_rejected`,
-  `supplied_note_reasoning_effort_rejected`, `supplied_chat_with_retries`,
-  `supplied_chat_dispatch` — the defaulted method bodies, extracted as free
-  functions generic over `P: Provider + ?Sized`.
-- `crates/kerness/src/provider/mod.rs:616` — `convert_messages_for_claude(messages)` —
-  the Anthropic wire shape, which lifts the system message out of the list.
-- `crates/kerness/src/http.rs:24` — `HttpTransport` — the seam; `:75`
-  `set_transport` installs a replacement; `:80` `post_json` is what providers call.
-- `bindings/python/kerness/provider.py:99` — `Provider` — the class user code subclasses.
-- `bindings/python/kerness/provider.py:122` — `effective_dialect()`, `:153`
-  `_chat_accepts_tools()`, and `:157` `_chat_accepts_reasoning_effort()` —
-  deliberately Python: each is `inspect.signature(type(self).chat)` on the
-  concrete subclass, and the core takes the answer as a capability flag.
-- `bindings/python/src/provider.rs:726` — `install_transport()` — installs the
-  transport that resolves `kerness.provider.http_post_json` at call time.
-- `bindings/python/src/provider.rs:737` — `http_post_json(...)` — the unpatched
-  function, itself a `#[pyfunction]` over the same Rust code.
+- `crates/kerness/src/provider/mod.rs:194` — `Provider` — required single-request `chat` plus default retry/dialect behavior.
+- `crates/kerness/src/provider/mod.rs:115` — `ProviderResponse` — unchanged raw provider fields, tool calls, and structured output.
+- `crates/kerness/src/provider/mod.rs:150` — `ProviderBase` — retries, throttling, context window, and degrade latches.
+- `crates/kerness/src/provider/mod.rs:432` — `supplied_chat_with_retries` — observable retry attempts and capability fallbacks.
+- `crates/kerness/src/provider/mod.rs:479` — `supplied_chat_dispatch` — actual attempt observation and native-tool routing.
+- `crates/kerness/src/usage.rs:23` — `NormalizedUsage` — known counts and explicit unknown measurements.
+- `crates/kerness/src/usage.rs:218` — `UsageLedger` — checkpointable records and run/actor/provider aggregates.
+- `crates/kerness/src/usage.rs:121` — `TokenPricing` — host-supplied integer prices and checked cost calculation.
+- `crates/kerness/src/usage.rs:259` — `RunBudget` — exact operation/tool admission and explicit token/cost thresholds.
+- `crates/kerness/src/usage.rs:323` — `UsageCollector` — scoped attribution, accounting, and typed budget refusals.
 
 ### Why the supplied methods are free functions
 
@@ -74,6 +54,60 @@ The Python binding needs exactly that: a subclass that overrides
 body. Extracting each body into a free function generic over `P: Provider + ?Sized`
 lets the binding call the framework's version explicitly when Python has no
 override.
+
+### Run accounting and budgets (M3)
+
+`NormalizedUsage` adds common token counts
+without changing `ProviderResponse.usage` or its public struct layout.
+OpenAI-compatible prompt/completion counts and Anthropic input/output counts
+normalize to input, output, and total tokens. Anthropic cache-read and
+cache-creation counts are added to its input count; OpenAI cached tokens and
+reasoning tokens remain subsets. Missing, invalid, inconsistent, or overflowing
+counts are unknown (`None`). A reported zero stays a known zero.
+
+`UsageCollector` belongs to one run. The
+engine installs a synchronous thread-local scope carrying the trusted actor
+and call purpose, then wraps engine provider boundaries, including compaction,
+closing, and memory maintenance. Tool handlers also run inside the actor's
+accounting scope, so calls through supplied provider dispatch are metered and
+budgeted during the invocation. Supplied dispatch records each attempted `chat`,
+including errors and degrade retries. Nested wrappers do not count the same attempt twice. A custom
+override bypassing supplied dispatch contributes one **opaque logical
+operation**, with unknown token usage and unknown physical attempt count.
+Providers must honor the one-request `chat` contract for exact attempt counts.
+Scopes restore on return and unwind; callbacks execute without the collector's
+mutex held. Provider work on a custom background thread cannot inherit this
+synchronous scope. Direct custom overrides or arbitrary I/O inside a handler
+that bypass framework observation remain the host implementation's responsibility.
+
+`UsageLedger` stores operation records, run
+totals, tool invocation count, and elapsed milliseconds; it also groups records
+by actor or provider. One failed request with missing usage makes its aggregate
+unknown; known measurements remain available in the individual records.
+Ledger snapshots serialize with version 2 run checkpoints. Restoration checks
+that aggregate totals match records and carries forward elapsed active time.
+Time spent waiting for the host while the run is live counts; time offline
+between saving and restoring does not.
+
+`TokenPricing` is supplied by the host for an
+exact provider/model pair. Integer rates are microdollars per million tokens;
+costs round up to a microdollar per operation. Cache-specific rates are optional
+and require the corresponding cache measurement. Without a separate cache
+rate, all input is charged at the supplied input rate. Missing pricing or
+usage yields unknown cost. No model-price registry is embedded in the engine.
+
+`RunBudget` checks elapsed time, token, and
+cost limits at action boundaries, operation limits before each provider attempt,
+and tool limits immediately before a handler starts. Invoked handlers count
+even if they fail; denied actions and pending approvals do not. Budget refusals
+retain a typed `BudgetExceeded` reason alongside the existing `Error` API.
+Operation and tool limits are hard at these synchronous boundaries. Since
+providers expose no enforceable per-request token or cost upper bound, hard
+token/cost budgets are rejected. Hosts must explicitly select
+`BudgetMode::MeasuredThreshold`; one in-flight request can exceed a threshold,
+and unknown usage or cost stops the next metered action. Elapsed limits are
+cooperative and cannot interrupt blocking provider or user code. An opaque
+override's internal retries cannot be constrained by an engine operation cap.
 
 ### The reasoning effort level
 
@@ -104,7 +138,7 @@ answer from a figure their config was given — `context_window` on each
 model registry of their own overrides the trait method and answers from that.
 
 The method takes a *model* even though `supplied_context_window`
-(`provider/mod.rs:337`) does not read it. One `ProviderBase` holds one figure,
+does not read it. One `ProviderBase` holds one figure,
 which is right for a backend serving one model; a backend serving several with
 different windows is exactly the case the argument exists for, and answering it
 means overriding.
@@ -146,54 +180,59 @@ and response parsing stay in Rust either way.
 Nothing. `Provider` is the ABC callers subclass and the built-in classes are
 thin: each holds a `_core` and forwards. `CustomProvider.model_config` is the
 case that shows why — the vendor dict it answers with is the one
-`CustomProvider::new` (`crates/kerness/src/provider/custom.rs:108`) already
-stores, read back through `PyProviderCore`'s getter
-(`bindings/python/src/provider.rs:155`) rather than from a second copy kept
-beside it. The property still returns a fresh dict per call, so a caller
+`CustomProvider::new` already stores, read back through `PyProviderCore`'s
+getter rather than from a second copy kept beside it. The property still returns a fresh dict per call, so a caller
 mutating what it got does not reach the backend; what it no longer does is give
 the value two owners that can disagree.
 
 ## Interactions
 
 - Called by [agent-runtime.md](agent-runtime.md) for every turn.
+- Scoped and budgeted by [run.md](run.md), including tool-internal provider
+  calls; [memory.md](memory.md) uses the same boundary for maintenance.
 - Tool schemas come from [toolschema.md](toolschema.md); the dialect decides the
   wire shape.
 - Structured output runs the schema through [jsonschema.md](jsonschema.md)'s
   `ensure_strict` before sending, then `model_validate` on the Python side.
-- Failures become `ProviderError` and its subclasses in [errors.md](errors.md);
-  `is_provider()` is what makes them retryable, and `is_context_overflow()` is
-  the one [compaction.md](compaction.md) acts on rather than retries.
+- Failed attempts are retried before error classification. After exhaustion,
+  `is_provider()` controls capability fallback and error wrapping;
+  `is_context_overflow()` identifies failures [compaction.md](compaction.md)
+  can recover from by shrinking the conversation.
 - `context_window` is read once per turn by [session.md](session.md)'s
   `context_ceiling`.
 
 ## How to Test
 
 ```sh
-cargo test -p kerness provider                                       # pass = 0 failed
-.venv/bin/python -m pytest bindings/python/tests/test_provider.py -q # pass = 0 failed
+cargo test -p kerness --lib provider
+cargo test -p kerness --lib usage
+cargo test -p kerness --test tools_e2e
+.venv/bin/python -m pytest bindings/python/tests/test_provider.py -q
 ```
 
-- The Rust tests use a `Recorder` transport (`provider/mod.rs:700`) to assert the
-  exact payload each backend builds, without a network call.
-- `bindings/python/tests/test_provider.py` covers the `@patch` seam, the native-tools fallback
-  when a provider rejects tool schemas, the effort level reaching each backend's
-  own key, retry and backoff, and structured output through `pydantic`.
-- `bindings/python/tests/test_provider.py:778` — `TestContextWindow` — the
-  default of `None` (`:785`), every backend reporting the figure it was built
-  with (`:800`), a subclass answering per model from its own registry (`:804`),
-  and a hand-written provider declaring one through `super().__init__` without
-  overriding anything (`:822`).
-- `crates/kerness/src/session.rs:3528` —
-  `the_smaller_of_the_session_and_the_provider_window_is_the_ceiling` — what a
-  declared window is actually for, asserted both ways round.
+Pass means exit code 0 and no failed tests. Rebuild the Python extension before
+running its tests after a Rust change.
+
+The core-upgrade verification passed 39 provider-filtered Rust tests, all six
+usage tests, all 18 tool integration tests, and the rebuilt Python
+suite. The complete workspace gate is recorded in [testing.md](testing.md).
+
+- `crates/kerness/src/provider/mod.rs:1116` — Success, failed attempts, retry accounting, and an operation cap preventing transport dispatch.
+- `crates/kerness/src/provider/mod.rs:1618` — Degrade retries remain separately accounted without duplicate wrapper records.
+- `crates/kerness/src/usage.rs:665` — Provider spellings, unknown versus zero, subsets, and invalid/overflowing counts.
+- `crates/kerness/src/usage.rs:844` — Unsupported hard limits reject; measured budgets stop subsequent actions.
+- `crates/kerness/tests/tools_e2e.rs:180` — Tool-internal provider calls use the trusted actor and cannot bypass run operation limits.
 
 ## Open Gaps / Roadmap
 
 - No streaming. A response is one request and one reply; a harness that wants
   token-by-token output cannot get it.
-- Retry is a fixed backoff over `is_provider()` errors; there is no jitter and no
-  respect for a `Retry-After` header.
-- `pydantic` is optional and imported lazily (`bindings/python/kerness/provider.py:83`);
+- M3 measurement limits are explicit above: opaque override internals and
+  missing provider usage are unknown; hard token/cost reservation requires a
+  future enforceable provider upper-bound contract.
+- Retry applies to every returned error, with linearly increasing waits unless
+  a fixed interval is configured. There is no jitter or `Retry-After` handling.
+- `pydantic` is optional and imported lazily;
   structured output raises a clear error when it is absent rather than degrading.
 - `context_window` is a figure the caller supplies; nothing checks it against
   what the endpoint will actually accept, so a wrong one is wrong in whichever

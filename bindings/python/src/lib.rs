@@ -7,8 +7,8 @@
 //! calls.
 //!
 //! A handful of pieces are deliberately Python and are handed down at import
-//! rather than defined here — the exception hierarchy, whose two-argument
-//! constructors a `create_exception!` cannot express, and the tool dialect,
+//! rather than defined here — the exception hierarchy, whose constructors
+//! retain structured fields a `create_exception!` cannot express, and the tool dialect,
 //! which callers compare with `is` and which therefore has to be a real
 //! `enum.Enum` member.
 
@@ -19,6 +19,7 @@ mod errors;
 mod funcs;
 mod memory;
 mod provider;
+mod run;
 mod runtime;
 mod session;
 mod skill;
@@ -99,6 +100,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<runtime::PyOrchestratorLoop>()?;
     module.add_class::<session::PySession>()?;
     module.add_class::<session::PySessionResult>()?;
+    module.add_class::<run::PyToolContext>()?;
+    module.add_class::<run::PySessionRun>()?;
+    module.add_class::<run::PyRunControl>()?;
 
     funcs::register(module)?;
     Ok(())

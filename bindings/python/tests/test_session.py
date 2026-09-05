@@ -11,8 +11,9 @@ from kerness.exceptions import AccessDeniedError, ProviderHTTPError, SessionErro
 from kerness.gameplan_loader import list_builtin_gameplans
 from kerness.memory import MemoryStore
 from kerness.provider import Provider, ProviderResponse
-from kerness.session import Session, SessionResult
+from kerness.session import RunControl, Session, SessionResult, SessionRun, ToolContext
 from kerness.skill_loader import load_skill
+from kerness.tooling import ToolSpec
 from kerness.toolschema import ToolDialect
 from tests.conftest import CaptureChannel, MockProvider, SequenceMockProvider
 
@@ -313,7 +314,8 @@ class TestAccessControl:
 
 
 class TestToolCalls:
-    def test_agent_tool_call_flow(self, tmp_path):
+    @pytest.mark.parametrize("registration", ["legacy", "spec", "contextual"])
+    def test_agent_tool_call_flow(self, tmp_path, registration):
         tool_call = (
             "```tool_calls\n"
             "{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\","
@@ -327,23 +329,53 @@ class TestToolCalls:
             "END_SESSION",
             "Summary.",
         ])
+        data = tmp_path / "data.txt"
+        data.write_text("pong", encoding="utf-8")
         session = Session(
             gameplan="debate",
             topic="Test tools",
             provider=provider,
             turn_delay_sec=0,
             memory=str(tmp_path / "memory.md"),
-            access_policy=confined(tmp_path),
+            access_policy=confined(
+                tmp_path, allowed_files=[data], allowed_commands=["echo pong"]
+            ),
+            memory_write=registration == "contextual",
         )
         session.add_agent("Alice", model="m")
         session.add_agent("Bob", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")
-        session.add_tool(
-            name="ping",
-            description="Ping tool",
-            parameters={"type": "object", "properties": {}},
-            handler=lambda args: "pong",
-        )
+        seen = []
+        preflights = []
+        parameters = {"type": "object", "properties": {}}
+        if registration == "legacy":
+            session.add_tool("ping", "Ping tool", parameters, lambda args: "pong")
+        elif registration == "spec":
+            session.add_tool_spec(ToolSpec(
+                "ping", "Ping tool", parameters,
+                lambda args, actor: seen.append(actor) or "pong",
+                takes_actor=True,
+            ))
+        else:
+            def ping(args, context):
+                assert args == {}
+                assert isinstance(context, ToolContext)
+                assert context.actor == "Alice"
+                assert isinstance(context.run_id, str) and context.run_id
+                assert isinstance(context.turn_id, int)
+                assert isinstance(context.call_id, str) and context.call_id
+                assert not context.is_cancelled()
+                assert context.read_file(data) == "pong"
+                assert context.run_command("echo pong").strip() == "pong"
+                assert context.write_memory("remember pong") is True
+                assert "remember pong" in context.read_memory()
+                seen.append(context)
+                return "pong"
+
+            session.add_contextual_tool(
+                "ping", "Ping tool", parameters, ping,
+                preflight=lambda args, identity: preflights.append(identity),
+            )
 
         result = session.run()
 
@@ -352,6 +384,85 @@ class TestToolCalls:
             "tool followup" in (call.get("purpose", "") or "")
             for call in provider.calls
         )
+        if registration == "spec":
+            assert seen == ["Alice"]
+        elif registration == "contextual":
+            assert len(seen) == 1
+            assert preflights == [{
+                "actor": "Alice", "run_id": seen[0].run_id,
+                "turn_id": seen[0].turn_id, "call_id": seen[0].call_id,
+            }]
+            with pytest.raises(SessionError, match="expired"):
+                seen[0].read_file(data)
+            with pytest.raises(AttributeError):
+                seen[0].actor = "Mod"
+
+
+class TestOwnedRunBoundary:
+    @pytest.mark.parametrize("terminal", ["finish", "cancel"])
+    def test_inputs_results_events_and_handles_cross_the_boundary(self, tmp_path, terminal):
+        """JSON values and independent handles cross once; Rust owns the loop."""
+        gameplan = tmp_path / "host.md"
+        gameplan.write_text(
+            "---\nname: host\nagents:\n  orchestrator: false\n"
+            "  participants: {min: 1}\nloop:\n  terminate_on: [DONE]\n"
+            "result:\n  ok: {type: bool}\n---\n\nOne agent.\n",
+            encoding="utf-8",
+        )
+        provider = SequenceMockProvider(responses=["Ready."])
+        session = Session(
+            gameplan=str(gameplan), topic="T", provider=provider,
+            channel=CaptureChannel(), turn_delay_sec=0,
+            memory=str(tmp_path / "memory.md"),
+            session_file=str(tmp_path / "run.json"),
+            access_policy=confined(tmp_path),
+        )
+        session.add_agent("Alice", model="m")
+        events = []
+        run = session.start(
+            mode="host_driven", budget={"max_provider_operations": 2},
+            event_sink=events.append, binding_version="python-boundary-v1",
+        )
+        assert isinstance(run, SessionRun)
+        with pytest.raises(SessionError, match="already started"):
+            session.run()
+        with pytest.raises(SessionError, match="already started"):
+            _ = session.memory
+        del session
+
+        control = run.control()
+        assert isinstance(control, RunControl)
+        assert not control.is_cancelled()
+        assert run.outcome() is None
+        with pytest.raises(ValueError, match="unknown variant"):
+            run.step({"kind": "not_an_input"})
+
+        def wait_for_input():
+            for _ in range(10):
+                if run.step()["status"] == "waiting":
+                    return
+            pytest.fail("the Rust run did not return to the host boundary")
+
+        wait_for_input()
+        run.step({"kind": "select_agent", "agent": "Alice", "instruction": "Speak."})
+        wait_for_input()
+        assert len(provider.calls) == 1
+        run.checkpoint()
+        assert (tmp_path / "run.json").exists()
+
+        if terminal == "finish":
+            finished = run.step({"kind": "finish", "result": {"ok": False}})
+        else:
+            control.cancel()
+            assert control.is_cancelled()
+            finished = run.step()
+        assert finished["status"] == "finished"
+        assert finished["outcome"] == run.outcome()
+        assert isinstance(run.usage(), dict)
+        assert events and all(isinstance(event, dict) for event in events)
+        assert run.drain_events() == events
+        assert run.drain_events() == []
+        assert len(provider.calls) == 1
 
 
 class TestCommandLogGoesToTheChannel:
@@ -2377,7 +2488,8 @@ class TestAStoreTheCallerWrote:
     """`memory_store=` is the slot: the session's notes go wherever the caller
     put them, and the file the default writes is one choice among others."""
 
-    def test_a_python_store_is_opened_read_written_and_closed(self, tmp_path):
+    @pytest.mark.parametrize("maintenance", [False, True])
+    def test_a_python_store_is_opened_read_written_and_closed(self, tmp_path, maintenance):
         """The whole lifecycle in one run, from Python: every scope opened
         before the first turn, notes routed to the store instead of a file,
         and closed once at the end."""
@@ -2401,7 +2513,23 @@ class TestAStoreTheCallerWrote:
             def close(self):
                 self.calls.append("close")
 
-        store = Recording()
+        summarizer = MockProvider(responses=["Kept recap."])
+
+        class Maintained(Recording):
+            def maintenance_scopes(self):
+                return ["alice", "session"]
+
+            def maintain_scope(self, scope):
+                self.calls.append(f"maintain {scope}")
+                summarizer.chat_with_retries("memory-model", [], "memory consolidation")
+
+            def close_run(self):
+                self.calls.append("close_run")
+
+            def close(self):
+                raise AssertionError("paid standalone close is not run cleanup")
+
+        store = Maintained() if maintenance else Recording()
         provider = SequenceMockProvider(responses=[
             "@Alice, speak.",
             "My opinion.\n@MEMORY: Alice prefers Rust.",
@@ -2422,11 +2550,31 @@ class TestAStoreTheCallerWrote:
         session.add_agent("Alice", model="m", memory="alice")
         session.add_agent("Bob", model="m")
         session.add_agent("Mod", model="m", role="orchestrator")
-        session.run()
+        if maintenance:
+            run = session.start(result_validation="legacy_coercion")
+            for _ in range(50):
+                before = len(summarizer.calls)
+                step = run.step()
+                assert len(summarizer.calls) - before <= 1
+                if step["status"] == "finished":
+                    break
+            else:
+                pytest.fail("maintenance did not complete")
+            records = [
+                record for record in run.usage()["records"]
+                if record["model"] == "memory-model"
+            ]
+            assert len(summarizer.calls) == len(records) == 2
+            assert all(not record["opaque"] for record in records)
+            assert store.calls[-3:] == ["maintain alice", "maintain session", "close_run"]
+            assert store.calls.count("close_run") == 1
+        else:
+            session.run()
+            assert store.calls[-1] == "close"
+            assert store.calls.count("close") == 1
 
         assert store.calls[0] == "open session"
         assert "open alice" in store.calls
-        assert store.calls[-1] == "close"
         assert ("alice", "Alice prefers Rust.") in store.notes
         assert any(
             scope == "session" and "Session Result" in note
@@ -2796,7 +2944,7 @@ class TestResumingFromASessionFile:
         return str(path)
 
     def _run(self, tmp_path, *, max_turns, topic="T", channel=None):
-        provider = SequenceMockProvider(responses=["@Alice, go.", "Spoke."])
+        provider = SequenceMockProvider(responses=["@Alice, go.", "Spoke."] * 2)
         session = Session(
             gameplan=self._gameplan(tmp_path), topic=topic, provider=provider,
             channel=channel or CaptureChannel(), turn_delay_sec=0,
@@ -2866,22 +3014,35 @@ class TestResumingFromASessionFile:
         with pytest.raises(SessionError, match="topic"):
             self._run(tmp_path, max_turns=6, topic="Something else")
 
-    def test_an_interrupted_run_is_still_resumable(self, tmp_path):
-        """The whole point: the file is written per delivered turn, not at the
-        end. A save that only happened after `run()` returned would be worth
-        nothing in the one case this feature exists for."""
+    @pytest.mark.parametrize("interrupt_at", [1, 2])
+    def test_an_interrupted_run_is_still_resumable(self, tmp_path, interrupt_at):
+        """Commit before calling the channel: a raising delivery must not
+        replay its completed route or participant turn when resumed."""
         class ExplodingChannel(CaptureChannel):
             def send(self, sender, message):
                 super().send(sender, message)
-                if len(self.messages) == 2:
+                if len(self.messages) == interrupt_at:
                     raise RuntimeError("power cut")
 
         with pytest.raises(RuntimeError, match="power cut"):
             self._run(tmp_path, max_turns=20, channel=ExplodingChannel())
 
         saved = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
-        assert saved["loop"]["turn_count"] >= 1
+        assert saved["loop"]["turn_count"] == interrupt_at
+        assert saved["loop"]["phases"]["index"] == interrupt_at - 1
+        assert saved["loop"]["phases"]["rounds_run"] == interrupt_at - 1
         assert any(t["content"] == "@Alice, go." for t in saved["turns"])
+
+        result, _, provider = self._run(tmp_path, max_turns=20)
+        expected_phase = "opening" if interrupt_at == 1 else "rethink"
+        briefs = [m["content"] for m in provider.calls[0]["messages"]
+                  if m["content"].startswith("Active phase:")]
+        assert briefs[-1].startswith(f"Active phase: {expected_phase}")
+        expected_purpose = "turn from Alice" if interrupt_at == 1 else "orchestrator turn"
+        assert provider.calls[0]["purpose"] == expected_purpose
+        assert result.end_reason == "phases_complete"
+        assert result.rounds_run == 2
+        assert len([m for m in result.history if m.msg_type == "turn"]) == 2
 
 
 class TestContextLimitKeepsTheConversationSendable:
@@ -3035,4 +3196,3 @@ class TestAProviderRefusingALongRequestIsRetriedOnce:
         # summary rather than ending on the provider's 400.
         assert provider.refused == 1
         assert result.final_summary == "Summary."
-

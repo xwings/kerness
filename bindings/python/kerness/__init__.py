@@ -67,7 +67,7 @@ from kerness.role_loader import (
     list_builtin_roles,
     load_role,
 )
-from kerness.session import Message, Session, SessionResult
+from kerness.session import Message, RunControl, Session, SessionResult, SessionRun, ToolContext
 from kerness.skill_loader import (
     SkillConfig,
     list_builtin_skills,
@@ -81,6 +81,9 @@ __all__ = [
     # Core
     "Session",
     "SessionResult",
+    "SessionRun",
+    "RunControl",
+    "ToolContext",
     "Message",
     # Agent
     "Agent",

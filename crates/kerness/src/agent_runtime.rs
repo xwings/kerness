@@ -9,13 +9,8 @@
 //! isolation is the point: the buffer holds tool exchanges in one provider's
 //! message shape, and no other agent should have to read them.
 //!
-//! Because the loop is driven by the model rather than by a count, it needs
-//! bounds a stuck model cannot argue with. The tool-iteration limit is the
-//! caller's, and it is optional; [`MAX_INVALID_CALLS`] and
-//! [`MAX_REPEATED_FAILURES`] are the framework's, and they are not. Both watch
-//! for the same thing — a round that told the model nothing it was not told
-//! last round — and both end the turn rather than the session, because a turn
-//! that produced no text is a turn the session can carry on without.
+//! The caller may limit tool rounds. [`MAX_INVALID_CALLS`] and
+//! [`MAX_REPEATED_FAILURES`] always apply and end only the current turn.
 
 use serde_json::{json, Value};
 
@@ -32,24 +27,261 @@ pub const FOLLOWUP_PROMPT: &str = "Tool results are available above. Continue.";
 
 /// How many consecutive unparseable tool-call blocks to tolerate before giving
 /// up on the turn.
-///
-/// Every other tool result carries new information, so looping on it is the
-/// model making progress; an invalid block returns the same "here is the
-/// format" text every time, so a model that cannot produce valid JSON will emit
-/// the same reply forever. With the tool-iteration bound unset that is an
-/// unbounded loop against a paid API.
 pub const MAX_INVALID_CALLS: u32 = 3;
 
-/// How many times a round of tool calls may repeat the previous round's
+/// How many times an all-error tool round may repeat the previous round's
 /// failures, word for word, before giving up on the turn.
-///
-/// A tool result normally carries new information, so a model looping on one is
-/// a model making progress. The exception is a round in which every call failed
-/// and every failure reads exactly as it did last time: the model has been told
-/// what is wrong, has changed nothing, and will be told the same thing again.
-/// This is the same hole [`MAX_INVALID_CALLS`] closes, one step further in —
-/// there the block never parsed, here it parsed and the call is hopeless.
 pub const MAX_REPEATED_FAILURES: u32 = 3;
+
+/// Why an agent turn stopped. Legacy callers continue to receive its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnReason {
+    Completed,
+    ToolIterations,
+    InvalidCalls,
+    RepeatedFailures,
+    ProviderFailure,
+}
+
+/// The owned continuation of one agent turn, including every completed tool
+/// result. Providers, handlers, and prompt callbacks are bound by the driver.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTurn {
+    scratch: Vec<Value>,
+    history_len: usize,
+    purpose: String,
+    dialect: ToolDialect,
+    max_tool_iterations: Option<u32>,
+    iterations: u32,
+    invalid: u32,
+    repeated: u32,
+    previous: Option<Vec<ToolResult>>,
+    calls: Vec<ToolCall>,
+    next_call: usize,
+    results: Vec<ToolResult>,
+    response_content: String,
+    final_text: Option<String>,
+    reason: Option<TurnReason>,
+    failure: Option<String>,
+    recorded: Vec<Value>,
+}
+
+impl AgentTurn {
+    pub fn new(
+        history: &[Value],
+        purpose: &str,
+        instruction: Option<&str>,
+        dialect: ToolDialect,
+        max_tool_iterations: Option<u32>,
+    ) -> Self {
+        let mut scratch = history.to_vec();
+        if let Some(instruction) = instruction {
+            scratch.push(json!({"role": "user", "content": instruction}));
+        }
+        Self {
+            scratch,
+            history_len: history.len(),
+            purpose: purpose.to_string(),
+            dialect,
+            max_tool_iterations,
+            iterations: 0,
+            invalid: 0,
+            repeated: 0,
+            previous: None,
+            calls: Vec::new(),
+            next_call: 0,
+            results: Vec::new(),
+            response_content: String::new(),
+            final_text: None,
+            reason: None,
+            failure: None,
+            recorded: Vec::new(),
+        }
+    }
+
+    pub fn scratch(&self) -> &[Value] {
+        &self.scratch
+    }
+
+    pub fn purpose(&self) -> &str {
+        &self.purpose
+    }
+
+    /// The next unexecuted call. Inspect it before approval or journalling;
+    /// only accepting its result advances this cursor.
+    pub fn pending_call(&self) -> Option<&ToolCall> {
+        if self.is_complete() {
+            None
+        } else {
+            self.calls.get(self.next_call)
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.final_text.is_some()
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        self.final_text.as_deref()
+    }
+
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    pub fn reason(&self) -> Option<TurnReason> {
+        self.reason
+    }
+
+    /// Messages newly appended by this continuation. Draining consumes the
+    /// outbox, so a later snapshot cannot emit the same records again.
+    pub fn take_recorded(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.recorded)
+    }
+
+    /// Replace the shared-history prefix after compaction, keeping the turn's
+    /// instruction and complete tool exchanges. No completed tool is replayed.
+    pub fn replace_history(&mut self, history: &[Value]) -> Result<()> {
+        self.validate()?;
+        self.scratch
+            .splice(..self.history_len, history.iter().cloned());
+        self.history_len = history.len();
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Value {
+        serde_json::to_value(self).expect("agent turn contains only JSON-compatible state")
+    }
+
+    pub fn from_snapshot(snapshot: &Value) -> Result<Self> {
+        let turn: Self = serde_json::from_value(snapshot.clone())
+            .map_err(|err| Error::session(format!("Invalid agent turn snapshot: {err}")))?;
+        turn.validate()?;
+        Ok(turn)
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.history_len > self.scratch.len()
+            || self.final_text.is_some() != self.reason.is_some()
+            || self.next_call > self.calls.len()
+            || self.results.len() != self.next_call
+            || self
+                .results
+                .iter()
+                .zip(&self.calls)
+                .any(|(result, call)| result.name != call.name)
+        {
+            return Err(Error::session(
+                "Invalid agent turn snapshot: inconsistent tool or history position",
+            ));
+        }
+        // Each finished tool round retains at least an assistant message and
+        // one result, even when the shared-history prefix was compacted.
+        if u64::from(self.iterations) > ((self.scratch.len() - self.history_len) / 2) as u64
+            || self.invalid > MAX_INVALID_CALLS
+            || self.repeated > MAX_REPEATED_FAILURES
+            || (!self.is_complete()
+                && (self.invalid == MAX_INVALID_CALLS || self.repeated == MAX_REPEATED_FAILURES))
+            || self.max_tool_iterations.is_some_and(|limit| {
+                self.iterations > limit
+                    || (self.iterations == limit && self.pending_call().is_some())
+            })
+        {
+            return Err(Error::session(
+                "Invalid agent turn snapshot: inconsistent loop guard counters",
+            ));
+        }
+        Ok(())
+    }
+
+    fn append(&mut self, message: Value) {
+        self.recorded.push(message.clone());
+        self.scratch.push(message);
+    }
+
+    fn accept_response(&mut self, response: &ProviderResponse, dialect: ToolDialect) {
+        self.dialect = dialect;
+        self.response_content = response.content.clone();
+        self.calls = calls_from(response, dialect);
+        self.next_call = 0;
+        self.results.clear();
+        if self.calls.is_empty()
+            || self
+                .max_tool_iterations
+                .is_some_and(|limit| self.iterations >= limit)
+        {
+            self.final_text = Some(response.content.clone());
+            self.reason = Some(if self.calls.is_empty() {
+                TurnReason::Completed
+            } else {
+                TurnReason::ToolIterations
+            });
+            return;
+        }
+        self.invalid = if self.calls.iter().all(|call| call.name == INVALID_CALL) {
+            self.invalid.saturating_add(1)
+        } else {
+            0
+        };
+        if self.invalid >= MAX_INVALID_CALLS {
+            logging::warning(&format!(
+                "Giving up on {} after {} unparseable tool-call blocks",
+                self.purpose, self.invalid
+            ));
+            self.final_text = Some(response.content.clone());
+            self.reason = Some(TurnReason::InvalidCalls);
+            return;
+        }
+        self.append(render_assistant_turn(dialect, response));
+    }
+
+    /// Commit one tool result without executing another call or contacting a
+    /// provider. Native call/result batches remain private until all calls have
+    /// a result, at which point the provider may be advanced again.
+    pub fn accept_tool_result(&mut self, result: ToolResult) -> Result<()> {
+        self.validate()?;
+        let call = self
+            .pending_call()
+            .cloned()
+            .ok_or_else(|| Error::session("This agent turn has no pending tool call"))?;
+        if result.name != call.name {
+            return Err(Error::session(format!(
+                "Tool result for '{}' does not answer pending call '{}'",
+                result.name, call.name
+            )));
+        }
+        self.append(render_tool_result(self.dialect, &call, &result));
+        self.results.push(result);
+        self.next_call += 1;
+        if self.next_call != self.calls.len() {
+            return Ok(());
+        }
+        let stuck = self.results.iter().all(|result| result.is_error)
+            && self.previous.as_deref() == Some(self.results.as_slice());
+        self.repeated = if stuck {
+            self.repeated.saturating_add(1)
+        } else {
+            0
+        };
+        self.previous = Some(self.results.clone());
+        if self.repeated >= MAX_REPEATED_FAILURES {
+            logging::warning(&format!(
+                "Giving up on {} after {} repeats of the same failing tool calls",
+                self.purpose, self.repeated
+            ));
+            self.final_text = Some(self.response_content.clone());
+            self.reason = Some(TurnReason::RepeatedFailures);
+            return Ok(());
+        }
+        if self.dialect == ToolDialect::Text {
+            self.append(json!({"role": "user", "content": FOLLOWUP_PROMPT}));
+        }
+        self.iterations = self.iterations.saturating_add(1);
+        Ok(())
+    }
+}
 
 /// Builds the message list an agent is called with, from a rendered history.
 type MessagesFor<'a> = Box<dyn Fn(&Agent, &[Value], &str) -> Result<Vec<Value>> + 'a>;
@@ -67,7 +299,7 @@ pub struct AgentRunner<'a> {
     max_tool_iterations: Option<u32>,
     record: Option<RecordExchange<'a>>,
     tools_for: Option<Box<dyn Fn() -> Vec<ToolSpec> + 'a>>,
-    native_tools: bool,
+    strict_errors: bool,
 }
 
 impl<'a> AgentRunner<'a> {
@@ -93,7 +325,7 @@ impl<'a> AgentRunner<'a> {
             max_tool_iterations: None,
             record: None,
             tools_for: None,
-            native_tools: false,
+            strict_errors: false,
         }
     }
 
@@ -120,116 +352,115 @@ impl<'a> AgentRunner<'a> {
         self
     }
 
-    /// Take one turn and return the agent's final text.
-    ///
-    /// *history* is the rendered conversation the agent starts from, *purpose*
-    /// names the turn in provider logging and retries, and *instruction* is an
-    /// optional user-role prompt appended for this turn. A provider that fails
-    /// costs the turn its text, not the run.
+    /// Prepare owned state without contacting the provider.
+    pub fn start(&self, history: &[Value], purpose: &str, instruction: Option<&str>) -> AgentTurn {
+        AgentTurn::new(
+            history,
+            purpose,
+            instruction,
+            self.provider.effective_dialect(),
+            self.max_tool_iterations,
+        )
+    }
+
+    /// Propagate provider failures so a session driver can return a typed
+    /// terminal outcome. The legacy runner absorbs them by default.
+    pub fn with_strict_errors(mut self) -> Self {
+        self.strict_errors = true;
+        self
+    }
+
+    /// Make one logical provider request. Provider-owned retries remain inside
+    /// that invocation; no tool is executed by this method. An overflow leaves
+    /// the continuation untouched so compaction can retry without replaying tools.
+    pub fn advance(&mut self, turn: &mut AgentTurn) -> Result<Option<ProviderResponse>> {
+        turn.validate()?;
+        if turn.is_complete() {
+            return Ok(None);
+        }
+        if turn.pending_call().is_some() {
+            return Err(Error::session(
+                "Accept the pending tool result before advancing the provider",
+            ));
+        }
+        let purpose = if turn.iterations == 0 {
+            turn.purpose.clone()
+        } else {
+            format!("{} (tool followup)", turn.purpose)
+        };
+        let response = match self.chat(turn.scratch(), &purpose) {
+            Ok(response) => response,
+            Err(error)
+                if !self.strict_errors && error.is_provider() && !error.is_context_overflow() =>
+            {
+                turn.failure = Some(error.to_string());
+                turn.final_text = Some(no_response(&turn.purpose));
+                turn.reason = Some(TurnReason::ProviderFailure);
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        turn.accept_response(&response, self.provider.effective_dialect());
+        self.record_pending(turn);
+        Ok(Some(response))
+    }
+
+    /// Drive the same owned continuation to completion, dispatching each tool
+    /// through the registered dispatcher before advancing the provider again.
     pub fn run(
         &mut self,
         history: &[Value],
         purpose: &str,
         instruction: Option<&str>,
     ) -> Result<String> {
-        let dialect = self.provider.effective_dialect();
-        // Under text the specs already reached the model through the system
-        // prompt, so there is nothing to send.
-        self.native_tools = self.tools_for.is_some() && dialect != ToolDialect::Text;
-
-        let mut scratch: Vec<Value> = history.to_vec();
-        if let Some(instruction) = instruction {
-            scratch.push(json!({"role": "user", "content": instruction}));
-        }
-
-        let mut response = match self.chat(&scratch, purpose) {
-            Ok(response) => response,
-            Err(error) if absorbable(&error) => return Ok(no_response(purpose)),
-            Err(error) => return Err(error),
-        };
-
-        let mut iterations = 0;
-        let mut invalid = 0;
-        let mut repeated = 0;
-        let mut previous: Option<Vec<ToolResult>> = None;
+        let mut turn = self.start(history, purpose, instruction);
         loop {
-            let calls = calls_from(&response, dialect);
-            if calls.is_empty() {
-                return Ok(response.content);
+            if let Some(text) = turn.text() {
+                return Ok(text.to_string());
             }
-            if self
-                .max_tool_iterations
-                .is_some_and(|limit| iterations >= limit)
-            {
-                return Ok(response.content);
+            if let Some(call) = turn.pending_call().cloned() {
+                let result = self.dispatcher.execute(&call, &self.agent.name);
+                turn.accept_tool_result(result)?;
+                self.record_pending(&mut turn);
+            } else if let Err(error) = self.advance(&mut turn) {
+                // Legacy callers cannot carry this private continuation
+                // into a retry. Absorb followup overflow as before rather
+                // than inviting a retry that would replay completed tools.
+                if !self.strict_errors && turn.iterations > 0 && error.is_provider() {
+                    return Ok(no_response(purpose));
+                }
+                return Err(error);
             }
-
-            invalid = if all_invalid(&calls) { invalid + 1 } else { 0 };
-            if invalid >= MAX_INVALID_CALLS {
-                logging::warning(&format!(
-                    "Giving up on {purpose} after {invalid} unparseable tool-call blocks"
-                ));
-                return Ok(response.content);
-            }
-
-            self.append(&mut scratch, render_assistant_turn(dialect, &response));
-            let mut results = Vec::with_capacity(calls.len());
-            for call in &calls {
-                let result = self.dispatcher.execute(call, &self.agent.name);
-                self.append(&mut scratch, render_tool_result(dialect, call, &result));
-                results.push(result);
-            }
-
-            let stuck = results.iter().all(|result| result.is_error)
-                && previous.as_deref() == Some(results.as_slice());
-            repeated = if stuck { repeated + 1 } else { 0 };
-            previous = Some(results);
-            if repeated >= MAX_REPEATED_FAILURES {
-                logging::warning(&format!(
-                    "Giving up on {purpose} after {repeated} repeats of the same failing \
-                     tool calls"
-                ));
-                return Ok(response.content);
-            }
-
-            if dialect == ToolDialect::Text {
-                // The native dialects end on their own result message; text
-                // renders results as assistant turns, so it needs a user turn
-                // to hand the floor back.
-                self.append(
-                    &mut scratch,
-                    json!({"role": "user", "content": FOLLOWUP_PROMPT}),
-                );
-            }
-
-            iterations += 1;
-            response = match self.chat(&scratch, &format!("{purpose} (tool followup)")) {
-                Ok(response) => response,
-                Err(error) if error.is_provider() => return Ok(no_response(purpose)),
-                Err(error) => return Err(error),
-            };
         }
     }
 
-    fn append(&mut self, scratch: &mut Vec<Value>, message: Value) {
+    fn record_pending(&mut self, turn: &mut AgentTurn) {
         if let Some(record) = self.record.as_mut() {
-            record(&message);
+            for message in turn.take_recorded() {
+                record(&message);
+            }
         }
-        scratch.push(message);
     }
 
     fn chat(&self, scratch: &[Value], purpose: &str) -> Result<ProviderResponse> {
         let messages = (self.messages_for)(self.agent, scratch, &self.base_prompt)?;
-        let tools = match (self.native_tools, self.tools_for.as_ref()) {
-            (true, Some(tools_for)) => Some(tools_for()),
-            _ => None,
+        let tools = match (self.provider.effective_dialect(), self.tools_for.as_ref()) {
+            (ToolDialect::Text, _) | (_, None) => None,
+            (_, Some(tools_for)) => Some(tools_for()),
         };
-        self.provider.chat_with_retries(
+        crate::usage::observe_provider_call(
+            self.provider.name(),
             self.agent.model_name(),
-            &messages,
             purpose,
-            tools.as_deref(),
-            self.agent.effort(),
+            || {
+                self.provider.chat_with_retries(
+                    self.agent.model_name(),
+                    &messages,
+                    purpose,
+                    tools.as_deref(),
+                    self.agent.effort(),
+                )
+            },
         )
     }
 }
@@ -246,22 +477,6 @@ fn calls_from(response: &ProviderResponse, dialect: ToolDialect) -> Vec<ToolCall
     parse_tool_calls(&response.content)
 }
 
-/// Whether a provider failure is the turn's to swallow.
-///
-/// Nearly all of them are: a backend that is down or answering nonsense costs
-/// the turn its text, and the session carries on. A context-length refusal is
-/// the exception, because it is the one the caller can act on — the session
-/// compacts and calls the turn again — and returning a placeholder for it would
-/// hide the only provider failure that is fixable.
-fn absorbable(error: &Error) -> bool {
-    error.is_provider() && !error.is_context_overflow()
-}
-
-/// Whether a round produced nothing but unparseable blocks.
-fn all_invalid(calls: &[ToolCall]) -> bool {
-    calls.iter().all(|call| call.name == INVALID_CALL)
-}
-
 fn no_response(purpose: &str) -> String {
     logging::warning(&format!("Provider error for {purpose}"));
     format!("[No response from model for {purpose}]")
@@ -269,6 +484,7 @@ fn no_response(purpose: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -340,6 +556,7 @@ mod tests {
         base: ProviderBase,
         dialect: ToolDialect,
         replies: Vec<Option<ProviderResponse>>,
+        failure: Error,
         calls: Mutex<Vec<Recorded>>,
     }
 
@@ -349,6 +566,7 @@ mod tests {
                 base: ProviderBase::new(0, 0.0, None),
                 dialect,
                 replies,
+                failure: Error::provider("down"),
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -414,8 +632,31 @@ mod tests {
             let index = (calls.len() - 1).min(self.replies.len() - 1);
             self.replies[index]
                 .clone()
-                .ok_or_else(|| Error::provider("down"))
+                .ok_or_else(|| self.failure.clone())
         }
+    }
+
+    fn step_to_completion(
+        runner: &mut AgentRunner<'_>,
+        dispatcher: &ToolDispatcher,
+        reason: TurnReason,
+    ) -> Result<String> {
+        let mut turn = runner.start(&[], "turn", None);
+        for _ in 0..100 {
+            if let Some(text) = turn.text() {
+                assert_eq!(turn.reason(), Some(reason));
+                return Ok(text.to_string());
+            }
+            if let Some(call) = turn.pending_call().cloned() {
+                turn.accept_tool_result(dispatcher.execute(&call, "Alice"))?;
+            } else {
+                runner.advance(&mut turn)?;
+            }
+            turn = AgentTurn::from_snapshot(&turn.snapshot())?;
+        }
+        Err(Error::session(
+            "The scripted turn did not complete in 100 steps",
+        ))
     }
 
     #[test]
@@ -502,7 +743,7 @@ mod tests {
         let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
 
         assert_eq!(
-            runner.run(&[], "turn", None).expect("a turn"),
+            step_to_completion(&mut runner, &dispatcher, TurnReason::Completed).expect("a turn"),
             "Done after two rounds."
         );
         assert_eq!(provider.call_count(), 3);
@@ -539,7 +780,7 @@ mod tests {
         let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
 
         assert_eq!(
-            runner.run(&[], "turn", None).expect("a turn"),
+            step_to_completion(&mut runner, &dispatcher, TurnReason::InvalidCalls).expect("a turn"),
             "```tool_calls\n{bad\n```"
         );
         // Each bad response costs one call; the third trips the bound.
@@ -556,7 +797,11 @@ mod tests {
         let (agent, dispatcher) = fixture(ping());
         let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
 
-        assert_eq!(runner.run(&[], "turn", None).expect("a turn"), block);
+        assert_eq!(
+            step_to_completion(&mut runner, &dispatcher, TurnReason::RepeatedFailures)
+                .expect("a turn"),
+            block
+        );
         // The opening call, then one per repeat until the bound trips.
         assert_eq!(
             provider.call_count(),
@@ -628,9 +873,41 @@ mod tests {
         let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE")
             .with_max_tool_iterations(2);
 
-        assert_eq!(runner.run(&[], "turn", None).expect("a turn"), block);
+        assert_eq!(
+            step_to_completion(&mut runner, &dispatcher, TurnReason::ToolIterations)
+                .expect("a turn"),
+            block
+        );
         // 1 opening call + 2 followups, then the bound stops it.
         assert_eq!(provider.call_count(), 3);
+
+        let mut turn = runner.start(&[], "turn", None);
+        runner.advance(&mut turn).expect("pending tool");
+        let pending = turn.snapshot();
+        for (field, value) in [
+            ("iterations", u32::MAX),
+            ("invalid", u32::MAX),
+            ("repeated", u32::MAX),
+            ("invalid", MAX_INVALID_CALLS),
+            ("repeated", MAX_REPEATED_FAILURES),
+        ] {
+            let mut corrupt = pending.clone();
+            corrupt[field] = json!(value);
+            assert!(AgentTurn::from_snapshot(&corrupt).is_err(), "{field}");
+            // The public serde implementation is also a restoration path.
+            let mut unchecked: AgentTurn = serde_json::from_value(corrupt).unwrap();
+            assert!(
+                unchecked
+                    .accept_tool_result(ToolResult {
+                        name: "ping".into(),
+                        content: "pong".into(),
+                        is_error: false,
+                    })
+                    .is_err(),
+                "{field}"
+            );
+            assert!(runner.advance(&mut unchecked).is_err(), "{field}");
+        }
     }
 
     #[test]
@@ -651,6 +928,18 @@ mod tests {
                 FOLLOWUP_PROMPT.to_string()
             ]
         );
+        let provider = MockProvider::text(&[call_block("ping").as_str(), "done"]);
+        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
+        let mut turn = runner.start(&[], "turn", None);
+        runner.advance(&mut turn).expect("opening");
+        assert_eq!(turn.take_recorded().len(), 1);
+        turn = AgentTurn::from_snapshot(&turn.snapshot()).expect("restore drained outbox");
+        assert!(turn.take_recorded().is_empty());
+        let call = turn.pending_call().cloned().expect("ping");
+        turn.accept_tool_result(dispatcher.execute(&call, "Alice"))
+            .expect("result");
+        assert_eq!(turn.take_recorded().len(), 2);
+        assert!(turn.take_recorded().is_empty());
     }
 
     #[test]
@@ -662,6 +951,24 @@ mod tests {
         assert_eq!(
             runner.run(&[], "turn from Alice", None).expect("a turn"),
             "[No response from model for turn from Alice]"
+        );
+        let mut turn = runner.start(&[], "turn from Alice", None);
+        runner
+            .advance(&mut turn)
+            .expect("legacy failure is absorbed");
+        assert_eq!(turn.failure(), Some("down"));
+        assert_eq!(turn.reason(), Some(TurnReason::ProviderFailure));
+        let mut runner = runner.with_strict_errors();
+        let mut turn = runner.start(&[], "turn from Alice", None);
+        let before = turn.snapshot();
+        assert!(runner
+            .advance(&mut turn)
+            .expect_err("strict failure")
+            .is_provider());
+        assert_eq!(
+            turn.snapshot(),
+            before,
+            "failure leaves a retryable continuation"
         );
     }
 
@@ -678,6 +985,55 @@ mod tests {
             runner.run(&[], "turn", None).expect("a turn"),
             "[No response from model for turn]"
         );
+        let mut provider = MockProvider::new(
+            ToolDialect::Text,
+            vec![
+                Some(ProviderResponse::text(call_block("ping"))),
+                None,
+                Some(ProviderResponse::text("done after compaction")),
+            ],
+        );
+        provider.failure = Error::ProviderHttp {
+            status_code: 413,
+            url: "https://provider.test".to_string(),
+            body: "maximum context length".to_string(),
+        };
+        let mut runner = AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE");
+        let mut turn = runner.start(
+            &[json!({"role":"user", "content":"old history"})],
+            "turn",
+            Some("keep instruction"),
+        );
+        runner.advance(&mut turn).expect("opening tool call");
+        let call = turn.pending_call().cloned().expect("ping");
+        turn.accept_tool_result(dispatcher.execute(&call, "Alice"))
+            .expect("tool result");
+        let before = turn.snapshot();
+        assert!(runner
+            .advance(&mut turn)
+            .expect_err("overflow reaches the session")
+            .is_context_overflow());
+        assert_eq!(turn.snapshot(), before);
+        turn.replace_history(&[])
+            .expect("replace only shared history");
+        turn = AgentTurn::from_snapshot(&turn.snapshot()).expect("resume after compaction");
+        assert!(
+            turn.pending_call().is_none(),
+            "the completed tool must not be replayed"
+        );
+        runner
+            .advance(&mut turn)
+            .expect("retry with compacted history");
+        assert_eq!(turn.text(), Some("done after compaction"));
+        let sent = contents(&provider.call(2).messages);
+        assert!(sent.iter().any(|text| text == "keep instruction"));
+        assert_eq!(
+            sent.iter()
+                .filter(|text| text.as_str() == "[Tool:ping] pong")
+                .count(),
+            1
+        );
+        assert!(!sent.iter().any(|text| text == "old history"));
     }
 
     #[test]
@@ -689,27 +1045,62 @@ mod tests {
             ToolDialect::Openai,
             vec![
                 Some(ProviderResponse {
-                    tool_calls: vec![ToolCall::new("ping", Arguments::new()).with_id("c1")],
+                    tool_calls: vec![
+                        ToolCall::new("ping", Arguments::new()).with_id("c1"),
+                        ToolCall::new("ping", Arguments::new()).with_id("c2"),
+                    ],
                     stop_reason: "tool_calls".to_string(),
                     ..ProviderResponse::default()
                 }),
                 Some(ProviderResponse::text("Got pong.")),
             ],
         );
-        let (agent, dispatcher) = fixture(ping());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let tool = ToolSpec::new(
+            "ping",
+            "ping tool",
+            json!({"type": "object", "properties": {}}),
+            Arc::new(move |_: &Arguments, _: &str| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok("pong".to_string())
+            }),
+        );
+        let (agent, dispatcher) = fixture(vec![tool]);
         let mut runner =
             AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE").with_tools(ping);
 
-        assert_eq!(runner.run(&[], "turn", None).expect("a turn"), "Got pong.");
+        let mut turn = runner.start(&[], "turn", None);
+        runner.advance(&mut turn).expect("provider reply");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "advance executes no tools");
+        for id in ["c1", "c2"] {
+            let call = turn.pending_call().cloned().expect("a pending call");
+            assert_eq!(call.id, id);
+            assert!(
+                runner.advance(&mut turn).is_err(),
+                "an incomplete native batch cannot reach the provider"
+            );
+            assert_eq!(provider.call_count(), 1);
+            turn.accept_tool_result(dispatcher.execute(&call, "Alice"))
+                .expect("accept result");
+            turn = AgentTurn::from_snapshot(&turn.snapshot()).expect("restore between calls");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        runner.advance(&mut turn).expect("followup");
+        assert_eq!(turn.text(), Some("Got pong."));
+        assert_eq!(turn.reason(), Some(TurnReason::Completed));
+        assert_eq!(provider.call_count(), 2);
 
         let followup = provider.call(1).messages;
-        let [.., assistant, result] = followup.as_slice() else {
+        let [.., assistant, first_result, result] = followup.as_slice() else {
             panic!("the exchange is replayed: {followup:?}");
         };
         assert_eq!(assistant["tool_calls"][0]["id"], json!("c1"));
+        assert_eq!(assistant["tool_calls"][1]["id"], json!("c2"));
+        assert_eq!(first_result["tool_call_id"], json!("c1"));
         assert_eq!(
             *result,
-            json!({"role": "tool", "tool_call_id": "c1", "content": "pong"})
+            json!({"role": "tool", "tool_call_id": "c2", "content": "pong"})
         );
         assert!(
             !followup

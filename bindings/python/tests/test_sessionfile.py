@@ -31,7 +31,7 @@ class TestRoundTrip:
     def test_every_kind_of_record_survives(self, tmp_path):
         """``Conversation`` keeps directives, agent turns, and system notes in
         different places — turns only, both, and transcript only — and
-        ``render()`` folds speaker and msg_type into a string. A snapshot that
+        ``render()`` folds speaker into content and drops msg_type. A snapshot that
         round-trips one kind proves nothing about the others, and one that
         persists the rendered form resumes a session that cannot tell an
         agent turn from a directive. ``SessionResult.history`` is rebuilt from

@@ -109,20 +109,23 @@ pub fn optional_map(object: Option<&Bound<'_, PyAny>>) -> PyResult<Map<String, V
     }
 }
 
+/// One rendered chat message as the dictionary a Python provider receives.
+pub(crate) fn chat_message_to_py<'py>(
+    py: Python<'py>,
+    message: &ChatMessage,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("role", &message.role)?;
+    dict.set_item("content", &message.content)?;
+    Ok(dict)
+}
+
 /// A chat as the list of `{"role": ..., "content": ...}` dicts a `Provider`
 /// receives.
-///
-/// This is the shape the Python side of the boundary agrees on, so it is
-/// written once: a conversation rendered for a turn and a summary request are
-/// the same thing to a provider, and two spellings of it would eventually
-/// disagree on a key name.
 pub fn chat_to_py<'py>(py: Python<'py>, chat: &[ChatMessage]) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
     for message in chat {
-        let dict = PyDict::new(py);
-        dict.set_item("role", &message.role)?;
-        dict.set_item("content", &message.content)?;
-        list.append(dict)?;
+        list.append(chat_message_to_py(py, message)?)?;
     }
     Ok(list)
 }

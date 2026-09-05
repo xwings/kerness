@@ -18,23 +18,23 @@ malformed.
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/jsonschema.rs` | both functions |
-| `bindings/python/src/funcs.rs:205,217` | the two pyfunctions |
+| `bindings/python/src/funcs.rs:206,218` | the two pyfunctions |
 | `bindings/python/kerness/jsonschema.py` | re-export shim |
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/jsonschema.rs:21` — `ensure_strict(schema)` — mutates in
+- `crates/kerness/src/jsonschema.rs:18` — `ensure_strict(schema)` — mutates in
   place and returns `Result`; a schema it cannot make strict is an error, not a
   best effort. Recurses through `properties`, `items`, and the composition
   keywords.
-- `crates/kerness/src/jsonschema.rs:184` — `validate_arguments(schema, arguments)` —
+- `crates/kerness/src/jsonschema.rs:183` — `validate_arguments(schema, arguments)` —
   returns `Vec<String>`, empty when valid. It never raises: an invalid call is a
   normal event in a model conversation, and the messages go back to the model.
 
-This is a targeted validator, not a general JSON Schema implementation. It covers
-the keywords a tool parameter schema uses — types, `required`, `enum`, nested
-objects and arrays — because that is the whole domain: schemas the framework
-either generated or received alongside a tool it is about to call.
+Argument validation checks required and unexpected keys, top-level property
+types, and `enum` membership. It recognizes object and array values but does not
+validate their contents recursively. Recursive traversal belongs to strict-schema
+rewriting; argument validation is not a general JSON Schema implementation.
 
 ## Interactions
 
@@ -65,10 +65,10 @@ cargo test -p kerness jsonschema                                       # pass = 
 ## Open Gaps / Roadmap
 
 - `$ref` resolves against the document only — `$defs` and `definitions`
-  (`jsonschema.rs:36`), which is what a `pydantic` model with a nested submodel
+  (`jsonschema.rs:35`), which is what a `pydantic` model with a nested submodel
   emits. There is no remote or cross-document resolution, and none is planned.
 - `validate_arguments` reports every problem it finds but does not attempt
   coercion — a string `"3"` for an integer field is reported, not converted.
-- `oneOf` is not handled; `anyOf` and `allOf` are (`jsonschema.rs:72`, `:83`).
+- `oneOf` is not handled; `anyOf` and `allOf` are (`jsonschema.rs:71`, `:82`).
   Nothing the framework generates emits `oneOf`, so this bites only a caller
   hand-writing a tool schema.

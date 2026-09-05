@@ -309,6 +309,7 @@ impl std::fmt::Debug for AccessPolicy {
 }
 
 /// Evaluates access requests against a policy.
+#[derive(Clone)]
 pub struct AccessManager {
     policy: AccessPolicy,
     /// Resolved once, and never `None`: an unset workspace is the process's
@@ -358,6 +359,11 @@ impl AccessManager {
         &self.policy
     }
 
+    pub(crate) fn with_approval_prompt(mut self, prompt: Option<Arc<dyn ApprovePrompt>>) -> Self {
+        self.policy.approve_prompt = prompt;
+        self
+    }
+
     /// The workspace *actor* is held to — its own if it narrowed the session's,
     /// otherwise the session's. This is also the directory that actor's
     /// commands start in. An empty actor is the session itself.
@@ -400,6 +406,15 @@ impl AccessManager {
     /// auto-approve prefixes would have waved through. This is what confines a
     /// session running `agent-browser open <url>` to the sites it was given.
     pub fn check_command(&self, command: &str, actor: &str) -> Result<()> {
+        match self.command_approval(command, actor)? {
+            Some(request) => self.prompt_or_deny(&request),
+            None => Ok(()),
+        }
+    }
+
+    /// Check hard denials and allowlists without calling an approval callback.
+    /// A returned request must be answered before the command executes.
+    pub fn command_approval(&self, command: &str, actor: &str) -> Result<Option<AccessRequest>> {
         let cmd = command.trim();
         if cmd.is_empty() {
             return Err(Error::AccessDenied("Empty command is not allowed.".into()));
@@ -413,10 +428,10 @@ impl AccessManager {
             || matches_glob(cmd, &self.allowed_commands)
             || matches_regex(cmd, &self.allowed_command_regex)
         {
-            return Ok(());
+            return Ok(None);
         }
 
-        self.prompt_or_deny(&AccessRequest::new("command", "run", cmd, actor))
+        Ok(Some(AccessRequest::new("command", "run", cmd, actor)))
     }
 
     /// Validate a network destination against [`AccessPolicy::allowed_hosts`].

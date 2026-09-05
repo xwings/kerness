@@ -158,6 +158,161 @@ fn a_fenced_call_is_dispatched_and_its_result_fed_back() {
         calls[1].tools.is_empty(),
         "text-dialect specs travel in the prompt, not the request"
     );
+
+    let temp = TempDir::new("complete-spec");
+    let provider = ToolProvider::new(ToolDialect::Text, fenced("identity", json!({}))).shared();
+    let mut run = session(&temp, provider.clone(), routing());
+    run.add_tool_spec(
+        kerness::ToolSpec::new(
+            "identity",
+            "Trusted actor",
+            json!({"type":"object"}),
+            Arc::new(|_: &Arguments, actor: &str| Ok(actor.to_string())),
+        )
+        .with_actor(),
+    )
+    .unwrap();
+    run.run().unwrap();
+    assert!(seen(&provider.calls()[1]).contains("[Tool:identity] P0"));
+}
+
+#[test]
+fn contextual_tools_keep_actor_scope_and_expire_after_the_invocation() {
+    use kerness::{ContextToolSpec, ToolContext};
+    use std::sync::Mutex;
+    for capped in [false, true] {
+        let temp = TempDir::new("tool-context");
+        let data = temp.write("worker/data.txt", "scoped data");
+        let sibling = temp.write("private.txt", "not in this actor's workspace");
+        let provider = ToolProvider::new(
+            ToolDialect::Openai,
+            vec![
+                tool_call_reply("context", json!({"actor":"Mod"}), "model-call"),
+                ProviderResponse::text("Done"),
+            ],
+        )
+        .shared();
+        let path = temp.write("tooled.md", TOOLED);
+        let mut settings = config(&path.to_string_lossy(), "Scoped access", routing());
+        common::confine(&mut settings, &temp);
+        settings.access_policy.as_mut().unwrap().allowed_commands = vec!["echo scoped".into()];
+        settings.memory_write = true;
+        let mut session = Session::new(settings).unwrap();
+        session
+            .add_agent(Agent {
+                provider: Some(provider.clone()),
+                workspace: Some(temp.str_join("worker")),
+                memory: Some(temp.str_join("worker/memory.md")),
+                ..Agent::new("P0").with_model("m")
+            })
+            .unwrap();
+        session
+            .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None::<ToolContext>));
+        let capture = Arc::clone(&captured);
+        let nested = ToolProvider::new(
+            ToolDialect::Text,
+            vec![ProviderResponse::text("Nested result")],
+        )
+        .shared();
+        let calling_nested = nested.clone();
+        session
+            .add_contextual_tool(ContextToolSpec::new(
+                "context",
+                "Use scoped resources",
+                json!({"type":"object","properties":{"actor":{"type":"string"}}}),
+                Arc::new(move |args: &Arguments, context: &ToolContext| {
+                    assert_eq!(args["actor"], json!("Mod"));
+                    assert_eq!(context.identity().actor(), "P0");
+                    assert_ne!(context.identity().call_id(), "model-call");
+                    assert!(!context.identity().run_id().is_empty());
+                    assert!(context.identity().turn_id() > 0);
+                    assert_eq!(context.read_file(&data.to_string_lossy())?, "scoped data");
+                    assert!(context.read_file(&sibling.to_string_lossy()).is_err());
+                    assert_eq!(
+                        context.run_command("echo scoped", None, None)?.trim(),
+                        "scoped"
+                    );
+                    assert!(context.write_memory("own note")?);
+                    assert!(context.read_memory()?.contains("own note"));
+                    *capture.lock().unwrap() = Some(context.clone());
+                    calling_nested.chat_with_retries(
+                        "nested-model",
+                        &[],
+                        "nested tool",
+                        None,
+                        kerness::ReasoningEffort::default(),
+                    )?;
+                    Ok("context worked".into())
+                }),
+            ))
+            .unwrap();
+        let mut run = session
+            .start(kerness::RunOptions {
+                result_validation: kerness::ResultValidation::LegacyCoercion,
+                budget: kerness::usage::RunBudget {
+                    max_provider_operations: capped.then_some(2),
+                    ..kerness::usage::RunBudget::default()
+                },
+                ..kerness::RunOptions::default()
+            })
+            .unwrap();
+        let mut finished = None;
+        for _ in 0..40 {
+            match run.step(kerness::RunInput::Continue).unwrap() {
+                kerness::StepOutcome::Progress => {}
+                kerness::StepOutcome::Finished { outcome } => {
+                    finished = Some(outcome);
+                    break;
+                }
+                other => panic!("unexpected wait: {other:?}"),
+            }
+        }
+        let outcome = finished.expect("scripted run completes");
+        if capped {
+            assert_eq!(
+                outcome.reason,
+                kerness::RunReason::BudgetExceeded {
+                    budget: kerness::usage::BudgetExceeded::ProviderOperations
+                }
+            );
+            assert_eq!(
+                nested.call_count(),
+                0,
+                "tool-internal calls respect the run budget"
+            );
+            assert_eq!(outcome.usage.totals.provider_operations, 2);
+        } else {
+            assert_eq!(outcome.reason, kerness::RunReason::Completed);
+            assert!(seen(&provider.calls()[1]).contains("context worked"));
+            assert_eq!(nested.call_count(), 1);
+            let nested_usage: Vec<_> = outcome
+                .usage
+                .records
+                .iter()
+                .filter(|record| record.model == "nested-model")
+                .collect();
+            assert_eq!(
+                nested_usage.len(),
+                1,
+                "provider calls made inside handlers are accounted"
+            );
+            assert_eq!(nested_usage[0].actor, "P0");
+            assert_eq!(nested_usage[0].purpose, "nested tool");
+        }
+        let handle = captured.lock().unwrap().take().expect("handler ran");
+        assert!(handle
+            .read_memory()
+            .unwrap_err()
+            .to_string()
+            .contains("expired"));
+        assert_eq!(
+            handle.identity().actor(),
+            "P0",
+            "identity remains inspectable"
+        );
+    }
 }
 
 /// OpenAI's shape: the assistant turn is replayed with its `tool_calls`, and the

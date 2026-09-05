@@ -27,8 +27,8 @@ declared in Python instead.
 ## Key Types and Entry Points
 
 - `crates/kerness/src/error.rs:17` — `Error` — one variant per exception class.
-- `crates/kerness/src/error.rs:56` — `is_provider()` — the test the retry loop
-  branches on; a provider error is retryable, others are not.
+- `crates/kerness/src/error.rs:56` — `is_provider()` — classifies failures after
+  retry exhaustion for capability fallback and final error handling.
 - `crates/kerness/src/error.rs:80` — `is_context_overflow()` — the narrower test
   the session branches on: the one provider failure it can act on rather than
   write the turn off for.
@@ -44,8 +44,8 @@ declared in Python instead.
   `Result<T>`, used at every pyclass method return.
 - `bindings/python/src/errors.rs:157` — `Catch<T>` — `.catch()` on a
   `PyResult<T>`, used wherever the framework calls into Python.
-- `bindings/python/kerness/exceptions.py:19` — `ProviderHTTPError(status_code, url, body)` —
-  the two-argument constructor the map has to preserve.
+- `bindings/python/kerness/exceptions.py:21` — `ProviderHTTPError(status_code, url, body)` —
+  the three-argument constructor the map has to preserve.
 
 ### Recognising an overflow by phrase
 
@@ -61,16 +61,17 @@ failure, which is what a session does with it today. The session's use of it is
 
 `from_py` folds every unrecognised Python exception into `Error::Session`,
 because `Error` has no variant that can carry a Python class. For a Python
-callable the framework invokes — a channel, a tool handler, a provider — that
-would change what `except` clause catches it. The parked-exception pattern exists
-to close that gap; see [channel.md](channel.md).
+callable the framework invokes, that changes what `except` clause catches it.
+Channels preserve their original exceptions with the parked-exception pattern;
+see [channel.md](channel.md). Tools and event sinks use the framework conversion
+and are reported through tool results or the owned run’s typed terminal outcome.
 
 ## Interactions
 
 - Returned by every module in the crate.
 - Its classes are handed to the extension by [bindings.md](bindings.md)'s
   `bootstrap`.
-- `is_provider()` gates the retry in [provider.md](provider.md).
+- `is_provider()` gates capability fallback after retries in [provider.md](provider.md).
 
 ## How to Test
 
@@ -86,14 +87,14 @@ cargo test -p kerness error                                  # pass = 0 failed
   the phrases each backend actually sends, and the near misses that must not
   match: a 400 about an API key, a 400 about tools, a 500 that happens to
   contain the phrase, and a non-HTTP provider error. `:175`
-  `an_overflow_is_still_a_provider_error` keeps the retry and dialect-fallback
-  paths seeing it as one.
+  `an_overflow_is_still_a_provider_error` keeps the dialect-fallback and
+  compatibility paths seeing it as one.
 
 ## Open Gaps / Roadmap
 
 - The `Error` enum carries strings, not structured context, for everything but
   the HTTP variant. A caller wanting the offending path out of a filesystem error
   has to parse the message.
-- `from_py`'s fallback to `Error::Session` is correct as a floor but coarse; each
-  new place the framework calls Python needs its own parked-exception handling to
-  avoid it.
+- `from_py`'s fallback to `Error::Session` is coarse. Callbacks whose contract
+  preserves an original Python exception need explicit parking; typed Rust
+  outcomes retain the converted framework error.

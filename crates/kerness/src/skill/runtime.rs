@@ -104,6 +104,17 @@ impl SkillActivation {
         self.skills.keys().cloned().collect()
     }
 
+    /// Skills already loaded in this turn, for a suspended-run checkpoint.
+    pub fn loaded(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("activation lock poisoned")
+            .loaded
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     /// Tool names permitted by the skills active this turn.
     ///
     /// `None` means no active skill narrows anything, which is not the same as

@@ -490,7 +490,7 @@ impl PyProviderCore {
 
 /// A Python provider, seen as a framework [`Provider`].
 ///
-/// Every method routes back to the Python object, including the four the trait
+/// Every method routes back to the Python object, including those the trait
 /// supplies: a subclass that overrode `chat_with_retries` — which the test
 /// doubles in this project's suite do — has to be the one that runs. The
 /// supplied bodies are still reachable, because the base class's version of

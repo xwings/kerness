@@ -15,6 +15,10 @@ use std::sync::Arc;
 use kerness::orchestrator::FORCED_END_NOTE;
 use kerness::provider::ReasoningEffort;
 use kerness::{Agent, Provider, Session, SessionConfig};
+use kerness::{
+    RunInput, RunMode, RunOptions, RunOutcome, RunReason, SessionRun, StepOutcome, WaitReason,
+};
+use serde_json::json;
 
 use common::{config, refusal, RecordingChannel, ScriptedProvider};
 
@@ -87,6 +91,26 @@ fn a_terminator_ends_the_run_and_says_so() {
     // `turns_completed` is what the harness's `max_turns` is measured against.
     assert_eq!(result.turns_completed, 3);
     assert!(channel.noted("Session ended: CONSENSUS_REACHED"));
+
+    let stepped_provider = ScriptedProvider::new()
+        .on(
+            "orchestrator turn",
+            &["@Alice, open the case.", "CONSENSUS_REACHED"],
+        )
+        .on("final summary", &[VERDICT])
+        .fallback(&["Write-through, for the invalidation story."])
+        .shared();
+    let mut run = debate(stepped_provider.clone(), RecordingChannel::new())
+        .start(RunOptions::default())
+        .unwrap();
+    let stepped = finish_steps(&mut run);
+    assert_eq!(stepped.reason, RunReason::Completed);
+    assert_eq!(stepped.result, result);
+    assert_eq!(stepped_provider.purposes(), provider.purposes());
+    assert_eq!(
+        stepped.usage.totals.provider_operations as usize,
+        stepped_provider.call_count()
+    );
 }
 
 /// `terminate_on` order decides which keyword means agreement, so the *other*
@@ -143,6 +167,647 @@ fn an_unreported_result_field_defaults_rather_than_going_missing() {
 
     assert_eq!(result.fields["consensus"], serde_json::json!(false));
     assert_eq!(result.fields["summary"], serde_json::json!(""));
+
+    for (text, expected) in [
+        (
+            "Nobody wrote any JSON.",
+            kerness::ResultIssue::MissingResult,
+        ),
+        (
+            "```json\n{bad}\n```",
+            kerness::ResultIssue::MalformedResult {
+                message: String::new(),
+            },
+        ),
+        (
+            "```json\n{\"consensus\":false}\n```",
+            kerness::ResultIssue::MissingField {
+                field: "summary".into(),
+            },
+        ),
+        (
+            "```json\n{\"consensus\":\"false\",\"summary\":\"\"}\n```",
+            kerness::ResultIssue::WrongType {
+                field: "consensus".into(),
+                expected: "bool".into(),
+            },
+        ),
+    ] {
+        let provider = ScriptedProvider::new()
+            .on("orchestrator turn", &["END_SESSION"])
+            .on("final summary", &[text])
+            .shared();
+        let outcome = finish_steps(
+            &mut debate(provider, RecordingChannel::new())
+                .start(RunOptions::default())
+                .unwrap(),
+        );
+        assert_eq!(outcome.reason, RunReason::InvalidResult);
+        assert!(!outcome.diagnostics.valid);
+        assert_eq!(
+            std::mem::discriminant(&outcome.diagnostics.issues[0]),
+            std::mem::discriminant(&expected)
+        );
+        assert!(!outcome.result.fields.contains_key("summary") || text.contains("summary"));
+    }
+}
+
+fn finish_steps(run: &mut SessionRun) -> RunOutcome {
+    for _ in 0..1000 {
+        let before = run.usage().totals.provider_operations;
+        let step = run.step(RunInput::Continue).unwrap();
+        assert!(
+            run.usage().totals.provider_operations - before <= 1,
+            "scripted provider operations must be separate steps"
+        );
+        match step {
+            StepOutcome::Finished { outcome } => return outcome,
+            StepOutcome::Progress => {}
+            StepOutcome::Waiting { reason } => panic!("unexpected wait: {reason:?}"),
+        }
+    }
+    panic!("run did not finish");
+}
+
+fn host_session(temp: &common::TempDir, provider: Arc<dyn Provider>) -> Session {
+    let path = temp.write("host.md", "---\nname: host\nagents:\n  orchestrator: false\n  participants: {min: 1}\nloop:\n  max_rounds: 3\n  max_turns: 4\nresult:\n  accepted: bool\n  count: int\n---\nAnswer the question.\n");
+    let mut settings = config(&path.to_string_lossy(), "A host-controlled run", provider);
+    settings.channel = Some(RecordingChannel::new());
+    let mut session = Session::new(settings).unwrap();
+    session
+        .add_agent(Agent::new("Worker").with_model("model"))
+        .unwrap();
+    session
+}
+
+fn until_input(run: &mut SessionRun) {
+    for _ in 0..100 {
+        match run.step(RunInput::Continue).unwrap() {
+            StepOutcome::Waiting {
+                reason: WaitReason::Input,
+            } => return,
+            StepOutcome::Progress => {}
+            other => panic!("unexpected step {other:?}"),
+        }
+    }
+    panic!("did not reach input boundary");
+}
+
+#[test]
+fn a_host_selects_an_agent_and_finishes_without_a_judge_call() {
+    let temp = common::TempDir::new("host-runtime");
+    let provider = ScriptedProvider::new()
+        .fallback(&["A measured answer."])
+        .shared();
+    let mut run = host_session(&temp, provider.clone())
+        .start(RunOptions {
+            mode: RunMode::HostDriven,
+            ..Default::default()
+        })
+        .unwrap();
+    until_input(&mut run);
+    run.step(RunInput::UserMessage {
+        text: "Additional host context".into(),
+    })
+    .unwrap();
+    run.step(RunInput::SelectAgent {
+        agent: "Worker".into(),
+        instruction: "Respond once".into(),
+    })
+    .unwrap();
+    assert!(run
+        .step(RunInput::Finish {
+            result: json!({"accepted":false,"count":0})
+        })
+        .is_err());
+    assert!(run
+        .step(RunInput::UserMessage {
+            text: "mid-turn".into()
+        })
+        .is_err());
+    until_input(&mut run);
+    assert_eq!(provider.call_count(), 1);
+    assert!(provider.calls()[0]
+        .text()
+        .contains("Additional host context"));
+    let StepOutcome::Finished { outcome } = run
+        .step(RunInput::Finish {
+            result: json!({"accepted":false,"count":0}),
+        })
+        .unwrap()
+    else {
+        panic!("finished");
+    };
+    assert_eq!(outcome.reason, RunReason::Completed);
+    assert!(outcome.diagnostics.valid);
+    assert_eq!(outcome.result.fields["accepted"], json!(false));
+    assert_eq!(outcome.result.fields["count"], json!(0));
+    assert_eq!(outcome.result.turns_completed, 1);
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "finish performs no provider operation"
+    );
+    let events = run.drain_events();
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[1].sequence == pair[0].sequence + 1));
+    assert!(events.iter().all(|event| event.run_id == events[0].run_id));
+    assert!(matches!(
+        events.last().unwrap().event,
+        kerness::RunEventKind::Terminal { .. }
+    ));
+    assert_eq!(
+        run.step(RunInput::Continue).unwrap(),
+        StepOutcome::Finished { outcome }
+    );
+    assert!(
+        run.drain_events().is_empty(),
+        "terminal event is emitted once"
+    );
+
+    // The built-in declaration requires an orchestrator even in host mode.
+    // A separately constructed roster omits it to exercise that declaration.
+    let mut leaderless = Session::new(config("debate", "required", provider.clone())).unwrap();
+    leaderless
+        .add_agent(Agent::new("Alice").with_model("model"))
+        .unwrap();
+    leaderless
+        .add_agent(Agent::new("Bob").with_model("model"))
+        .unwrap();
+    assert!(leaderless
+        .start(RunOptions {
+            mode: RunMode::HostDriven,
+            ..Default::default()
+        })
+        .is_err());
+}
+
+#[test]
+fn terminal_failures_cancellation_and_budgets_preserve_committed_work() {
+    use kerness::provider::{ProviderBase, ProviderResponse};
+    use kerness::usage::{BudgetExceeded, RunBudget};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Failing {
+        base: ProviderBase,
+        calls: AtomicUsize,
+    }
+    impl Provider for Failing {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn base(&self) -> &ProviderBase {
+            &self.base
+        }
+        fn chat(
+            &self,
+            _: &str,
+            _: &[serde_json::Value],
+            _: Option<&[kerness::ToolSpec]>,
+            _: ReasoningEffort,
+        ) -> kerness::Result<ProviderResponse> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(ProviderResponse::text("Committed answer"))
+            } else {
+                Err(kerness::Error::ProviderNetwork {
+                    url: "https://example.test".into(),
+                    cause: "original failure".into(),
+                })
+            }
+        }
+        fn chat_with_retries(
+            &self,
+            model: &str,
+            messages: &[serde_json::Value],
+            _: &str,
+            tools: Option<&[kerness::ToolSpec]>,
+            effort: ReasoningEffort,
+        ) -> kerness::Result<ProviderResponse> {
+            self.chat(model, messages, tools, effort)
+        }
+    }
+    for cause in ["failure", "cancel", "budget"] {
+        let temp = common::TempDir::new("terminal-runtime");
+        let provider = Arc::new(Failing {
+            base: ProviderBase::new(0, 0.0, None),
+            calls: AtomicUsize::new(0),
+        });
+        let budget = RunBudget {
+            max_provider_operations: (cause == "budget").then_some(1),
+            ..Default::default()
+        };
+        let mut run = host_session(&temp, provider.clone())
+            .start(RunOptions {
+                mode: RunMode::HostDriven,
+                budget,
+                ..Default::default()
+            })
+            .unwrap();
+        run.step(RunInput::SelectAgent {
+            agent: "Worker".into(),
+            instruction: String::new(),
+        })
+        .unwrap();
+        until_input(&mut run);
+        if cause == "cancel" {
+            run.control().cancel();
+        } else {
+            run.step(RunInput::SelectAgent {
+                agent: "Worker".into(),
+                instruction: String::new(),
+            })
+            .unwrap();
+        }
+        let outcome = finish_steps(&mut run);
+        assert_eq!(outcome.result.turns_completed, 1);
+        assert!(outcome
+            .result
+            .history
+            .iter()
+            .any(|message| message.content == "Committed answer"));
+        match cause {
+            "failure" => {
+                assert_eq!(outcome.reason, RunReason::Failed);
+                assert_eq!(
+                    outcome.error,
+                    Some(kerness::Error::ProviderNetwork {
+                        url: "https://example.test".into(),
+                        cause: "original failure".into()
+                    })
+                );
+            }
+            "cancel" => assert_eq!(outcome.reason, RunReason::Cancelled),
+            _ => assert_eq!(
+                outcome.reason,
+                RunReason::BudgetExceeded {
+                    budget: BudgetExceeded::ProviderOperations
+                }
+            ),
+        }
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            if cause == "failure" { 2 } else { 1 }
+        );
+    }
+
+    struct Metered {
+        base: ProviderBase,
+        calls: AtomicUsize,
+    }
+    impl Provider for Metered {
+        fn name(&self) -> &str {
+            "metered"
+        }
+        fn base(&self) -> &ProviderBase {
+            &self.base
+        }
+        fn chat(
+            &self,
+            _: &str,
+            _: &[serde_json::Value],
+            _: Option<&[kerness::ToolSpec]>,
+            _: ReasoningEffort,
+        ) -> kerness::Result<ProviderResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ProviderResponse {
+                content: "Paid answer survives".into(),
+                usage: json!({"prompt_tokens":5,"completion_tokens":5,"total_tokens":10})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ..ProviderResponse::default()
+            })
+        }
+    }
+    for cause in [
+        "tokens",
+        "input_tokens",
+        "cost",
+        "cancel_after_response",
+        "event_failure",
+    ] {
+        let temp = common::TempDir::new("paid-response");
+        let provider = Arc::new(Metered {
+            base: ProviderBase::new(0, 0.0, None),
+            calls: AtomicUsize::new(0),
+        });
+        let budget = RunBudget {
+            mode: kerness::usage::BudgetMode::MeasuredThreshold,
+            max_tokens: matches!(cause, "tokens" | "input_tokens").then_some(10),
+            max_cost_microusd: (cause == "cost").then_some(10),
+            ..Default::default()
+        };
+        let pricing = vec![kerness::usage::TokenPricing {
+            provider: "metered".into(),
+            model: "model".into(),
+            input_microusd_per_million_tokens: 1_000_000,
+            output_microusd_per_million_tokens: 1_000_000,
+            cached_input_microusd_per_million_tokens: None,
+            cache_creation_microusd_per_million_tokens: None,
+        }];
+        let mut options = RunOptions {
+            mode: RunMode::HostDriven,
+            budget,
+            pricing,
+            ..Default::default()
+        };
+        if cause == "event_failure" {
+            options.event_sink = Some(Arc::new(|event: &kerness::RunEvent| {
+                if matches!(event.event, kerness::RunEventKind::ProviderFinished { .. }) {
+                    Err(kerness::Error::Value("sink failed".into()))
+                } else {
+                    Ok(())
+                }
+            }));
+        }
+        let mut run = host_session(&temp, provider.clone())
+            .start(options)
+            .unwrap();
+        run.step(RunInput::SelectAgent {
+            agent: "Worker".into(),
+            instruction: String::new(),
+        })
+        .unwrap();
+        while provider.calls.load(Ordering::SeqCst) == 0 {
+            run.step(RunInput::Continue).unwrap();
+        }
+        if cause == "cancel_after_response" {
+            run.control().cancel();
+        }
+        if cause == "input_tokens" {
+            // Commit the paid answer, then steer directly before the next
+            // waiting step has had a chance to classify the exhausted budget.
+            assert!(matches!(
+                run.step(RunInput::Continue).unwrap(),
+                StepOutcome::Progress
+            ));
+            assert!(matches!(
+                run.step(RunInput::SelectAgent {
+                    agent: "Worker".into(),
+                    instruction: String::new(),
+                })
+                .unwrap(),
+                StepOutcome::Finished { .. }
+            ));
+        }
+        let outcome = finish_steps(&mut run);
+        assert_eq!(outcome.result.turns_completed, 1, "{cause}");
+        assert!(
+            outcome
+                .result
+                .history
+                .iter()
+                .any(|message| message.content == "Paid answer survives"),
+            "{cause}"
+        );
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "no next provider action"
+        );
+        assert_eq!(outcome.usage.totals.usage.total_tokens, Some(10));
+        let reason = match cause {
+            "tokens" | "input_tokens" => RunReason::BudgetExceeded {
+                budget: BudgetExceeded::Tokens,
+            },
+            "cost" => RunReason::BudgetExceeded {
+                budget: BudgetExceeded::Cost,
+            },
+            "cancel_after_response" => RunReason::Cancelled,
+            _ => RunReason::Failed,
+        };
+        assert_eq!(outcome.reason, reason);
+    }
+
+    struct FailedAppend;
+    impl kerness::memory::MemoryStore for FailedAppend {
+        fn read(&self, _: &str) -> kerness::Result<String> {
+            Ok(String::new())
+        }
+        fn append(&self, _: &str, _: &str) -> kerness::Result<()> {
+            Err(kerness::Error::Io("original memory failure".into()))
+        }
+    }
+    let temp = common::TempDir::new("paid-memory-failure");
+    let path = temp.write(
+        "host.md",
+        "---\nname: host\nagents:\n  orchestrator: false\n  participants: {min: 1}\n---\nAnswer.\n",
+    );
+    let provider = ScriptedProvider::new()
+        .fallback(&["Paid answer.\n@MEMORY: Remember this."])
+        .shared();
+    let mut settings = config(&path.to_string_lossy(), "memory failure", provider.clone());
+    common::confine(&mut settings, &temp);
+    settings.memory_store = Some(Arc::new(FailedAppend));
+    settings.memory_write = true;
+    settings.session_file = Some(temp.str_join("run.json"));
+    let mut session = Session::new(settings).unwrap();
+    session
+        .add_agent(Agent::new("Worker").with_model("model"))
+        .unwrap();
+    let mut run = session
+        .start(RunOptions {
+            mode: RunMode::HostDriven,
+            ..Default::default()
+        })
+        .unwrap();
+    run.step(RunInput::SelectAgent {
+        agent: "Worker".into(),
+        instruction: String::new(),
+    })
+    .unwrap();
+    let outcome = finish_steps(&mut run);
+    assert_eq!(outcome.reason, RunReason::Failed);
+    assert_eq!(
+        outcome.error,
+        Some(kerness::Error::Io("original memory failure".into()))
+    );
+    assert_eq!(outcome.result.turns_completed, 1);
+    assert!(outcome
+        .result
+        .history
+        .iter()
+        .any(|message| message.content == "Paid answer."));
+    assert_eq!(provider.call_count(), 1);
+    let saved = kerness::sessionfile::load_snapshot(&temp.join("run.json"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.transcript, outcome.result.history);
+    assert_eq!(
+        saved.loop_state["runtime"]["terminal"]["reason"]["kind"],
+        "failed"
+    );
+}
+
+#[test]
+fn memory_maintenance_is_stepped_metered_and_skipped_during_cleanup() {
+    use kerness::memory::{MemoryStore, SummarizingMemory};
+    for mode in ["complete", "budget", "cancel", "drop"] {
+        let temp = common::TempDir::new("memory-maintenance");
+        let provider = ScriptedProvider::new()
+            .fallback(&["Consolidated notes"])
+            .shared();
+        let store = Arc::new(
+            SummarizingMemory::new(temp.join("memory"), provider.clone(), "model").with_keep(1),
+        );
+        for scope in ["session", "worker"] {
+            for note in ["one", "two", "three"] {
+                store.append(scope, note).unwrap();
+            }
+        }
+        let path = temp.write("host.md", "---\nname: host\nagents:\n  orchestrator: false\n  participants: {min: 1}\n---\nAnswer.\n");
+        let mut settings = config(&path.to_string_lossy(), "maintenance", provider.clone());
+        common::confine(&mut settings, &temp);
+        settings.memory = "session".into();
+        settings.memory_store = Some(store.clone());
+        let mut session = Session::new(settings).unwrap();
+        session
+            .add_agent(Agent {
+                memory: Some("worker".into()),
+                ..Agent::new("Worker").with_model("model")
+            })
+            .unwrap();
+        let mut run = session
+            .start(RunOptions {
+                mode: RunMode::HostDriven,
+                budget: kerness::usage::RunBudget {
+                    max_provider_operations: (mode == "budget").then_some(1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        if mode == "drop" {
+            drop(run);
+            assert_eq!(provider.call_count(), 0);
+            continue;
+        }
+        if mode == "cancel" {
+            run.control().cancel();
+        }
+        let first = run.step(RunInput::Finish { result: json!({}) }).unwrap();
+        let outcome = match first {
+            StepOutcome::Finished { outcome } => outcome,
+            _ => finish_steps(&mut run),
+        };
+        let expected_calls = match mode {
+            "complete" => 2,
+            "budget" => 1,
+            _ => 0,
+        };
+        assert_eq!(provider.call_count(), expected_calls, "{mode}");
+        assert_eq!(
+            outcome.usage.totals.provider_operations,
+            expected_calls as u64
+        );
+        assert!(provider
+            .purposes()
+            .iter()
+            .all(|purpose| purpose == "memory consolidation"));
+        assert_eq!(
+            outcome.reason,
+            match mode {
+                "complete" => RunReason::Completed,
+                "budget" => RunReason::BudgetExceeded {
+                    budget: kerness::usage::BudgetExceeded::ProviderOperations
+                },
+                _ => RunReason::Cancelled,
+            }
+        );
+        drop(run);
+        assert_eq!(
+            provider.call_count(),
+            expected_calls,
+            "drop performs no consolidation"
+        );
+    }
+
+    // Consolidation keeps notes on a provider failure. That policy must not
+    // hide a retry denied by the run budget, including after restoring the
+    // checkpoint written by the maintenance step itself.
+    use kerness::provider::{ProviderBase, ProviderResponse};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Retrying {
+        base: ProviderBase,
+        calls: AtomicUsize,
+    }
+    impl Provider for Retrying {
+        fn name(&self) -> &str {
+            "retrying"
+        }
+        fn base(&self) -> &ProviderBase {
+            &self.base
+        }
+        fn chat(
+            &self,
+            _: &str,
+            _: &[serde_json::Value],
+            _: Option<&[kerness::ToolSpec]>,
+            _: ReasoningEffort,
+        ) -> kerness::Result<ProviderResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ProviderResponse::text(""))
+        }
+    }
+    let temp = common::TempDir::new("maintenance-retry-budget");
+    let provider = Arc::new(Retrying {
+        base: ProviderBase::new(2, 0.0, None),
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(
+        SummarizingMemory::new(temp.join("memory"), provider.clone(), "model").with_keep(1),
+    );
+    store.append("session", "one").unwrap();
+    store.append("session", "two").unwrap();
+    let path = temp.write("host.md", "---\nname: host\nagents:\n  orchestrator: false\n  participants: {min: 1}\nresult:\n  accepted: bool\n---\nAnswer.\n");
+    let mut settings = config(&path.to_string_lossy(), "retry budget", provider.clone());
+    common::confine(&mut settings, &temp);
+    settings.memory = "session".into();
+    settings.memory_store = Some(store);
+    settings.session_file = Some(temp.str_join("run.json"));
+    let build = || {
+        let mut session = Session::new(settings.clone()).unwrap();
+        session
+            .add_agent(Agent::new("Worker").with_model("model"))
+            .unwrap();
+        session
+            .start(RunOptions {
+                mode: RunMode::HostDriven,
+                budget: kerness::usage::RunBudget {
+                    max_provider_operations: Some(1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let mut run = build();
+    run.step(RunInput::Finish {
+        result: json!({"accepted": false}),
+    })
+    .unwrap();
+    while provider.calls.load(Ordering::SeqCst) == 0 {
+        run.step(RunInput::Continue).unwrap();
+    }
+    let saved = kerness::sessionfile::load_snapshot(&temp.join("run.json"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.loop_state["runtime"]["terminal"]["reason"]["kind"],
+        "budget_exceeded"
+    );
+    drop(run);
+    let outcome = finish_steps(&mut build());
+    assert_eq!(
+        outcome.reason,
+        RunReason::BudgetExceeded {
+            budget: kerness::usage::BudgetExceeded::ProviderOperations
+        }
+    );
+    assert_eq!(outcome.result.fields["accepted"], false);
+    assert!(outcome.diagnostics.valid);
+    assert_eq!(outcome.usage.totals.provider_operations, 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
 /// The declared phase list runs out on its own: four phases, clamped to

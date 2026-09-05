@@ -2,113 +2,124 @@
 
 ## Goal
 
-When a gameplan declares an orchestrator, the orchestrator runs the session: it
-decides who speaks next, tracks which phase the harness is in, watches for the
-termination keyword, and at the end produces the named result fields the contract
-demands. This module is that loop, and it is separable — a harness that wants a
-different control flow implements `LoopHost` and keeps everything else.
+Own the harness's routing, phase progress, retry allowance, and closing verdict
+as a resumable action machine. A session executes the requested action; the loop
+itself performs no provider calls, filesystem operations, or channel writes.
+This supplies M2's scheduling and host-driven phase progression.
 
 ## Status
 
-`done`
+`done` — action scheduling, host-driven phase reuse, and continuation restore
+are implemented; Rust and rebuilt Python loop/resume tests pass.
 
 ## Code Structure
 
 | File | Role |
 | ---- | ---- |
-| `crates/kerness/src/orchestrator.rs` | `LoopHost`, `LoopState`, `PhaseTracker`, `OrchestratorLoop`, result parsing |
-| `bindings/python/src/runtime.rs:524,650` | `PyLoopState`, `PyOrchestratorLoop` |
+| `crates/kerness/src/orchestrator.rs` | actions, loop state, phase tracker, compatibility driver, result parsing |
+| `bindings/python/src/runtime.rs` | standalone loop and state adapters |
 | `bindings/python/kerness/loop.py` | re-export shim |
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/orchestrator.rs:49` — `LoopHost` — what the loop needs from
-  whatever is running it: run an agent turn, deliver a message, read the roster.
-  `Session` implements it at `session.rs:1766`.
-- `crates/kerness/src/orchestrator.rs:396` — `OrchestratorLoop` — the loop itself,
-  built with `new` (`:415`) and the `with_*` options at `:435`–`:453`.
-- `crates/kerness/src/orchestrator.rs:462` — `run(host)` — one call, returns the
-  final `LoopState`.
-- `crates/kerness/src/orchestrator.rs:120` — `LoopState` — round, phase, turns
-  taken, end reason, and the accumulated result fields.
-- `crates/kerness/src/orchestrator.rs:90` — `EndReason` — why the loop stopped:
-  consensus, exhausted rounds, forced end, or an explicit terminator.
-- `crates/kerness/src/orchestrator.rs:173` — `PhaseTracker` — advances through the
-  declared phases and decides when each is satisfied.
-- `crates/kerness/src/orchestrator.rs:253` — `PhaseTracker::briefing()` — the
-  active phase, the round, and who has yet to speak in it.
-- `crates/kerness/src/orchestrator.rs:488` — `snapshot()` — the resumable state,
-  handed to [sessionfile.md](sessionfile.md).
-- `crates/kerness/src/orchestrator.rs:762` — `closing_prompt(fields)` — asks the
-  orchestrator for the result block; `:792` `verdict_rethink_prompt` asks it to
-  reconsider a draft.
-- `crates/kerness/src/orchestrator.rs:819` — `parse_result_fields(text, fields)` —
-  pulls the declared fields out of the reply; `:838` `strip_result_block` removes
-  that block from what goes into the transcript.
-- `crates/kerness/src/orchestrator.rs:29` — `FORCED_END_NOTE` — what the transcript
-  records when the orchestrator's output stayed unparseable through its retries.
+- `crates/kerness/src/orchestrator.rs:49` — `LoopHost` — the blocking adapter's
+  provider-turn and delivery callbacks.
+- `crates/kerness/src/orchestrator.rs:91` — `EndReason`; `:121` `LoopState` — limits, consensus,
+  phase progress, and the accumulated result.
+- `crates/kerness/src/orchestrator.rs:379` — `LoopTurnKind`; `:388` `LoopAction` — a requested
+  turn, delivery, directive, note, summary, or completed state.
+- `crates/kerness/src/orchestrator.rs:436` — `OrchestratorLoop` — owns phase state and its queued
+  callbacks; no callback closures or providers appear in its snapshot.
+- `crates/kerness/src/orchestrator.rs:567` — `next_action` — exposes a stable next action without
+  consuming it; `:613` `submit_reply` consumes a requested agent turn.
+- `crates/kerness/src/orchestrator.rs:649` — `acknowledge` — consumes a queued callback before the
+  caller applies its effect and persists the resulting transcript.
+- `crates/kerness/src/orchestrator.rs:711` — `snapshot` — version-1 counters plus scheduler stage,
+  pending callbacks, full outcome, and any closing draft.
+- `crates/kerness/src/orchestrator.rs:510` — `run` — drives those same actions through `LoopHost`.
+- `crates/kerness/src/orchestrator.rs:679` — `commit_host_turn` — validates and accounts for a
+  participant the host chose; `:700` `host_limit_reached` checks its bounds.
+- `crates/kerness/src/orchestrator.rs:664` — `raw_closing_result` — preserves the final uncoerced
+  reply for the session's strict result validation.
 
-`LoopHost` and `PhaseTracker` are not exported from the Python package: the first
-is a trait a Rust caller implements, and the second is internal to the loop. The
-loop, its state, and the end reasons are exported.
+### Scheduling and checkpoints
 
-### Where the orchestrator learns who still owes a turn
+An orchestrator response updates turn count, termination, and explicit phase
+advances before queuing its delivery. A participant response updates the pending
+set, round count, and phase before queuing its delivery too. The next participant
+request is already selected in the saved scheduler state; restoring it does not
+ask the orchestrator to route that completed response again.
 
-The pending set lives in `PhaseTracker` and the orchestrator cannot see it, so
-it is told — twice, for two different readers:
+`acknowledge` consumes a callback before the host applies it. The blocking
+adapter publishes that consumed state through `record_position` before calling
+`deliver`, so a host that saves inside delivery writes the matching transcript
+and loop position. A session driver similarly checkpoints its conversation and
+consumed callback together. External channel delivery is not a transaction with
+that checkpoint.
 
-- **Every orchestrator turn** carries `standing_briefing()` (`:534`) as its
-  `instruction`, the same per-turn channel `turn_instruction()` (`:704`) uses to
-  put the phase requirement in front of every participant. This is how the
-  orchestrator knows who to call.
-- **Each phase boundary** additionally appends `brief()` (`:499`) to the shared
-  conversation, so participants see the phase turn over.
-- **Each retry** re-asks through `hint()` (`:711`), which names the head of the
-  pending set outright. The generic "reply with an @Name" is the question the
-  orchestrator has just demonstrated it cannot answer, so asking it again
-  unchanged tends to draw the same unusable reply until the budget is spent and
-  the session is forced to end — with the round one turn from closing.
+A closing draft is stored before a rethink is requested. Only the final pass
+queues a summary and supplies result fields. The complete state stays terminal
+under explicit stepping. The legacy blocking adapter permits a fully completed
+saved run to continue with a larger configured budget, while interrupted
+continuations keep their exact pending action. Snapshots with only version-1
+`turn_count` and `phases` use the original turn-boundary continuation.
+Restoration rejects negative or inconsistent progress and active turns already
+past their configured allowance. Saturating counters protect old hand-edited
+phase snapshots from arithmetic overflow.
+An immediate snapshot of a restored loop preserves the supplied continuation
+without stepping. `next_action` or `host_limit_reached` validates and initializes
+the deferred state before the caller inspects `state`. Successful initialization
+releases the temporary resume map, leaving the owned scheduler state.
 
-The per-turn copy is what makes the rotation work, and a boundary-only briefing
-is not a weaker version of it but a broken one. Between boundaries the pending
-set shrinks with every participant who speaks, so a boundary-old copy names
-people who have already spoken. An orchestrator that believes it re-calls one of
-them; `record_turn` (`:284`) only removes a name that is still pending, so the
-re-call clears nothing, the round never closes, and the next boundary — the only
-thing that would have corrected the briefing — never arrives. The failure
-sustains itself, and an orchestrator with a roster it cannot make progress
-against will eventually stop calling participants and write their contributions
-itself. For the same reason the orchestrator's rules block drops the "you
-control the flow ... summarize at any point" licence when the harness declares
-phases; see [session.md](session.md).
+### Phase reuse without an automatic orchestrator
+
+A host-driven session uses `host_instruction`, `host_briefing`,
+`commit_host_turn`, and `host_limit_reached`. These methods use the same phase
+tracker and turn ceiling but generate no automatic turns or callbacks. Unknown
+participants and turns past the bound are errors. The session's configured mode
+decides which driving interface it uses.
+
+Every scheduled orchestrator turn receives the current pending roster, and every
+participant receives the current phase requirement. Boundary directives are
+additional shared context; they do not substitute for the per-turn briefing.
+Repeated calls on an already-heard participant do not close a round while another
+participant is still owed a turn.
 
 ## Interactions
 
-- Driven by [session.md](session.md), which is also its `LoopHost`.
-- Runs each turn through [agent-runtime.md](agent-runtime.md).
-- Its phases, rounds, terminators, and result fields come from
-  [harness.md](harness.md).
-- Scans replies with [utils.md](utils.md)'s `keyword_in_text` and
-  `parse_orchestrator_call`.
-- Its snapshot is written by [sessionfile.md](sessionfile.md).
+- [session.md](session.md) executes actions, owns conversation and channels,
+  validates final fields, and exposes partial outcomes.
+- [agent-runtime.md](agent-runtime.md) turns each requested agent turn into
+  provider and tool steps.
+- [harness.md](harness.md) supplies limits, phases, terminators, and result fields.
+- [sessionfile.md](sessionfile.md) persists scheduler state with conversation
+  and any active agent continuation.
+- [utils.md](utils.md) parses routing mentions and termination keywords.
 
 ## How to Test
 
 ```sh
-cargo test -p kerness orchestrator                               # pass = 0 failed
-.venv/bin/python -m pytest bindings/python/tests/test_loop.py -q # pass = 0 failed
+cargo test -p kerness --lib orchestrator
+.venv/bin/python -m pytest bindings/python/tests/test_loop.py -q
+.venv/bin/python -m pytest bindings/python/tests/test_session.py -q -k TestResumingFromASessionFile
 ```
 
-- The Rust tests drive a `StubHost` (`orchestrator.rs:943`) through fixed
-  orchestrator replies, which is how phase advance, forced end, and each
-  `EndReason` are covered without a provider.
+All commands must exit zero. Existing phase tests assert progress at delivery,
+explicit advancement during retries, and repeated-participant behavior. Resume
+coverage checks both legacy completed-run extension and an exact pending
+participant action. Closing coverage restores between draft and revision and
+requires only the remaining closing call. The phase-round owner also drives the
+same counters directly from a host, including unknown-agent refusal and bounds.
+The resume owner rejects corrupt counters and preserves a restore/save cycle
+performed before the first action.
+Verified on the current source: 50 Rust loop tests pass; the rebuilt Python
+agent-runtime and loop suites pass together with 57 tests, and all 6 selected
+session-file resume tests pass.
 
 ## Open Gaps / Roadmap
 
-- The orchestrator addresses one participant per turn. A gameplan that wants two
-  to answer the same question in parallel has to sequence them.
-- `parse_result_fields` matches on the declared field names in the reply text; a
-  model that renames a field produces a missing field rather than a mismatch
-  error.
-- Phase transitions are forward-only. There is no way for an orchestrator to
-  return to an earlier phase.
+- The orchestrator addresses one participant at a time; host-driven sessions can
+  choose another schedule but tool/provider execution remains synchronous.
+- Phase transitions are forward-only.
+- `parse_result_fields` remains the legacy coercing parser. Strict validation
+  belongs to the session outcome layer and uses `raw_closing_result`.

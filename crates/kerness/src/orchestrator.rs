@@ -9,16 +9,16 @@
 //! `terminate_on: [ALL_DONE]` ends on `ALL_DONE` and does not end on
 //! `END_SESSION`, with no Rust change.
 //!
-//! The loop owns control flow and nothing else. Provider calls, the
-//! conversation, the channel, and memory all stay behind [`LoopHost`], so this
-//! module has no idea what an LLM is.
+//! Provider calls, conversation, channels, and memory belong to the caller.
+//! The blocking adapter accesses them through [`LoopHost`].
 
+use std::collections::VecDeque;
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::{Map, Value};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::harness::{LoopSpec, ResultField, ResultType};
 use crate::pyfmt;
 use crate::utils::{keyword_in_text, parse_orchestrator_call, parse_session_end};
@@ -86,7 +86,8 @@ pub trait LoopHost {
 
 /// Why the loop stopped, for callers that need to tell "the harness said so"
 /// from "the budget ran out".
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EndReason {
     /// A terminator from `terminate_on` appeared in an orchestrator reply.
     Keyword,
@@ -116,7 +117,7 @@ impl EndReason {
 }
 
 /// Everything the loop tracks across turns.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LoopState {
     pub turn_count: i64,
     pub consensus_reached: bool,
@@ -142,34 +143,14 @@ struct Phase {
 
 /// Owns the round counter and the phase pointer.
 ///
-/// `loop.phases`, `PhaseSpec::rounds`, `loop.max_rounds` and `loop.advance_on`
-/// are enforced here rather than rendered into the orchestrator's system prompt
-/// and hoped for. Prompt text alone would leave `advance_on` worse than inert:
-/// the prompt tells the orchestrator to write `NEXT_PHASE`, and a reply that
-/// does so matches neither a terminator nor an `@Name`, so without a tracker it
-/// would fall into the retry path and burn turns — the harness instructing the
-/// model to do something the loop then punishes.
-///
-/// This type is what makes the declared structure real. It does not decide
-/// *who* speaks — the loop stays orchestrator-driven — only what structure they
-/// speak within, and when the structure is finished.
-///
-/// The rules, all of them:
-///
-/// - A **round** completes when every participant has taken a turn since the
-///   last one closed. Participants who speak twice before a straggler speaks
-///   once do not advance it; that is the point, and it is what stops an
-///   orchestrator looping on its favourite participant forever.
-/// - A **phase** lasts `min(phase.rounds, max_rounds)` rounds. `max_rounds` is
-///   therefore a ceiling on any single phase, never a total: capping the total
-///   would let a harness whose phases outlast it stop before its `rethink`
-///   phase, destroying the one guarantee the phase list exists to give.
-/// - A harness declaring **no** phases is one implicit phase of `max_rounds`
-///   rounds. That is the only configuration in which `max_rounds` bounds the
-///   whole session.
-/// - **Exhausting the last phase ends the run** and hands over to the closing
-///   turn. `terminate_on` remains an *early* exit, and `max_turns` remains the
-///   hard stop above both.
+/// - A round completes when every participant has spoken since the last one
+///   closed. Repeated turns by one participant do not advance it.
+/// - A phase lasts `min(phase.rounds, max_rounds)` rounds; `max_rounds` caps
+///   each phase separately.
+/// - Without declared phases, one implicit phase of `max_rounds` rounds bounds
+///   the whole session.
+/// - `advance_on` ends the current phase early. Exhausting the last phase
+///   requests the closing turn; `terminate_on` and `max_turns` can end it sooner.
 struct PhaseTracker {
     participants: Vec<String>,
     max_rounds: i64,
@@ -255,7 +236,7 @@ impl PhaseTracker {
             return String::new();
         };
         let total = phase.rounds;
-        let current = (self.round_in_phase + 1).min(total);
+        let current = self.round_in_phase.saturating_add(1).min(total);
         let owing = if self.pending.is_empty() {
             "nobody".to_string()
         } else {
@@ -301,8 +282,8 @@ impl PhaseTracker {
         if !self.pending.is_empty() {
             return false;
         }
-        self.rounds_run += 1;
-        self.round_in_phase += 1;
+        self.rounds_run = self.rounds_run.saturating_add(1);
+        self.round_in_phase = self.round_in_phase.saturating_add(1);
         self.pending = self.participants.clone();
         let limit = self.active().map(|p| p.rounds).unwrap_or(self.max_rounds);
         if self.round_in_phase >= limit {
@@ -392,6 +373,65 @@ impl PhaseTracker {
     }
 }
 
+/// Which host entry point a requested turn uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopTurnKind {
+    Orchestrator,
+    Participant,
+    Closing,
+}
+
+/// One resumable action. Reading it does no IO and does not consume it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum LoopAction {
+    Turn {
+        agent: String,
+        purpose: String,
+        instruction: Option<String>,
+        kind: LoopTurnKind,
+    },
+    Deliver {
+        sender: String,
+        text: String,
+        turn: i64,
+        msg_type: String,
+    },
+    Directive {
+        text: String,
+    },
+    Note {
+        text: String,
+    },
+    Summary {
+        text: String,
+        turn: i64,
+    },
+    Complete {
+        state: LoopState,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+enum LoopStage {
+    Orchestrator { retry: i64 },
+    Participant { name: String, instruction: String },
+    ClosingDraft,
+    ClosingFinal { draft: String },
+    Complete,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedScheduler {
+    stage: LoopStage,
+    pending: VecDeque<LoopAction>,
+    state: LoopState,
+    raw_closing_result: Option<String>,
+}
+
 /// Runs one session's worth of turns.
 pub struct OrchestratorLoop {
     spec: LoopSpec,
@@ -403,6 +443,10 @@ pub struct OrchestratorLoop {
     phases: PhaseTracker,
     resume: Map<String, Value>,
     state: LoopState,
+    initialized: bool,
+    stage: LoopStage,
+    pending: VecDeque<LoopAction>,
+    raw_closing_result: Option<String>,
 }
 
 impl OrchestratorLoop {
@@ -428,6 +472,10 @@ impl OrchestratorLoop {
             phases,
             resume: Map::new(),
             state: LoopState::default(),
+            initialized: false,
+            stage: LoopStage::Orchestrator { retry: 0 },
+            pending: VecDeque::new(),
+            raw_closing_result: None,
         }
     }
 
@@ -458,91 +506,316 @@ impl OrchestratorLoop {
         self
     }
 
-    /// Drive the session to termination and return what happened.
+    /// Drive the same action machine used by caller-controlled sessions.
     pub fn run(&mut self, host: &mut dyn LoopHost) -> Result<LoopState> {
-        self.state = self.initial_state();
-        self.publish(host);
-        self.brief(host)?;
-
-        if !self.structure_complete() {
-            while self.state.turn_count < self.max_turns {
-                if self.advance(host)? {
-                    break;
-                }
+        if !self.initialized {
+            // A completed legacy run can be extended with a larger turn
+            // budget. Incomplete continuations retain their exact next action.
+            let completed = self.resume.get("scheduler").is_some_and(|saved| {
+                saved["stage"]["stage"].as_str() == Some("complete")
+                    && saved["pending"].as_array().is_some_and(Vec::is_empty)
+            });
+            if completed {
+                self.resume.remove("scheduler");
             }
         }
+        loop {
+            let action = self.next_action()?;
+            if !matches!(
+                action,
+                LoopAction::Turn { .. } | LoopAction::Complete { .. }
+            ) {
+                // A host callback can save immediately. Its snapshot must
+                // already include the transition and consume this delivery.
+                self.acknowledge()?;
+            }
+            host.record_position(self.snapshot());
+            match action {
+                LoopAction::Turn {
+                    agent,
+                    purpose,
+                    instruction,
+                    kind,
+                } => {
+                    let reply = match kind {
+                        LoopTurnKind::Orchestrator => {
+                            host.orchestrator_turn(&purpose, instruction.as_deref())?
+                        }
+                        LoopTurnKind::Participant => host
+                            .participant_turn(&agent, instruction.as_deref().unwrap_or_default())?,
+                        LoopTurnKind::Closing => {
+                            host.closing_turn(instruction.as_deref().unwrap_or_default())?
+                        }
+                    };
+                    self.submit_reply(reply)?;
+                }
+                LoopAction::Deliver {
+                    sender,
+                    text,
+                    turn,
+                    msg_type,
+                } => host.deliver(&sender, &text, turn, &msg_type)?,
+                LoopAction::Directive { text } => host.directive(&text)?,
+                LoopAction::Note { text } => host.note(&text)?,
+                LoopAction::Summary { text, turn } => host.record_summary(&text, turn)?,
+                LoopAction::Complete { state } => return Ok(state),
+            }
+        }
+    }
 
+    /// Inspect the next action without running a provider or a callback.
+    pub fn next_action(&mut self) -> Result<LoopAction> {
+        self.initialize()?;
+        if let Some(action) = self.pending.front() {
+            return Ok(action.clone());
+        }
+        Ok(match &self.stage {
+            LoopStage::Orchestrator { retry } => {
+                let briefing = self.standing_briefing();
+                LoopAction::Turn {
+                    agent: self.orchestrator.clone(),
+                    purpose: if *retry == 0 {
+                        "orchestrator turn"
+                    } else {
+                        "orchestrator retry"
+                    }
+                    .to_string(),
+                    instruction: (!briefing.is_empty()).then_some(briefing),
+                    kind: LoopTurnKind::Orchestrator,
+                }
+            }
+            LoopStage::Participant { name, instruction } => LoopAction::Turn {
+                agent: name.clone(),
+                purpose: format!("turn from {name}"),
+                instruction: Some(instruction.clone()),
+                kind: LoopTurnKind::Participant,
+            },
+            LoopStage::ClosingDraft => LoopAction::Turn {
+                agent: self.orchestrator.clone(),
+                purpose: "final summary".to_string(),
+                instruction: Some(closing_prompt(&self.result_fields)),
+                kind: LoopTurnKind::Closing,
+            },
+            LoopStage::ClosingFinal { draft } => LoopAction::Turn {
+                agent: self.orchestrator.clone(),
+                purpose: "final summary".to_string(),
+                instruction: Some(verdict_rethink_prompt(draft, &self.result_fields)),
+                kind: LoopTurnKind::Closing,
+            },
+            LoopStage::Complete => LoopAction::Complete {
+                state: self.state.clone(),
+            },
+        })
+    }
+
+    /// Accept one completed agent turn. The matching phase progress and queued
+    /// delivery become one owned state before either can be persisted.
+    pub fn submit_reply(&mut self, reply: String) -> Result<()> {
+        if !matches!(self.next_action()?, LoopAction::Turn { .. }) {
+            return Err(Error::session("The loop is not waiting for an agent reply"));
+        }
+        match self.stage.clone() {
+            LoopStage::Orchestrator { retry } => self.accept_orchestrator(reply, retry),
+            LoopStage::Participant { name, .. } => {
+                self.state.turn_count = self.state.turn_count.saturating_add(1);
+                let round_complete = self.phases.record_turn(&name);
+                self.deliver(name, reply, "turn");
+                if round_complete && !self.phases.exhausted {
+                    self.queue_briefing();
+                }
+                self.after_participant();
+            }
+            LoopStage::ClosingDraft if self.spec.verdict_rethink => {
+                self.stage = LoopStage::ClosingFinal { draft: reply };
+            }
+            LoopStage::ClosingDraft | LoopStage::ClosingFinal { .. } => {
+                self.state.fields = parse_result_fields(&reply, &self.result_fields);
+                self.state.final_summary = strip_result_block(&reply);
+                self.raw_closing_result = Some(reply);
+                self.pending.push_back(LoopAction::Summary {
+                    text: self.state.final_summary.clone(),
+                    turn: self.state.turn_count,
+                });
+                self.stage = LoopStage::Complete;
+            }
+            LoopStage::Complete => unreachable!("next_action refused a completed loop"),
+        }
         self.record_progress();
-        if !self.orchestrator.is_empty() {
-            self.closing_turn(host)?;
-        }
-        Ok(self.state.clone())
-    }
-
-    /// Capture the loop's position for a session file.
-    ///
-    /// Only what a continuation needs. `consensus_reached`, `final_summary`,
-    /// `fields` and `end_reason` are verdicts of a *finished* run — an
-    /// interrupted one has none, and a resumed one earns its own in the closing
-    /// turn rather than inheriting stale ones.
-    pub fn snapshot(&self) -> Map<String, Value> {
-        let mut state = Map::new();
-        state.insert("turn_count".to_string(), Value::from(self.state.turn_count));
-        state.insert("phases".to_string(), Value::Object(self.phases.snapshot()));
-        state
-    }
-
-    /// Start fresh, or where the last run stopped.
-    ///
-    /// `max_turns` is a budget for the whole session rather than for one
-    /// process, so a resumed run carries its predecessor's turn count instead
-    /// of getting a second full allowance.
-    fn initial_state(&self) -> LoopState {
-        LoopState {
-            turn_count: int_at(&self.resume, "turn_count", 0),
-            ..LoopState::default()
-        }
-    }
-
-    fn publish(&self, host: &mut dyn LoopHost) {
-        host.record_position(self.snapshot());
-    }
-
-    /// Tell the orchestrator where in the declared structure it is.
-    ///
-    /// This marks the boundary in the shared conversation, so participants see
-    /// the phase turn over too. It is not how the orchestrator learns who owes
-    /// a turn — see [`OrchestratorLoop::standing_briefing`] for that.
-    fn brief(&self, host: &mut dyn LoopHost) -> Result<()> {
-        if !self.phases.phased() || self.phases.exhausted {
-            return Ok(());
-        }
-        let text = self.phases.briefing();
-        if !text.is_empty() {
-            host.directive(&text)?;
-        }
         Ok(())
     }
 
-    /// The briefing as it stands for the turn about to be taken.
-    ///
-    /// Carried into *every* orchestrator turn, because a briefing delivered
-    /// only at boundaries is stale for every turn in between: the pending set
-    /// shrinks with each participant who speaks, and an orchestrator reading a
-    /// boundary-old copy re-calls someone who already spoke. That never clears
-    /// `pending`, so the round never closes, so the next boundary never
-    /// arrives — the staleness is self-sustaining, and the orchestrator's way
-    /// out is to give up on the roster and speak for the participants it never
-    /// called.
-    ///
-    /// [`OrchestratorLoop::turn_instruction`] already does exactly this for
-    /// participants, and for the same stated reason: a standing requirement
-    /// that depends on being remembered is advisory.
+    /// Consume a callback action before applying its effect and saving the
+    /// resulting transcript. Turn actions are consumed only by submit_reply.
+    pub fn acknowledge(&mut self) -> Result<()> {
+        self.initialize()?;
+        self.pending
+            .pop_front()
+            .ok_or_else(|| Error::session("There is no pending loop callback to acknowledge"))?;
+        Ok(())
+    }
+
+    /// The initialized state. After restoration, call `next_action` or
+    /// `host_limit_reached` to validate and initialize it before inspection.
+    pub fn state(&self) -> &LoopState {
+        &self.state
+    }
+
+    /// The uncoerced final closing reply, for strict result validation.
+    pub fn raw_closing_result(&self) -> Option<&str> {
+        self.raw_closing_result.as_deref()
+    }
+
+    /// The same phase requirement used by scheduled participant turns.
+    pub fn host_instruction(&self, asked: &str) -> String {
+        self.turn_instruction(asked)
+    }
+
+    pub fn host_briefing(&self) -> String {
+        self.standing_briefing()
+    }
+
+    /// Commit a participant turn whose timing the host chose. No automatic
+    /// routing, closing turn, or callback is generated in this mode.
+    pub fn commit_host_turn(&mut self, name: &str) -> Result<()> {
+        self.initialize_mode(false)?;
+        if !self
+            .participants
+            .iter()
+            .any(|participant| participant == name)
+        {
+            return Err(Error::session(format!("Unknown participant '{name}'")));
+        }
+        if self.host_limit_reached()? {
+            return Err(Error::session(
+                "The host-driven run has reached its turn or phase limit",
+            ));
+        }
+        self.state.turn_count = self.state.turn_count.saturating_add(1);
+        self.phases.record_turn(name);
+        self.record_progress();
+        self.host_limit_reached()?;
+        Ok(())
+    }
+
+    pub fn host_limit_reached(&mut self) -> Result<bool> {
+        self.initialize_mode(false)?;
+        let reached = self.structure_complete() || self.state.turn_count >= self.max_turns;
+        if reached {
+            self.stage = LoopStage::Complete;
+        }
+        Ok(reached)
+    }
+
+    /// Keep the version-1 counters alongside the complete continuation.
+    /// Snapshots without `scheduler` retain the old turn-boundary resume path.
+    pub fn snapshot(&self) -> Map<String, Value> {
+        if !self.initialized && !self.resume.is_empty() {
+            return self.resume.clone();
+        }
+        let mut state = Map::new();
+        state.insert("turn_count".to_string(), Value::from(self.state.turn_count));
+        state.insert("phases".to_string(), Value::Object(self.phases.snapshot()));
+        if self.initialized {
+            let scheduler = SavedScheduler {
+                stage: self.stage.clone(),
+                pending: self.pending.clone(),
+                state: self.state.clone(),
+                raw_closing_result: self.raw_closing_result.clone(),
+            };
+            state.insert(
+                "scheduler".to_string(),
+                serde_json::to_value(scheduler)
+                    .expect("scheduler contains only JSON-compatible state"),
+            );
+        }
+        state
+    }
+
+    fn initialize(&mut self) -> Result<()> {
+        self.initialize_mode(true)
+    }
+
+    fn initialize_mode(&mut self, automatic: bool) -> Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
+        let turn_count = int_at(&self.resume, "turn_count", 0);
+        if turn_count < 0 || self.phases.rounds_run < 0 || self.phases.round_in_phase < 0 {
+            return Err(Error::session(
+                "Invalid loop scheduler snapshot: negative progress",
+            ));
+        }
+        if let Some(saved) = self.resume.get("scheduler") {
+            let saved: SavedScheduler = serde_json::from_value(saved.clone())
+                .map_err(|err| Error::session(format!("Invalid loop scheduler snapshot: {err}")))?;
+            if saved.state.turn_count != turn_count
+                || saved.state.rounds_run != self.phases.rounds_run
+                || saved.state.rounds_run > turn_count
+                || self.phases.round_in_phase > self.phases.rounds_run
+                || (matches!(
+                    saved.stage,
+                    LoopStage::Orchestrator { .. } | LoopStage::Participant { .. }
+                ) && turn_count >= self.max_turns)
+                || matches!(saved.stage, LoopStage::Orchestrator { retry } if retry < 0 || retry > self.retries.max(0))
+                || saved.pending.iter().any(|action| {
+                    matches!(
+                        action,
+                        LoopAction::Turn { .. } | LoopAction::Complete { .. }
+                    )
+                })
+            {
+                return Err(Error::session(
+                    "Invalid loop scheduler snapshot: inconsistent pending actions or turn count",
+                ));
+            }
+            if let LoopStage::Participant { name, .. } = &saved.stage {
+                if !self.participants.contains(name) {
+                    return Err(Error::session(format!(
+                        "Cannot resume pending turn for unknown participant '{name}'"
+                    )));
+                }
+            }
+            self.state = saved.state;
+            self.stage = saved.stage;
+            self.pending = saved.pending;
+            self.raw_closing_result = saved.raw_closing_result;
+        } else {
+            self.state.turn_count = turn_count;
+            if automatic {
+                self.queue_briefing();
+                self.after_participant();
+            } else if self.structure_complete() || self.state.turn_count >= self.max_turns {
+                self.stage = LoopStage::Complete;
+            }
+        }
+        self.initialized = true;
+        self.resume.clear();
+        self.record_progress();
+        Ok(())
+    }
+
+    fn deliver(&mut self, sender: String, text: String, msg_type: &str) {
+        self.pending.push_back(LoopAction::Deliver {
+            sender,
+            text,
+            turn: self.state.turn_count,
+            msg_type: msg_type.to_string(),
+        });
+    }
+
+    fn queue_briefing(&mut self) {
+        let text = self.standing_briefing();
+        if !text.is_empty() {
+            self.pending.push_back(LoopAction::Directive { text });
+        }
+    }
+
     fn standing_briefing(&self) -> String {
         if !self.phases.phased() || self.phases.exhausted {
-            return String::new();
+            String::new()
+        } else {
+            self.phases.briefing()
         }
-        self.phases.briefing()
     }
 
     fn record_progress(&mut self) {
@@ -550,42 +823,14 @@ impl OrchestratorLoop {
         self.state.phase_reached = self.phases.phase_name().to_string();
     }
 
-    /// Take one orchestrator turn plus whatever it routes to.
-    ///
-    /// Returns true when the session should stop.
-    fn advance(&mut self, host: &mut dyn LoopHost) -> Result<bool> {
-        let reply = self.orchestrator_says(host, "orchestrator turn")?;
-        if self.terminates(&reply, host)? {
-            return Ok(true);
-        }
-
-        // Read `advance_on` back before routing, so a reply that both ends the
-        // phase and calls on someone ("NEXT_PHASE. @Alice, go.") runs that
-        // participant under the phase they were just moved into.
-        let advanced = self.phases.advance_requested(&reply);
-        if advanced {
-            if self.structure_complete() {
-                return Ok(true);
-            }
-            self.brief(host)?;
-        }
-
-        if self.routes(&reply, host)? {
-            return Ok(self.structure_complete());
-        }
-        if advanced {
-            // A bare advance is a legitimate orchestrator move, not the
-            // unparseable reply the retry path exists for.
-            return Ok(false);
-        }
-        self.retry(host)
+    fn closing(&mut self) {
+        self.stage = if self.orchestrator.is_empty() {
+            LoopStage::Complete
+        } else {
+            LoopStage::ClosingDraft
+        };
     }
 
-    /// Whether the declared round structure has run out.
-    ///
-    /// Exhaustion ends the loop and hands over to the closing turn — the
-    /// "agents run the complete round, then the judge answers" shape. It is not
-    /// a failure, so nothing is noted to the channel beyond the reason.
     fn structure_complete(&mut self) -> bool {
         if !self.phases.exhausted {
             return false;
@@ -598,125 +843,75 @@ impl OrchestratorLoop {
         true
     }
 
-    /// Re-ask an orchestrator whose reply named nobody and ended nothing.
-    ///
-    /// Returns true when the session should stop — either because the retry
-    /// ended it, or because a budget ran out.
-    fn retry(&mut self, host: &mut dyn LoopHost) -> Result<bool> {
-        for _ in 0..self.retries {
-            // Retries spend turns like any other, so they answer to max_turns
-            // too. Without this a harness declaring max_turns: 4 could run 5,
-            // because the retry loop only counted against its own budget.
-            if self.state.turn_count >= self.max_turns {
-                break;
-            }
-            let hint = self.hint();
-            host.directive(&hint)?;
-            let reply = self.orchestrator_says(host, "orchestrator retry")?;
-            if self.terminates(&reply, host)? {
-                return Ok(true);
-            }
-            let advanced = self.phases.advance_requested(&reply);
-            if advanced && self.structure_complete() {
-                return Ok(true);
-            }
-            if advanced {
-                self.brief(host)?;
-            }
-            if self.routes(&reply, host)? {
-                return Ok(self.structure_complete());
-            }
-            if advanced {
-                return Ok(false);
-            }
-        }
-
-        if self.state.turn_count >= self.max_turns {
-            return Ok(true);
-        }
-        self.state.end_reason = EndReason::Forced;
-        host.note(FORCED_END_NOTE)?;
-        Ok(true)
-    }
-
-    fn orchestrator_says(&mut self, host: &mut dyn LoopHost, purpose: &str) -> Result<String> {
-        let briefing = self.standing_briefing();
-        let reply =
-            host.orchestrator_turn(purpose, (!briefing.is_empty()).then_some(briefing.as_str()))?;
-        self.state.turn_count += 1;
-        self.publish(host);
-        host.deliver(
-            &self.orchestrator,
-            &reply,
-            self.state.turn_count,
-            "orchestrator",
-        )?;
-        Ok(reply)
-    }
-
-    /// Check the reply against the harness's own terminator list.
-    fn terminates(&mut self, reply: &str, host: &mut dyn LoopHost) -> Result<bool> {
-        let Some(keyword) = parse_session_end(reply, &self.spec.terminate_on) else {
-            return Ok(false);
-        };
-        let consensus = self.spec.consensus_keyword() == Some(keyword.as_str());
-        self.state.consensus_reached = consensus;
-        self.state.end_reason = EndReason::Keyword;
-        host.note(&format!("Session ended: {keyword}"))?;
-        Ok(true)
-    }
-
-    /// Run the participant the orchestrator addressed, if it addressed one.
-    fn routes(&mut self, reply: &str, host: &mut dyn LoopHost) -> Result<bool> {
-        let Some((name, instruction)) = parse_orchestrator_call(reply, &self.participants) else {
-            return Ok(false);
-        };
-        if self.state.turn_count >= self.max_turns {
-            // The orchestrator's own turn consumed the last of the budget.
-            // Routing anyway would run a participant past the declared limit.
-            return Ok(true);
-        }
-        let asked = if instruction.is_empty() {
-            reply
+    fn after_participant(&mut self) {
+        if self.structure_complete() || self.state.turn_count >= self.max_turns {
+            self.closing();
         } else {
-            &instruction
-        };
-        let answer = host.participant_turn(&name, &self.turn_instruction(asked))?;
-        self.state.turn_count += 1;
-        self.publish(host);
-        host.deliver(&name, &answer, self.state.turn_count, "turn")?;
-        if self.phases.record_turn(&name) && !self.phases.exhausted {
-            self.brief(host)?;
+            self.stage = LoopStage::Orchestrator { retry: 0 };
         }
-        Ok(true)
     }
 
-    /// Compose the orchestrator's ask with the active phase's requirement.
-    ///
-    /// The phase text goes last, and reaches the participant whether or not the
-    /// orchestrator remembered to relay it. Relying on the orchestrator to
-    /// carry it is what made the phase list advisory: one forgetful routing
-    /// turn and a participant answers with no idea it is in a rethink phase.
+    fn accept_orchestrator(&mut self, reply: String, retry: i64) {
+        self.state.turn_count = self.state.turn_count.saturating_add(1);
+        let ended = parse_session_end(&reply, &self.spec.terminate_on);
+        let advanced = ended.is_none() && self.phases.advance_requested(&reply);
+        self.deliver(self.orchestrator.clone(), reply.clone(), "orchestrator");
+        if let Some(keyword) = ended {
+            self.state.consensus_reached = self.spec.consensus_keyword() == Some(keyword.as_str());
+            self.state.end_reason = EndReason::Keyword;
+            self.pending.push_back(LoopAction::Note {
+                text: format!("Session ended: {keyword}"),
+            });
+            self.closing();
+            return;
+        }
+        if self.structure_complete() {
+            self.closing();
+            return;
+        }
+        if advanced {
+            self.queue_briefing();
+        }
+        if self.state.turn_count >= self.max_turns {
+            self.closing();
+            return;
+        }
+        if let Some((name, instruction)) = parse_orchestrator_call(&reply, &self.participants) {
+            let asked = if instruction.is_empty() {
+                &reply
+            } else {
+                &instruction
+            };
+            self.stage = LoopStage::Participant {
+                name,
+                instruction: self.turn_instruction(asked),
+            };
+        } else if advanced {
+            self.stage = LoopStage::Orchestrator { retry: 0 };
+        } else if retry < self.retries {
+            self.pending
+                .push_back(LoopAction::Directive { text: self.hint() });
+            self.stage = LoopStage::Orchestrator { retry: retry + 1 };
+        } else {
+            self.state.end_reason = EndReason::Forced;
+            self.pending.push_back(LoopAction::Note {
+                text: FORCED_END_NOTE.to_string(),
+            });
+            self.closing();
+        }
+    }
+
     fn turn_instruction(&self, asked: &str) -> String {
         let standing = self.phases.instruction();
         if standing.is_empty() {
-            return asked.to_string();
-        }
-        if asked.is_empty() {
+            asked.to_string()
+        } else if asked.is_empty() {
             standing
         } else {
             format!("{asked}\n\n{standing}")
         }
     }
 
-    /// What to tell an orchestrator whose reply named nobody and ended nothing.
-    ///
-    /// Where a round is still open the loop knows exactly who is owed the next
-    /// turn, so it says the name. Asking only for "an @Name" hands the problem
-    /// back unchanged to the one reader that has already demonstrated it cannot
-    /// solve it, and the usual answer is the same unusable reply again until
-    /// the retry budget is gone and the session is forced to end — with the
-    /// round one turn from closing.
     fn hint(&self) -> String {
         let mut hint = format!(
             "Your last response didn't contain an @Name mention or one of these keywords: {}. \
@@ -731,28 +926,6 @@ impl OrchestratorLoop {
             ));
         }
         hint
-    }
-
-    /// Ask for the summary, and for the declared result fields with it.
-    ///
-    /// Two passes when `loop.verdict_rethink` is on. The orchestrator is also
-    /// the judge, and the phase list gives its rethink to participants only —
-    /// the verdict itself was written once, in a single call, and committed
-    /// unread. The second pass hands the draft back and asks the judge to check
-    /// it against the transcript it just watched.
-    ///
-    /// Only the committed pass is recorded. The draft is never delivered, never
-    /// emitted, and never reaches memory: a session must not end with two
-    /// summaries in its transcript, one of them superseded.
-    fn closing_turn(&mut self, host: &mut dyn LoopHost) -> Result<()> {
-        let mut raw = host.closing_turn(&closing_prompt(&self.result_fields))?;
-        if self.spec.verdict_rethink {
-            raw = host.closing_turn(&verdict_rethink_prompt(&raw, &self.result_fields))?;
-        }
-        self.state.fields = parse_result_fields(&raw, &self.result_fields);
-        self.state.final_summary = strip_result_block(&raw);
-        self.publish(host);
-        host.record_summary(&self.state.final_summary, self.state.turn_count)
     }
 }
 
@@ -965,6 +1138,8 @@ mod tests {
         /// actually told, which is where the phase contract either lands or
         /// does not.
         routed: Vec<(String, String)>,
+        position: Map<String, Value>,
+        checkpoints: Vec<Map<String, Value>>,
     }
 
     impl StubHost {
@@ -982,6 +1157,8 @@ mod tests {
                 closing_prompts: Vec::new(),
                 summary: None,
                 routed: Vec::new(),
+                position: Map::new(),
+                checkpoints: Vec::new(),
             }
         }
 
@@ -1023,7 +1200,12 @@ mod tests {
         fn deliver(&mut self, sender: &str, text: &str, _turn: i64, msg_type: &str) -> Result<()> {
             self.delivered
                 .push((sender.to_string(), text.to_string(), msg_type.to_string()));
+            self.checkpoints.push(self.position.clone());
             Ok(())
+        }
+
+        fn record_position(&mut self, snapshot: Map<String, Value>) {
+            self.position = snapshot;
         }
 
         fn note(&mut self, message: &str) -> Result<()> {
@@ -1579,6 +1761,26 @@ mod tests {
             run(&mut straggler, phased(vec![think(), argue()])).rounds_run,
             1
         );
+        let mut host_driven = driver(phased(vec![think()]));
+        assert!(!host_driven.host_limit_reached().unwrap());
+        let before = host_driven.snapshot();
+        assert!(host_driven.commit_host_turn("Carol").is_err());
+        assert_eq!(host_driven.snapshot(), before);
+        host_driven.commit_host_turn("Alice").unwrap();
+        host_driven.commit_host_turn("Alice").unwrap();
+        assert_eq!(host_driven.state().rounds_run, 0);
+        assert!(host_driven
+            .host_instruction("answer")
+            .contains("State your own view."));
+        let mut restored = driver(phased(vec![think()])).with_resume_state(host_driven.snapshot());
+        restored.commit_host_turn("Bob").unwrap();
+        assert!(restored.host_limit_reached().unwrap());
+        assert_eq!(restored.state().turn_count, 3);
+        assert_eq!(restored.state().rounds_run, 1);
+        assert!(
+            restored.pending.is_empty(),
+            "host turns generate no automatic callbacks"
+        );
     }
 
     #[test]
@@ -1675,6 +1877,7 @@ mod tests {
     fn the_keyword_advances_the_phase_whether_or_not_it_routes() {
         let mut alone = StubHost::new(&["NEXT_PHASE", "@Alice, go.", "END_SESSION", "Summary."]);
         run(&mut alone, phased(vec![think(), argue()]));
+        assert_eq!(alone.checkpoints[0]["phases"]["index"], json!(1));
 
         assert!(
             alone.routed[0].1.contains("[Phase: argue]"),
@@ -1691,6 +1894,15 @@ mod tests {
         run(&mut combined, phased(vec![think(), argue()]));
 
         assert!(combined.routed[0].1.contains("[Phase: argue]"));
+        assert_eq!(combined.checkpoints[0]["phases"]["index"], json!(1));
+
+        let mut retried = StubHost::new(&["mumble", "NEXT_PHASE", "END_SESSION", "Summary."]);
+        run(&mut retried, phased(vec![think(), argue()]));
+        assert_eq!(retried.checkpoints[1]["phases"]["index"], json!(1));
+
+        let mut ended = StubHost::new(&["END_SESSION NEXT_PHASE", "Summary."]);
+        run(&mut ended, phased(vec![think(), argue()]));
+        assert_eq!(ended.checkpoints[0]["phases"]["index"], json!(0));
     }
 
     #[test]
@@ -1824,6 +2036,30 @@ mod tests {
             .delivered
             .iter()
             .all(|(_, text, _)| !text.contains(DRAFT)));
+        let mut pending = driver(LoopSpec::default());
+        pending.submit_reply("END_SESSION".to_string()).unwrap();
+        while !matches!(
+            pending.next_action().unwrap(),
+            LoopAction::Turn {
+                kind: LoopTurnKind::Closing,
+                ..
+            }
+        ) {
+            pending.acknowledge().unwrap();
+        }
+        pending.submit_reply(DRAFT.to_string()).unwrap();
+        let saved = pending.snapshot();
+        let mut restored = driver(LoopSpec::default()).with_resume_state(saved);
+        let mut host = StubHost::new::<&str>(&[]).closing_script(&[FINAL]);
+        let state = restored.run(&mut host).unwrap();
+        assert_eq!(
+            host.closing_prompts.len(),
+            1,
+            "the completed draft is not requested twice"
+        );
+        assert!(host.closing_prompts[0].contains(DRAFT));
+        assert_eq!(state.final_summary, FINAL);
+        assert_eq!(restored.raw_closing_result(), Some(FINAL));
     }
 
     #[test]
@@ -1875,9 +2111,19 @@ mod tests {
     #[test]
     fn a_resumed_run_carries_its_predecessors_turn_count_and_phase() {
         let mut first = StubHost::new(&routing(3));
-        let mut driver = driver(phased(vec![think(), argue(), rethink()]));
+        let mut driver = driver(phased(vec![think(), argue(), rethink()])).with_max_turns(6);
         driver.run(&mut first).unwrap();
+        // Delivery is the checkpoint boundary. The final snapshot alone would
+        // hide a participant whose progress was published one turn too late.
+        assert_eq!(first.checkpoints[1]["phases"]["pending"], json!(["Bob"]));
+        assert_eq!(first.checkpoints[3]["phases"]["index"], json!(1));
+        assert_eq!(first.checkpoints[3]["phases"]["rounds_run"], json!(1));
         let saved = driver.snapshot();
+        assert_eq!(
+            first.checkpoints.last().unwrap()["turn_count"],
+            saved["turn_count"]
+        );
+        assert_eq!(first.checkpoints.last().unwrap()["phases"], saved["phases"]);
 
         let mut resumed = StubHost::new(&["END_SESSION", "Summary."]);
         let state =
@@ -1896,6 +2142,76 @@ mod tests {
             "{:?}",
             resumed.directives
         );
+        // Explicit stepping treats a completed continuation as terminal; only
+        // the legacy run adapter opts into extending a finished run.
+        let mut terminal =
+            OrchestratorLoop::new(phased(vec![think(), argue(), rethink()]), "Mod", names())
+                .with_resume_state(saved);
+        assert!(matches!(
+            terminal.next_action().unwrap(),
+            LoopAction::Complete { .. }
+        ));
+
+        // A paid orchestrator reply has already selected Alice and advanced
+        // the phase. Resume must consume that pending route, not ask Mod again.
+        let mut pending = OrchestratorLoop::new(phased(vec![think(), argue()]), "Mod", names());
+        assert!(matches!(
+            pending.next_action().unwrap(),
+            LoopAction::Directive { .. }
+        ));
+        pending.acknowledge().unwrap();
+        pending
+            .submit_reply("NEXT_PHASE. @Alice, go.".to_string())
+            .unwrap();
+        while !matches!(pending.next_action().unwrap(), LoopAction::Turn { .. }) {
+            pending.acknowledge().unwrap();
+        }
+        let action = pending.next_action().unwrap();
+        assert!(
+            matches!(&action, LoopAction::Turn { agent, kind: LoopTurnKind::Participant, .. } if agent == "Alice")
+        );
+        let pending_snapshot = pending.snapshot();
+        let mut restored = OrchestratorLoop::new(phased(vec![think(), argue()]), "Mod", names())
+            .with_resume_state(pending_snapshot.clone());
+        assert_eq!(
+            restored.snapshot(),
+            pending_snapshot,
+            "saving a restored loop before its first step preserves the continuation"
+        );
+        assert_eq!(restored.next_action().unwrap(), action);
+        let mut host = StubHost::new(&["END_SESSION", "Summary."]);
+        restored.run(&mut host).unwrap();
+        assert_eq!(host.senders(), ["Alice", "Mod"]);
+        assert_eq!(host.routed[0].0, "Alice");
+        assert!(host.routed[0].1.contains("[Phase: argue]"));
+        assert_eq!(
+            host.briefed.len(),
+            1,
+            "the original orchestrator request was not replayed"
+        );
+
+        for (field, count) in [
+            ("turn_count", -1),
+            ("turn_count", i64::MAX),
+            ("round_in_phase", -1),
+            ("round_in_phase", i64::MAX),
+            ("rounds_run", i64::MAX),
+        ] {
+            let mut corrupt = Value::Object(pending.snapshot());
+            if field == "turn_count" {
+                corrupt["turn_count"] = json!(count);
+                corrupt["scheduler"]["state"]["turn_count"] = json!(count);
+            } else {
+                corrupt["phases"][field] = json!(count);
+                if field == "rounds_run" {
+                    corrupt["scheduler"]["state"][field] = json!(count);
+                }
+            }
+            let mut restored =
+                OrchestratorLoop::new(phased(vec![think(), argue()]), "Mod", names())
+                    .with_resume_state(corrupt.as_object().unwrap().clone());
+            assert!(restored.next_action().is_err(), "{field}={count}");
+        }
     }
 
     #[test]

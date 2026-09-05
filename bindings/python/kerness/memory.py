@@ -77,11 +77,30 @@ class MemoryStore(ABC):
         return None
 
     def close(self) -> None:
-        """The store's last word, after everything that could write has.
+        """Settle the store when used outside a session run.
 
-        Called once at the end of ``run()``. A store that consolidates,
-        indexes, or flushes does it here.
+        The default :meth:`close_run` calls this for existing stores that
+        flush resources here. Paid work belongs in :meth:`maintain_scope`.
         """
+
+    def maintenance_scopes(self) -> list[str]:
+        """List scopes needing maintenance after successful completion.
+
+        Listing must not call a provider or perform maintenance. The Rust
+        engine schedules each scope separately and meters its provider calls.
+        """
+        return []
+
+    def maintain_scope(self, scope: str) -> None:
+        """Maintain one listed scope with at most one logical provider call."""
+
+    def close_run(self) -> None:
+        """Flush and release resources after completion, failure or cancellation.
+
+        Also used when a run is abandoned. This must not start provider work;
+        framework dispatch refuses provider calls during cleanup.
+        """
+        self.close()
 
     def budget(self) -> int | None:
         """The character ceiling one scope may hold, or ``None`` for none.

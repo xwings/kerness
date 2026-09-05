@@ -34,18 +34,19 @@ the pure-Rust caller the crate exists for unrepresented.
 
 ## Status
 
-`done`
+`done` — final Rust gate: 407 unit tests, 118 integration tests, and one
+doctest; final rebuilt Python gate: 502 tests. All passed.
 
 ## Code Structure
 
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/tests/common/mod.rs` | the doubles all eight files share |
-| `crates/kerness/tests/*.rs` | one file per behaviour cluster, 109 tests |
+| `crates/kerness/tests/*.rs` | one file per behaviour cluster, 118 tests |
 | `bindings/python/tests/conftest.py` | the Python suite's equivalent doubles |
-| `bindings/python/tests/test_*.py` | 26 modules, 494 tests |
-| `crates/kerness/examples/*.rs` | 8 examples, compiled by CI |
-| `bindings/python/examples/` | 7 Python examples, walked by `bindings/python/tests/test_examples.py` |
+| `bindings/python/tests/test_*.py` | 26 modules, 502 tests |
+| `crates/kerness/examples/*.rs` | 10 examples, compiled by CI |
+| `bindings/python/examples/` | Python examples, walked by `bindings/python/tests/test_examples.py` |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
 | `.github/workflows/release.yml` | wheels, sdist, the clean-interpreter check, and the PyPI upload it gates |
 
@@ -69,7 +70,7 @@ tolerate a neighbour writing through the same slot, and asserts with `contains`
 rather than equality — `crates/kerness/src/channel.rs:443`. A test that reads
 back the exact question *its own* double recorded cannot, because a neighbour
 installing over the slot mid-body takes that recording away; those installs take
-turns on a static mutex — `crates/kerness/src/access.rs:1111`. Neither is
+turns on a static mutex — `crates/kerness/src/access.rs:1125`. Neither is
 optional. Skipping the second is not a flaky test but a race, and it fails as an
 index out of bounds on an empty recording, which names the assertion rather than
 the seam.
@@ -101,12 +102,12 @@ The eight integration files:
 
 | File | n | What it proves |
 | --- | --- | --- |
-| `session_run.rs` | 21 | A run end to end: turns, `phase_reached`, `end_reason`, parsed result fields, transcript against channel, per-agent providers, `@MEMORY:` stripped from what is delivered; session defaults filling an agent's unset options, and an agent with its own provider and no model named as an error; a role seating an agent by declaration and never by prose, and a missing role file refused at the `add_agent` that named it |
+| `session_run.rs` | 24 | A run end to end: turns, `phase_reached`, `end_reason`, parsed result fields, transcript against channel, per-agent providers, `@MEMORY:` stripped from what is delivered; session defaults filling an agent's unset options, and an agent with its own provider and no model named as an error; a role seating an agent by declaration and never by prose, and a missing role file refused at the `add_agent` that named it |
 | `harness_contract.rs` | 16 | Participant bounds collected into one error; `tools:` and `context:` each naming nothing registered, and each narrowing what was; a context source that fails stopping the run before any provider call; `Skill` refused as a tool name; `skills:` unioning; phase rounds clamped; every built-in gameplan declaring `terminate_on` |
-| `tools_e2e.rs` | 17 | The tool loop inside a real turn, in all three dialects; unknown tool, schema violation and failing handler each answered as text rather than raised; `MAX_INVALID_CALLS`; `max_tool_iterations`; `tool_results_in_history` both ways; an agent's own `tools` narrowing what it is offered, an empty list leaving it none, a tool it gave up refused at dispatch too, and one the session withheld refused before the run |
-| `access_e2e.rs` | 15 | Default-deny; each allow rule; an allowed command still held to the hosts it names; `set_exec` rebuilding the manager; reads outside `allowed_dirs`; `..` denied after resolution; symlink escape; a root confining a read, a write and a command's working directory; an agent root narrowing the session's, and a wider one refused by name |
+| `tools_e2e.rs` | 18 | The tool loop inside a real turn, in all three dialects; unknown tool, schema violation and failing handler each answered as text rather than raised; `MAX_INVALID_CALLS`; `max_tool_iterations`; `tool_results_in_history` both ways; an agent's own `tools` narrowing what it is offered, an empty list leaving it none, a tool it gave up refused at dispatch too, and one the session withheld refused before the run |
+| `access_e2e.rs` | 17 | Default-deny; each allow rule; an allowed command still held to the hosts it names; `set_exec` rebuilding the manager; reads outside `allowed_dirs`; `..` denied after resolution; symlink escape; a root confining a read, a write and a command's working directory; an agent root narrowing the session's, and a wider one refused by name |
 | `skills_e2e.rs` | 13 | Only name and description reach the prompt; the body arrives for one turn; a repeat load says so; `allowed-tools` narrowing and unioning; `requires-tools` adding back past a gameplan's own list, and refused before the run when nobody registered it |
-| `resume.rs` | 9 | A snapshot every turn; a second `run()` continuing; identity mismatch naming the field; bad JSON, wrong version and missing file each handled |
+| `resume.rs` | 12 | A snapshot every turn; a second `run()` continuing; identity mismatch naming the field; bad JSON, wrong version and missing file each handled |
 | `compaction_e2e.rs` | 8 | A small ceiling compacting, the anchor turn kept, the count recorded, and history untouched when the summarizer returns nothing |
 | `public_api.rs` | 10 | The well-known constants, the shared request defaults, the crate version, the `lib.rs` re-exports, and every built-in asset loading — gameplans, personas, skills, and every role carrying a position and a prompt — the Rust half of what the self-check proves for Python; also that a session assembles from the public API alone, that a provider written outside the crate is a `Provider`, and that a reasoning effort round-trips as its name |
 
@@ -136,16 +137,16 @@ The eight integration files:
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-cargo test --workspace -q                             # pass = 401 unit + 109 integration, 0 failed
-cargo build -p kerness --examples                     # pass = all 8 compile
+cargo test --workspace -q                             # pass = 407 unit + 118 integration + 1 doctest
+cargo build -p kerness --examples                     # pass = all 10 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 494 passed
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 502 passed
 ```
 
 The wheel is built from `bindings/python/`, where `pyproject.toml` lives:
 
 ```sh
-cd bindings/python && ../../.venv/bin/maturin develop # pass = "Installed kerness-0.1.0"
+cd bindings/python && ../../.venv/bin/maturin develop # pass = installed workspace version
 ```
 
 CI runs those, plus `cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D
@@ -162,9 +163,11 @@ project does not own.
 - The integration tests never reach the network, so the four provider backends
   are proved only down to the request they build. Nothing here catches an
   endpoint changing its response shape.
-- Every example except `offline_debate` is compiled but not run, because the
-  rest need a key. Compilation catches an API that moved; it does not catch an
-  example that runs and does the wrong thing.
+- The offline Rust examples `offline_debate`, `host_control`, and
+  `resume_approval` were run at the final gate, together with the Python
+  `host_control.py` example. Examples requiring live provider credentials are
+  compiled/imported without sending requests; external endpoint behavior stays
+  outside the offline suite.
 - CI runs on Linux only. The wheels for macOS and Windows are built at release
   time and their tests are not run there, so a platform-specific break arrives
   as a bad wheel rather than a red build.

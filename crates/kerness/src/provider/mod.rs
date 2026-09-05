@@ -20,6 +20,7 @@ use crate::logging;
 use crate::pyfmt;
 use crate::tooling::{ToolCall, ToolSpec};
 use crate::toolschema::{parse_openai_tool_calls, tool_schemas, ToolDialect};
+use crate::usage;
 use crate::utils::retry;
 
 pub use claude::{
@@ -39,7 +40,7 @@ pub use openrouter::{OpenRouterConfig, OpenRouterProvider, OPENROUTER_BASE_URL};
 pub const DEFAULT_REQUEST_TIMEOUT_SEC: u64 = 60;
 /// Extra attempts after the first, so this many retries means this many + 1 calls.
 pub const DEFAULT_RETRIES: u32 = 2;
-/// Seconds to wait before the first retry, doubled for each one after it.
+/// Seconds to wait before the first retry; later waits grow by this amount.
 pub const DEFAULT_BACKOFF_SEC: f64 = 2.0;
 /// The sampling temperature a backend asks for when its caller names none.
 pub const DEFAULT_TEMPERATURE: f64 = 1.0;
@@ -110,14 +111,14 @@ impl std::fmt::Display for ReasoningEffort {
 /// holds the decoded JSON when the caller asked for structured output. Keeping
 /// them means a caller never has to re-issue a request to see something the
 /// provider already sent.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderResponse {
     /// The text the model produced. Empty on a pure tool-calling turn.
     pub content: String,
     /// The model that answered, as the backend named it.
     pub model: String,
-    /// Token counts as reported, un-normalized — backends disagree on the key
-    /// names and inventing a common set would mean discarding what was sent.
+    /// Token counts as reported, unchanged. Run accounting derives a separate
+    /// [`crate::usage::NormalizedUsage`] without discarding backend detail.
     pub usage: Map<String, Value>,
     /// The response body, untouched.
     pub raw: Value,
@@ -182,7 +183,7 @@ impl ProviderBase {
 
 impl Default for ProviderBase {
     fn default() -> Self {
-        ProviderBase::new(2, 2.0, None)
+        ProviderBase::new(DEFAULT_RETRIES, DEFAULT_BACKOFF_SEC, None)
     }
 }
 
@@ -307,7 +308,7 @@ pub trait Provider: Send + Sync {
     }
 }
 
-// The four supplied methods, written once as free functions so they can be run
+// The supplied methods, written once as free functions so they can be run
 // against a provider without being the thing that provider's own method calls.
 // The Python bindings need exactly that: `Provider.effective_dialect` in Python
 // has to forward down here, and what it forwards to cannot be the trait method
@@ -438,7 +439,9 @@ pub fn supplied_chat_with_retries<P: Provider + ?Sized>(
 ) -> Result<ProviderResponse> {
     let base = provider.base();
     let attempt = || {
-        let response = provider.chat_dispatch(model, messages, tools, effort)?;
+        let response = usage::observe_provider_call(provider.name(), model, purpose, || {
+            provider.chat_dispatch(model, messages, tools, effort)
+        })?;
         // A native tool-use response legitimately carries empty text, so
         // emptiness is only an error when there is no tool call either.
         if response.content.trim().is_empty() && response.tool_calls.is_empty() {
@@ -480,12 +483,14 @@ pub fn supplied_chat_dispatch<P: Provider + ?Sized>(
     tools: Option<&[ToolSpec]>,
     effort: ReasoningEffort,
 ) -> Result<ProviderResponse> {
-    if tools.is_some_and(|tools| !tools.is_empty())
-        && provider.effective_dialect() != ToolDialect::Text
-    {
-        return provider.chat(model, messages, tools, effort);
-    }
-    provider.chat(model, messages, None, effort)
+    usage::observe_attempt(provider.name(), model, || {
+        if tools.is_some_and(|tools| !tools.is_empty())
+            && provider.effective_dialect() != ToolDialect::Text
+        {
+            return provider.chat(model, messages, tools, effort);
+        }
+        provider.chat(model, messages, None, effort)
+    })
 }
 
 /// The body every OpenAI-compatible endpoint takes, before the parts that
@@ -822,6 +827,10 @@ mod tests {
         assert_eq!(bare.content, "hi");
         assert_eq!(bare.model, "");
         assert!(bare.usage.is_empty());
+        assert_eq!(
+            usage::NormalizedUsage::from_reported(&bare.usage),
+            usage::NormalizedUsage::default()
+        );
         assert_eq!(bare.raw, Value::Null);
         assert_eq!(bare.structured, None);
     }
@@ -854,6 +863,10 @@ mod tests {
         assert_eq!(response.content, "parsed reply");
         assert_eq!(response.model, "actual/model");
         assert_eq!(response.usage["prompt_tokens"], json!(5));
+        let counts = usage::NormalizedUsage::from_reported(&response.usage);
+        assert_eq!(counts.input_tokens, Some(5));
+        assert_eq!(counts.total_tokens, None);
+        assert_eq!(response.raw["usage"], json!({"prompt_tokens": 5}));
     }
 
     #[test]
@@ -1101,45 +1114,74 @@ mod tests {
 
     #[test]
     fn the_budget_is_spent_only_on_failure_and_then_reported() {
+        use crate::usage::{BudgetExceeded, RunBudget, UsageCollector};
+
         let provider = OpenRouterProvider::new(OpenRouterConfig {
             api_key: "sk-test".to_string(),
             retries: 2,
             backoff_sec: 0.0,
             ..OpenRouterConfig::default()
         });
-
-        let (guard, recorder) = install(vec![reply("ok", "m", json!({}))]);
-        assert_eq!(
-            provider
-                .chat_with_retries("m", &[], "test", None, ReasoningEffort::High)
-                .unwrap()
-                .content,
-            "ok"
-        );
+        let measured = || UsageCollector::new(RunBudget::default(), vec![]).unwrap();
+        let run = |collector: &UsageCollector| {
+            collector.provider_call("alice", provider.name(), "m", "test", || {
+                provider.chat_with_retries("m", &[], "test", None, ReasoningEffort::High)
+            })
+        };
+        let known_usage = json!({"prompt_tokens": 2, "completion_tokens": 3});
+        let (guard, recorder) = install(vec![reply("ok", "m", known_usage.clone())]);
+        let collector = measured();
+        assert_eq!(run(&collector).unwrap().content, "ok");
         assert_eq!(recorder.count(), 1);
+        let ledger = collector.snapshot();
+        assert_eq!(ledger.totals.provider_operations, 1);
+        assert_eq!(ledger.totals.failed_operations, 0);
+        assert_eq!(ledger.totals.usage.total_tokens, Some(5));
+        assert!(!ledger.records[0].opaque);
+        assert_eq!(ledger.records[0].actor, "alice");
         drop(guard);
 
         let (guard, recorder) = install(vec![
             Err(Error::session("fail")),
-            reply("ok", "m", json!({})),
+            reply("ok", "m", known_usage),
         ]);
-        assert_eq!(
-            provider
-                .chat_with_retries("m", &[], "test", None, ReasoningEffort::High)
-                .unwrap()
-                .content,
-            "ok"
-        );
+        let collector = measured();
+        assert_eq!(run(&collector).unwrap().content, "ok");
         assert_eq!(recorder.count(), 2);
+        let ledger = collector.snapshot();
+        assert_eq!(ledger.totals.provider_operations, 2);
+        assert_eq!(ledger.totals.failed_operations, 1);
+        assert_eq!(ledger.totals.usage.total_tokens, None);
+        assert_eq!(ledger.records[1].usage.total_tokens, Some(5));
         drop(guard);
 
-        let (_guard, _recorder) = install(vec![Err(Error::session("always fail"))]);
-        let error = provider
-            .chat_with_retries("m", &[], "test", None, ReasoningEffort::High)
-            .expect_err("the budget runs out");
+        let (guard, recorder) = install(vec![Err(Error::session("always fail"))]);
+        let collector = measured();
+        let error = run(&collector).expect_err("the retry budget runs out");
         assert!(
             error.to_string().starts_with("All retries exhausted"),
             "{error}"
+        );
+        assert_eq!(recorder.count(), 3);
+        assert_eq!(collector.snapshot().totals.provider_operations, 3);
+        assert_eq!(collector.snapshot().totals.failed_operations, 3);
+        drop(guard);
+
+        let (_guard, recorder) = install(vec![Err(Error::session("always fail"))]);
+        let collector = UsageCollector::new(
+            RunBudget {
+                max_provider_operations: Some(1),
+                ..RunBudget::default()
+            },
+            vec![],
+        )
+        .unwrap();
+        assert!(run(&collector).is_err());
+        assert_eq!(recorder.count(), 1, "the run limit gates retry attempts");
+        assert_eq!(collector.snapshot().totals.provider_operations, 1);
+        assert_eq!(
+            collector.blocked_reason(),
+            Some(BudgetExceeded::ProviderOperations)
         );
     }
 
@@ -1589,9 +1631,15 @@ mod tests {
             ..OpenAiConfig::default()
         })
         .unwrap();
-        let response = provider
-            .chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
+        let collector =
+            crate::usage::UsageCollector::new(crate::usage::RunBudget::default(), vec![]).unwrap();
+        let response = collector
+            .provider_call("alice", provider.name(), "m", "turn", || {
+                provider.chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
+            })
             .expect("the degrade latch salvages the turn");
+        assert_eq!(collector.snapshot().totals.provider_operations, 2);
+        assert_eq!(collector.snapshot().totals.failed_operations, 1);
 
         assert_eq!(response.content, "plain reply");
         assert_eq!(recorder.count(), 2);
@@ -1614,12 +1662,17 @@ mod tests {
             ..OpenAiConfig::default()
         })
         .unwrap();
-        let error = provider
-            .chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
+        let collector = usage::UsageCollector::new(usage::RunBudget::default(), vec![]).unwrap();
+        let error = collector
+            .provider_call("alice", provider.name(), "m", "turn", || {
+                provider.chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
+            })
             .expect_err("the endpoint refuses everything");
 
         assert!(error.is_provider(), "{error}");
         assert_eq!(recorder.count(), 2);
+        assert_eq!(collector.snapshot().totals.provider_operations, 2);
+        assert_eq!(collector.snapshot().totals.failed_operations, 2);
     }
 
     #[test]
@@ -1639,9 +1692,21 @@ mod tests {
             backoff_sec: 0.0,
             ..CustomConfig::default()
         });
-        let response = provider
-            .chat_with_retries("m", &[], "turn", Some(&[cmd_spec()]), ReasoningEffort::High)
+        let collector =
+            crate::usage::UsageCollector::new(crate::usage::RunBudget::default(), vec![]).unwrap();
+        let response = collector
+            .provider_call("alice", provider.name(), "m", "turn", || {
+                provider.chat_with_retries(
+                    "m",
+                    &[],
+                    "turn",
+                    Some(&[cmd_spec()]),
+                    ReasoningEffort::High,
+                )
+            })
             .expect("the degrade latch salvages the turn");
+        assert_eq!(collector.snapshot().totals.provider_operations, 2);
+        assert_eq!(collector.snapshot().totals.failed_operations, 1);
 
         assert_eq!(response.content, "plain reply");
         assert_eq!(recorder.payload().get("tools"), None);

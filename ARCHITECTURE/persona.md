@@ -27,13 +27,13 @@ persona says can change where its agent sits.
 | ---- | ---- |
 | `crates/kerness/src/persona.rs` | loading, path resolution, and prompt rendering |
 | `crates/kerness/assets/personas/*.md` | the built-in personas |
-| `bindings/python/src/types.rs:1065` | `PyPersonaConfig` |
+| `bindings/python/src/types.rs:1027` | `PyPersonaConfig` |
 | `bindings/python/kerness/persona_loader.py` | re-export shim |
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/persona.rs:17` — `PersonaConfig` — the parsed frontmatter
-  fields plus the body.
+- `crates/kerness/src/persona.rs:17` — `PersonaConfig` — the name and Markdown
+  sections for persona, background, and communication style.
 - `crates/kerness/src/persona.rs:36` — `load_persona(path, search)` — `search` is
   the ordered list of directories tried before the built-ins, which is how a
   gameplan can ship personas beside it.

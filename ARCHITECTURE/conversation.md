@@ -20,7 +20,7 @@ transcript, and lets a resumed session restore each independently.
 | ---- | ---- |
 | `crates/kerness/src/conversation.rs` | `ChatMessage`, `Message`, `Turn`, `Conversation` |
 | `bindings/python/src/runtime.rs` | `PyConversation` |
-| `bindings/python/src/types.rs` | `PyMessage` (`:486`), `PyTurn` (`:565`) |
+| `bindings/python/src/types.rs` | `PyMessage` (`:488`), `PyTurn` (`:567`) |
 | `bindings/python/kerness/conversation.py` | re-export shim |
 
 ## Key Types and Entry Points
@@ -31,7 +31,7 @@ transcript, and lets a resumed session restore each independently.
   transcript shape a human reads.
 - `crates/kerness/src/conversation.rs:58` — `Turn` — a speaker, a round index, and
   a message type; `render()` at `:91` is how it becomes a `ChatMessage`.
-- `crates/kerness/src/conversation.rs:122` — `directive(content)` — a system-role
+- `crates/kerness/src/conversation.rs:122` — `directive(content)` — a user-role
   instruction inserted into the history.
 - `crates/kerness/src/conversation.rs:136` — `say(speaker, content, round, type)` —
   the normal path: appends to both the turns and the transcript.

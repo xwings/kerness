@@ -31,7 +31,7 @@ what an agent can do with it.
 
 - `crates/kerness/src/skill/loader.rs:27` — `SkillConfig` — name, description,
   body, base directory, the optional allowed-tools list, and the required-tools
-  list at `:46`.
+  list at `:45`.
 - `crates/kerness/src/skill/loader.rs:56` — `bundle_paths()` — the `scripts/` and
   `references/` directories that exist; these are what get granted.
 - `crates/kerness/src/skill/loader.rs:23` — `BUNDLE_DIRS` — `["scripts", "references"]`.
@@ -43,22 +43,22 @@ what an agent can do with it.
 - `crates/kerness/src/skill/runtime.rs:38` — `SKILL_TOOL_NAME` — `"Skill"`, the one
   reserved tool name (`harness.rs:25`).
 - `crates/kerness/src/skill/runtime.rs:80` — `SkillActivation` — the skills
-  available to one agent; `load(name)` at `:135` is what the `Skill` tool calls,
+  available to one agent; `load(name)` at `:146` is what the `Skill` tool calls,
   and it is where bundle paths are granted.
-- `crates/kerness/src/skill/runtime.rs:112` — `gate()` — the union of every active
+- `crates/kerness/src/skill/runtime.rs:123` — `gate()` — the union of every active
   skill's allowed tools, or `None` when no active skill narrows anything.
-- `crates/kerness/src/skill/runtime.rs:122` — `required()` — the union of every
+- `crates/kerness/src/skill/runtime.rs:133` — `required()` — the union of every
   active skill's required tools.
-- `crates/kerness/src/skill/runtime.rs:193` — `fold(state, skill)` — folds one
+- `crates/kerness/src/skill/runtime.rs:204` — `fold(state, skill)` — folds one
   loaded skill into the activation state: its requirements accumulate, its gate
   unions in.
-- `crates/kerness/src/skill/runtime.rs:212` — `SkillRegistry` — per-agent
-  activations; `activation_for(name)` at `:228`, `build_tool(activation)` at `:241`.
-- `crates/kerness/src/skill/runtime.rs:274` — `apply_gate(tools, gate)` — narrows a
+- `crates/kerness/src/skill/runtime.rs:223` — `SkillRegistry` — per-agent
+  activations; `activation_for(name)` at `:239`, `build_tool(activation)` at `:252`.
+- `crates/kerness/src/skill/runtime.rs:285` — `apply_gate(tools, gate)` — narrows a
   tool list. `None` and an empty set mean opposite things: no declaration versus a
   declaration that permits nothing, which is why `SkillConfig.allowed_tools`
   stays `Option` all the way to Python.
-- `crates/kerness/src/skill/runtime.rs:294` — `admit_required(tools, registered,
+- `crates/kerness/src/skill/runtime.rs:305` — `admit_required(tools, registered,
   required)` — the one additive step, applied after `apply_gate`.
 - `crates/kerness/src/skill/runtime.rs:59` — `format_skills_index(skills)` — the
   index block in the agent's system prompt.

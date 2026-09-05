@@ -20,7 +20,7 @@ Two properties follow from that and shape every decision below:
   and then does nothing is a bug, not a reserved word.
 - **Everything is synchronous.** There is no executor, no async runtime, and no
   hidden concurrency. A session runs on the calling thread, and a stack trace
-  from inside a tool handler reaches all the way back to `Session::run`.
+  from inside a tool handler reaches the calling `SessionRun::step` or `Session::run`.
 
 Kerness ships as two artifacts from one repository: a **Rust crate** for callers
 who want the framework in a Rust program, and a **Python extension** for callers
@@ -33,7 +33,7 @@ Rust.** The crate implements it, the extension exposes it, and the installed
 Python package does one of five things and nothing else: declares a class
 callers subclass (`Provider`, `Channel`, `MemoryStore`), declares one the
 extension cannot
-(the exception hierarchy's two-argument constructors, `ToolDialect` as a real
+(the exception hierarchy's structured constructors, `ToolDialect` as a real
 `enum.Enum`, `AccessPolicy` as a dataclass whose contract is written in Python
 list semantics), reads a signature with `inspect`, validates with `pydantic`,
 or re-exports a name. Every other `.py` in the package is a shim.
@@ -59,7 +59,7 @@ and only its delivery crosses:
 | Python | **3.10+**, CPython, via the stable ABI (`abi3-py310`) |
 | Bindings | `pyo3` 0.23 with `extension-module` |
 | Build | `cargo` for the crate, `maturin` for the wheel |
-| Platform | Linux and macOS; developed on Linux x86-64. `ureq` + `rustls` reach further, but path confinement resolves every path from `/` — `crates/kerness/src/access.rs:698` — so the access boundary assumes POSIX paths |
+| Platform | Linux and macOS; developed on Linux x86-64. `ureq` + `rustls` reach further, but path confinement resolves every path from `/` — `crates/kerness/src/access.rs:713` — so the access boundary assumes POSIX paths |
 | Network | Outbound HTTPS only, to provider endpoints the caller names |
 | Runtime deps | None beyond the crate's Cargo dependencies; `pydantic` is optional and only for structured output |
 
@@ -83,17 +83,17 @@ root carries one manifest — `Cargo.toml`. A Python build starts from
 Cargo.toml                  workspace root, shared dependency versions
 crates/
   kerness/                  the framework — pure Rust, links no Python
-    src/                    30 top-level modules plus provider/ and skill/,
+    src/                    31 top-level modules plus provider/, skill/, and session/,
                             documented by subsystem in the Index
     assets/                 built-in gameplans, roles, personas, skills
-    tests/                  109 integration tests over the crate's public surface
-    examples/               8 harnesses driven from Rust alone
+    tests/                  integration tests over the crate's public surface
+    examples/               10 harnesses driven from Rust alone
 bindings/
   python/                   everything the wheel is built from
     pyproject.toml          the wheel's manifest; `pip install .` runs here
     Cargo.toml              the `kerness-py` crate, a workspace member
     LICENSE  README.md      symlinks to the root copies
-    src/                    12 modules, one per boundary concern
+    src/                    13 modules, one per boundary concern
     kerness/                the installed Python package
       __init__.py           bootstrap + public surface
       *.py                  per-subsystem re-export shims
@@ -147,37 +147,46 @@ directly.
 1. `import kerness` runs `bindings/python/kerness/__init__.py`.
 2. Line 12 calls `_core.bootstrap(exceptions, _enums.ToolDialect, <package dir>)`.
    The extension cannot declare three things itself, so they are handed down:
-   the exception classes (two-argument constructors a `create_exception!` cannot
+   the exception classes (structured constructors a `create_exception!` cannot
    express), the `ToolDialect` enum (callers compare members with `is`, so it
    must be a real `enum.Enum`), and the assets root (only the package knows where
    pip put it). `bootstrap` then installs all four seams — transport, console
-   writer, logger, console prompt — at `bindings/python/src/lib.rs:34`, which is
+   writer, logger, console prompt — at `bindings/python/src/lib.rs:36`, which is
    why an import is enough and no caller wires anything.
 3. The remaining imports pull the public names out of the per-subsystem shims.
 4. The caller builds a `Session(...)`, registers agents, tools, and skills,
-   and calls `run()`.
+   and calls `run()` or consumes the configuration with `start()` to step it.
 
 ### From Rust
 
 1. The caller sets `kerness::assets::set_root(...)` if the built-in gameplans are
    wanted from outside the crate directory, otherwise `$KERNESS_ASSETS` or
    `$CARGO_MANIFEST_DIR/assets` resolves it — `crates/kerness/src/assets.rs:38`.
-2. `SessionConfig { .. }` → `Session::new` → `add_agent` → `run`.
+2. `SessionConfig { .. }` → `Session::new` → registration → `start` / `run`.
 
-### Inside `run()`
+### Preparation and execution
 
-`Session::run` (`crates/kerness/src/session.rs:891`) is the whole harness:
-it resolves the gameplan's harness spec against what was registered, fills every
-agent's unset option and narrows the tool and context lists each one may use,
-builds the skill registry and access manager, opens every memory scope through
-the installed store, calls every permitted context source once per agent, seeds
-the `Conversation`, then either runs the
-round-robin participant loop or hands control to `OrchestratorLoop::run`
-(`crates/kerness/src/orchestrator.rs:462`) when the gameplan declares an
-orchestrator. Each agent turn goes through `AgentRunner::run`
-(`crates/kerness/src/agent_runtime.rs:129`), which is the provider-call /
-tool-call / feed-results cycle. A `SessionResult` comes back with the transcript,
-the phase reached, the end reason, and the parsed result fields.
+`Session::start` (`crates/kerness/src/session.rs:914`) consumes configuration,
+resolves and validates the roster, prompts, skills, tools, context and access,
+opens the memory scopes, and returns an owned `SessionRun`. Live agent turns
+remain typed Rust values; serialization belongs to checkpoints. Its state
+machine advances synchronous provider calls, individual tools, scheduler effects,
+and memory maintenance through `step`. Host-driven mode accepts explicit agent
+selection and validated results; automatic mode follows the gameplan and requires
+an orchestrator. An explicit harness role requirement applies in both modes.
+
+`Session::run` (`crates/kerness/src/session.rs:900`) drives this same engine with
+legacy result coercion, provider error placeholders and synchronous approval
+callbacks. The additive `start` API uses strict outcomes and external approvals
+by default. Python forwards to these Rust entry points.
+
+[run.md](ARCHITECTURE/run.md) owns live state, events, capabilities, cancellation,
+approvals, outcomes and recovery. [session.md](ARCHITECTURE/session.md) owns
+configuration and preparation. [loop.md](ARCHITECTURE/loop.md) and
+[agent-runtime.md](ARCHITECTURE/agent-runtime.md) own scheduling and agent turns.
+[sessionfile.md](ARCHITECTURE/sessionfile.md) owns schema validation and atomic
+checkpoint publication; [access.md](ARCHITECTURE/access.md) owns POSIX command
+deadlines, process-group cleanup and output draining.
 
 ## Well-Known Constants
 
@@ -186,27 +195,27 @@ Python package as well as the crate.
 
 | Constant | Value | Owner |
 | --- | --- | --- |
-| `SCHEMA_VERSION` | `1` | `crates/kerness/src/sessionfile.rs:33` |
-| `DEFAULT_MAX_CONTEXT_TOKENS` | `256_000` | `crates/kerness/src/session.rs:56` |
+| `SCHEMA_VERSION` | `2` | `crates/kerness/src/sessionfile.rs:36` |
+| `DEFAULT_MAX_CONTEXT_TOKENS` | `256_000` | `crates/kerness/src/session.rs:66` |
 | `CHARS_PER_TOKEN` | `4` | `crates/kerness/src/compaction.rs:33` |
 | `COMPACT_TO_FRACTION` | `0.5` | `crates/kerness/src/compaction.rs:40` |
-| `OVERFLOW_RETRY_FRACTION` | `0.5` | `crates/kerness/src/session.rs:67` |
-| `MAX_INVALID_CALLS` | `3` | `crates/kerness/src/agent_runtime.rs:41` |
-| `MAX_REPEATED_FAILURES` | `3` | `crates/kerness/src/agent_runtime.rs:52` |
+| `OVERFLOW_RETRY_FRACTION` | `0.5` | `crates/kerness/src/session.rs:77` |
+| `MAX_INVALID_CALLS` | `3` | `crates/kerness/src/agent_runtime.rs:30` |
+| `MAX_REPEATED_FAILURES` | `3` | `crates/kerness/src/agent_runtime.rs:34` |
 | `MEMORY_STALE_AFTER_DAYS` | `1` | `crates/kerness/src/prompting.rs:50` |
-| `DEFAULT_KEEP_ENTRIES` | `20` | `crates/kerness/src/memory.rs:420` |
-| `DEFAULT_MEMORY_BUDGET` | `2_200` | `crates/kerness/src/memory.rs:676` |
-| `ENTRY_SEPARATOR` | `§` | `crates/kerness/src/memory.rs:685` |
+| `DEFAULT_KEEP_ENTRIES` | `20` | `crates/kerness/src/memory.rs:440` |
+| `DEFAULT_MEMORY_BUDGET` | `2_200` | `crates/kerness/src/memory.rs:715` |
+| `ENTRY_SEPARATOR` | `§` | `crates/kerness/src/memory.rs:724` |
 | `DEFAULT_ROLE_FILE` | `participant.md` | `crates/kerness/src/role.rs:66` |
 | `DEFAULT_TERMINATORS` | `CONSENSUS_REACHED`, `END_SESSION` | `crates/kerness/src/utils.rs:12` |
 | `RESERVED_TOOL_NAMES` | `["Skill"]` | `crates/kerness/src/harness.rs:25` |
-| `DEFAULT_TIMEOUT` | 60s | `crates/kerness/src/exec.rs:18` |
-| `ReasoningEffort::default()` | `high` | `crates/kerness/src/provider/mod.rs:63` |
-| `DEFAULT_REQUEST_TIMEOUT_SEC` | `60` | `crates/kerness/src/provider/mod.rs:39` |
-| `DEFAULT_RETRIES` | `2` | `crates/kerness/src/provider/mod.rs:41` |
-| `DEFAULT_BACKOFF_SEC` | `2.0` | `crates/kerness/src/provider/mod.rs:43` |
-| `DEFAULT_TEMPERATURE` | `1.0` | `crates/kerness/src/provider/mod.rs:45` |
-| `DEFAULT_TOP_P` | `1.0` | `crates/kerness/src/provider/mod.rs:47` |
+| `DEFAULT_TIMEOUT` | 60s | `crates/kerness/src/exec.rs:21` |
+| `ReasoningEffort::default()` | `high` | `crates/kerness/src/provider/mod.rs:64` |
+| `DEFAULT_REQUEST_TIMEOUT_SEC` | `60` | `crates/kerness/src/provider/mod.rs:40` |
+| `DEFAULT_RETRIES` | `2` | `crates/kerness/src/provider/mod.rs:42` |
+| `DEFAULT_BACKOFF_SEC` | `2.0` | `crates/kerness/src/provider/mod.rs:44` |
+| `DEFAULT_TEMPERATURE` | `1.0` | `crates/kerness/src/provider/mod.rs:46` |
+| `DEFAULT_TOP_P` | `1.0` | `crates/kerness/src/provider/mod.rs:48` |
 | `DEFAULT_CLAUDE_MAX_TOKENS` | `4096` | `crates/kerness/src/provider/claude.rs:26` |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | `crates/kerness/src/provider/openai.rs:18` |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | `crates/kerness/src/provider/openrouter.rs:15` |
@@ -221,15 +230,42 @@ out in both languages drifts silently; one both sides import cannot.
 
 ## Roadmap
 
-Framework work that is not built yet. Everything else this document describes
-exists and is tested; the [Verification](#verification) gate runs green at the
-end of each of these, not only at the end of the list.
+The M1–M3 core upgrade is implemented in Rust. Python exposes the required
+capabilities through API bindings. Execution remains synchronous, with no hidden
+executor or concurrent agent scheduling.
 
-| Planned | |
-| --- | --- |
-| **Runtime events and a step machine** | A typed synchronous `EventSink` threaded through session, loop, and agent runtime, `Session::step()` so a caller drives the run rather than blocking on `run()`, cancellation between steps, approval as a resumable event rather than a console read, and a defaulted `Provider::chat_streaming` each backend opts into. `Channel` becomes an adapter over the sink. The event protocol and the step machine are one change: an approval-requested event is meaningless if the caller cannot answer it. |
-| **Content parts, a session store, and lifecycle hooks** | `Message.content` becomes typed parts — text, images, structured tool output — which moves `SCHEMA_VERSION` to `2` with a migration, and changes what `CHARS_PER_TOKEN` can claim. A `SessionStore` adds IDs, listing, forking, and replay over today's single-file snapshot. Hooks arrive as an `EventSink` whose handlers can veto, rather than as a second interception mechanism beside the first. |
-| **MCP, subagents, budgets, and bundle-defined tools** | An MCP client as an adapter into the existing tool registry, stdio first because it is synchronous. A sequential subagent primitive — parallel fan-out would be the first breach of *no hidden concurrency* and would need that invariant amended deliberately. Usage and cost aggregated into enforceable budgets that stop a run with a named end reason. And a skill directory that defines its own tools over `run_command`, gated on `trust_skill_bundles`, so a skill ships capability rather than only prose. |
+| Milestone | Status | Delivered behavior and evidence |
+| --- | --- | --- |
+| **M1 — Runtime ownership and tool capabilities** | done | Owned `SessionRun`, complete `ToolSpec` registration, contextual handlers with immutable identity and scoped capabilities. Registration, capability lifetime and resource lifecycle tests pass. |
+| **M2 — Host-driven execution** | done | Shared run/step engine, typed input/events/control, external approval, single-agent host mode, schema-2 continuation, v1 boundary migration and explicit reconciliation. Equivalence, suspended approval, denial, cancellation and interrupted-action tests pass. |
+| **M3 — Outcomes and budgets** | done | Strict result diagnostics, typed terminal and turn reasons, retained committed history, normalized usage and operation/tool/time admission. Token/cost limits require explicit measured-threshold mode. Retry, compaction, maintenance and nested provider accounting tests pass. |
+| **M4 — Adapters and richer sessions** | deferred | Native streaming, workflow adapters, session-store listing/forking, typed content parts, MCP and sequential subagents need separately justified changes. Parallel execution requires revising the synchronous invariant. |
+
+The public contracts and their practical limits belong to
+[run.md](ARCHITECTURE/run.md). Rust examples
+[`host_control`](crates/kerness/examples/host_control.rs) and
+[`resume_approval`](crates/kerness/examples/resume_approval.rs), plus the
+[Python host example](bindings/python/examples/host_control.py), run offline.
+
+Compatibility is additive: existing `ToolSpec`, `ToolHandler`, `Provider` and
+`SessionSnapshot` public shapes remain usable. Host callbacks and providers are
+re-registered on resume; configuration is checked against the saved contract,
+and `binding_version` identifies host implementation changes the engine cannot
+serialize. Arbitrary external effects have no exactly-once guarantee. Restored
+tool intent without a completion record requires reconciliation or cancellation.
+
+Cancellation is cooperative, and a synchronous provider or custom handler may
+block until it returns. Hard token/cost caps are rejected because the provider
+contract supplies no enforceable upper bound per operation; measured thresholds
+may overshoot by the admitted operation. Missing usage stays unknown. See
+[provider.md](ARCHITECTURE/provider.md) for metering details.
+
+M4 adapters must consume these contracts. Streaming needs a transport seam for
+partial output and explicit retry semantics; richer content needs a schema and
+context-accounting change. Workflow and MCP adapters reuse the existing
+execution, access, approval and budget boundaries. Custom tools needing several
+resumable effects require a continuation protocol; synchronous callbacks cannot
+be unwound and replayed for approval.
 
 ## Verification
 
@@ -238,11 +274,15 @@ its own status.
 
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
-cargo test --workspace -q                             # pass = 401 unit + 109 integration, 0 failed
+cargo test --workspace -q --locked                    # pass = 407 unit + 118 integration + 1 doctest
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-cargo build -p kerness --examples                     # pass = all 8 compile
+cargo build -p kerness --examples                     # pass = all 10 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key, no network
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 494 passed
+cargo run -p kerness --example host_control           # pass = validated host result
+cargo run -p kerness --example resume_approval        # pass = restored approval, each tool once
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p kerness
+cargo +1.88.0 check --workspace --all-targets --locked # pass = supported MSRV
+.venv/bin/python -m pytest bindings/python/tests -q   # pass = 502 passed
 .venv/bin/python -m kerness.selfcheck                 # pass = "OK: all core checks passed", exit 0
 .venv/bin/ruff check bindings/python                  # pass = "All checks passed!"
 ```
@@ -251,12 +291,12 @@ The wheel is built from `bindings/python/`, because that is where
 `pyproject.toml` is:
 
 ```sh
-cd bindings/python && ../../.venv/bin/maturin develop   # pass = "Installed kerness-0.1.0"
+cd bindings/python && ../../.venv/bin/maturin develop   # pass = installed workspace version
 ```
 
-`.github/workflows/ci.yml` runs all of the above on every push, plus
-`cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D warnings` and
-`cargo check --workspace --all-targets --locked` on the MSRV toolchain. See
+`.github/workflows/ci.yml` runs the format, test, lint, example-build,
+`offline_debate`, self-check, rustdoc and MSRV checks. The two control/approval
+examples also run locally as upgrade smoke checks. See
 [testing.md](ARCHITECTURE/testing.md).
 
 `maturin` and `python` are not on `PATH` in this workspace; invoke them from
@@ -265,211 +305,148 @@ not matter that the venv is at the root and the command runs two levels down.
 
 ## Development Loop
 
-Coding Discipline governs how code is written. Review Checks govern how it
-is reviewed. This is the loop that runs them, and the gate that ends it.
+Coding Discipline governs writing; Review Checks govern review. This
+loop connects them and defines when work is ready to release.
 
-Code that runs is not code that is done. Done is defined below, it is
-checked rather than felt, and the only way to reach it is to go round.
+```text
+Frame → Write → Prove → Review → Gate
+          ▲          findings      │
+          └────────────────────────┘
+```
 
 ### The loop
 
-```
-      ┌──────────────────────────────────────────────────────┐
-      │                    findings remain                   │
-      ▼                                                      │
-  1. FRAME  →  2. WRITE  →  3. PROVE  →  4. REVIEW  →  5. GATE
-     think       build        evidence     7 checks     done?
-                                                          │
-                                                          ▼
-                                                        ship
-```
+**1. Frame.** Convert the request into a goal with an observable check.
+Inspect the request, code, docs, and repository conventions; record the
+narrowest supported assumptions. Ask one focused question only when a
+required decision cannot be discovered or safely inferred and guessing
+would materially change the result. Once framed, continue without an
+approval pause.
 
-**1. Frame — think before touching code.** Restate the task as a goal
-with a check attached: not "add validation" but "invalid input is
-rejected with a named error, proven by a test that fails today". State
-your assumptions out loud. If the task has more than one reading, present
-them rather than picking silently. If a simpler approach exists, say so
-before building the complicated one. If something is unclear, stop and
-ask — an hour of building on a wrong assumption costs more than the
-question. For multi-step work, write the plan as steps with a check on
-each. Detail: Coding Discipline §1 and §4.
+**2. Write.** Make the smallest change that reaches the goal. Add no
+unrequested features or abstractions, match local style, touch only
+in-scope code, and remove only orphans created by the change.
 
-**2. Write — the smallest change that reaches the goal.** No features
-beyond the ask, no abstraction for a single caller, no configurability
-nobody requested, no error handling for conditions that cannot occur.
-Touch only what the goal requires; match the surrounding style even
-where you would do it differently; clean up the orphans your own change
-created and nothing else. Detail: Coding Discipline §2 and §3.
+**3. Prove.** Run relevant tests and retain observable evidence.
 
-**3. Prove — produce evidence, not belief.** Run the module's **How to
-Test** command and keep the output. A bug fix carries a test that failed
-before the change and passes after; a new capability carries a test of
-the behaviour it claims. "It should work" is not a result, and neither
-is a test you wrote but did not run. If Prove fails, return to Write —
-do not carry a red test into Review.
+*Survey the suite before touching it.* Before adding, changing, merging,
+or deleting any test, inventory the whole suite: enumerate every test
+file and case name, then read in full each test whose subject, fixtures,
+or assertions touch this change. Use a subagent for broad inventory when
+supported. From that inventory decide the complete set of test edits at
+once — what to change, what to add, what to merge, what to remove — each
+backed by `file:line`, then execute only that plan. Never write a test
+before the survey, and never discover existing coverage afterward.
 
-**4. Review — walk all seven checks against your own diff.** Style,
-Naming, Duplication, Quality, Fit, Dependencies, Security, in order, one
-pass each. Change stance rather than merely re-reading: read the diff as
-someone looking for a reason to reject it. Read whole files for
-Duplication and Quality — the hunk hides unused parameters, unreachable
-branches, and forward-only wrappers. The evidence rule binds against
-yourself: a self-review finding without `file:line` is a mood, not a
-finding. Where an independent reviewer is available — another agent,
-another pass, another person — send Fit, Dependencies, and Security
-there; those are the judgements authorship blinds you to hardest.
+The plan obeys four rules:
 
-**5. Gate — check Done, then decide.** Walk the Definition of Done. Every
-box ticked: ship, and report the checklist. Any box unticked: name the
-findings that block it and return to Write with those findings and
-nothing else. Record which box failed — an unexplained extra pass is
-indistinguishable from thrashing.
+- **Reuse or extend first.** Add a case to the test that already owns
+  the behavior or shares its setup, fixtures, and subject. A new test
+  function or file is justified only when the survey found no existing
+  test owning the behavior, or when merging would hide which case
+  failed.
+- **Add only what the goal needs.** A bug fix needs a reproducing
+  regression test; a new capability needs a test of its claimed
+  behavior. Nothing further.
+- **Retire what this change made obsolete.** Delete tests whose behavior
+  no longer exists, and merge tests this change turned into duplicates,
+  citing the surviving test. Leave unrelated pre-existing tests alone;
+  record suspected redundancy under **Open Gaps / Roadmap**.
+- **Never delete to reach green.** A failing test is a finding for
+  Write. Removal requires evidence that its behavior is gone or is still
+  covered elsewhere, cited by `file:line`.
+
+Coverage of claimed behavior must not decrease. A failure returns
+directly to Write, never forward to Review.
+
+**4. Review.** Walk all seven Review Checks as separate passes. Read
+whole affected files, not only the diff. Every finding needs `file:line`
+evidence. Use an independent agent or isolated pass for Fit,
+Dependencies, and Security when available.
+
+**5. Gate.** Apply the Definition of Done. Any unticked criterion,
+`blocker`, or unresolved `major` returns its evidence to Write. All
+criteria passing means the change is ready for public or production
+release. There is no separate approval or reporting phase.
 
 ### Definition of Done
 
-The bar is open-source standard: a maintainer who has never seen this
-change, and cannot ask you anything, could review and merge it from the
-diff and the docs alone. Concretely, all of:
-
 **Correctness**
 
-- The goal stated in Frame is met, and the check named in Frame passes.
-- Tests cover the behaviour the change claims and they pass. A bug fix
-  has a test that fails without it.
-- The owning module's **How to Test** command passes, output recorded.
-- It builds and tests clean from a fresh clone — no uncommitted file it
-  depends on, no step that exists only on your machine.
+- The framed goal and its named check pass.
+- Tests cover claimed behavior and pass; a bug fix has a regression test.
+- The suite was surveyed before any test was written, changed, or
+  deleted; no added test duplicates coverage another test owns, and no
+  removal left claimed behavior uncovered.
+- The owning module's **How to Test** command passes with evidence.
+- The project builds and tests from a fresh clone without local-only
+  dependencies.
 
 **Review**
 
-- All seven Review Checks walked, each with a recorded status. None
-  skipped, none assumed.
-- No `blocker`. No unresolved `major`.
-- Nits applied or consciously declined.
+- All seven Review Checks ran; none was skipped or assumed.
+- No `blocker` or unresolved `major` remains.
+- Nits were applied or consciously declined.
 
-**Legibility — this is the part that makes it open source**
+**Legibility and contract**
 
-- A stranger can build, test, and run it from the README alone.
-- Public names, signatures, and errors are intelligible without reading
-  the implementation. Error messages tell the reader what to do next.
-- Every changed line traces to the stated goal. No drive-by
-  reformatting, no debugging leftovers, no commented-out blocks, no
-  secrets, tokens, or absolute local paths.
-- The commit or PR message says *why*. The diff already says what.
-
-**Contract**
-
-- The architecture docs are current: Review Check 5 passes, and existing
-  `file:line` references still resolve.
-- Breaking changes are called out and justified; deprecations documented.
-- Anything vendored, copied, or newly depended upon is
-  license-compatible and attributed.
-
-"Good enough for me" is not on this list, and neither is "I feel good
-about it" — Coding Discipline §4 rejects exactly that: strong criteria
-let the loop run unattended, weak criteria stall it on your mood. When a
-box cannot be ticked, the loop is not finished. Say which box and why.
+- A new maintainer can build, test, run, and understand public behavior
+  from the docs.
+- Every changed line serves the goal; no drive-by formatting, debugging
+  remnants, commented-out code, secrets, tokens, or local paths remain.
+- Public names, signatures, errors, and recovery are intelligible.
+- Architecture docs and `file:line` references are current.
+- Breaking changes, deprecations, dependencies, licenses, and attribution
+  are handled; commit or PR text explains why.
 
 ### Iterating without thrashing
 
-The loop has to stop. These rules end it in both directions — too early
-and never.
-
-- **Every pass closes a named finding.** "Have another look" is not a
-  pass. If you cannot name what this pass fixes, do not start it.
-- **A pass touches only what its findings name.** A review finding
-  authorises repair, not redesign. Surgical Changes still binds inside
-  the loop, and a review-driven rewrite is the most expensive way to
-  violate it.
-- **Nits alone do not justify a pass.** Batch them into a pass that
-  something real triggered, or decline them and say so.
-- **Re-run Prove after every pass.** A fix that was not re-tested is not
-  a fix, and passes two onward are where regressions enter.
-- **Two consecutive passes that change nothing: stop.** Either it has
-  converged — ship — or you are stuck. Say which.
-- **Three passes against the same finding: return to Frame.** The design
-  is wrong, not the code. Iterating on the implementation will not fix
-  it.
-- **Never widen scope to satisfy a finding.** Work the finding demands
-  beyond the stated goal is a follow-up: record it under the module's
-  **Open Gaps / Roadmap**, say you deferred it, and leave it there.
-
-**The loop is working if:** defects are found by Review rather than by
-users, passes shrink as they go, and Gate is a check you perform rather
-than a feeling you have.
+- Every pass closes a named finding and touches only what it names.
+- Nits alone do not trigger another pass.
+- Re-run Prove after every fix.
+- Two no-change passes force Gate re-evaluation: release if Done passes;
+  otherwise return the surviving evidence to Frame.
+- Three passes on one finding return automatically to Frame for a new
+  approach.
+- Never widen scope to satisfy a finding. Record out-of-scope work under
+  **Open Gaps / Roadmap**.
 
 ## Coding Discipline
 
-Behavioral guidelines to reduce common LLM coding mistakes. Merge with
-project-specific instructions as needed.
-
-**Tradeoff:** These guidelines bias toward caution over speed. For
-trivial tasks, use judgment.
-
 ### 1. Think Before Coding
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+- Understand the request, code, goal, and repository conventions first.
+- Record assumptions and choose the narrowest evidence-backed reading.
+- Prefer the simpler approach when it reaches the same verified goal.
+- Ask only during planning and only for a required answer that cannot be
+  discovered or safely inferred.
 
 ### 2. Simplicity First
 
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If
-yes, simplify.
+- Implement only what was requested.
+- Do not add single-use abstractions, speculative flexibility, or checks
+  for impossible conditions.
+- If the implementation is materially larger than the problem, simplify
+  it.
 
 ### 3. Surgical Changes
 
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
+- Do not refactor, reformat, or clean up unrelated code.
+- Match the surrounding style.
+- Remove imports, variables, and functions made unused by this change;
+  leave pre-existing dead code alone unless requested.
+- Every changed line must trace to the stated goal.
 
 ### 4. Goal-Driven Execution
 
-**Define success criteria. Loop until verified.**
+Turn work into verifiable outcomes, then loop until they pass:
 
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
+- Add validation → invalid inputs are rejected by a named passing test.
+- Fix a bug → a regression test fails before the fix and passes after.
+- Refactor → behavior tests pass before and after.
 
-For multi-step tasks, state a brief plan:
-
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make
-it work") require constant clarification.
-
----
-
-**These guidelines are working if:** fewer unnecessary changes in diffs,
-fewer rewrites due to overcomplication, and clarifying questions come
-before implementation rather than after mistakes.
+Give every plan step its own check. Strengthen vague criteria from
+repository evidence before implementation.
 
 ### Project-Specific Deviations
 
@@ -495,194 +472,84 @@ before implementation rather than after mistakes.
 
 ## Review Checks
 
-Run these seven checks against every change before proposing it for
-merge. Each is a separate pass with its own scope; a pass that blends
-into another performs neither. Four rules bind all seven:
+Run every check against every change before merge. Keep checks separate.
+
+Four rules bind all checks:
 
 - **Evidence or no finding.** Every finding cites `file:line`.
-  "Inconsistent naming", "this seems unsafe", and "consider refactoring"
-  with nothing to point at are not findings and are not filed.
-- **The repository is the authority.** A convention nobody can locate in
-  the tree is not a convention, and nothing may be demanded on its
-  authority. Where a general rule and this repository's actual practice
-  disagree, the repository wins.
-- **Read the file, not the hunk.** Unused parameters, unreachable
-  branches, forward-only wrappers, and a validation check one frame up
-  are all invisible in a diff.
-- **Review the change, never the author.** Say what the code does. Do not
-  assert how it was produced and do not speculate about who wrote it.
+- **The repository is authoritative.** Demand only conventions visible
+  in the tree.
+- **Read files, not only hunks.** Context can invalidate a finding or
+  reveal unreachable code, unused parameters, and hidden duplication.
+- **Review the change, never the author.** Describe code and impact, not
+  how or by whom it was produced.
 
 ### 1. Style
 
-Indentation and formatting, per language and per file. Mixed indentation
-inside one file is **major** — it breaks anyone whose editor is set for
-the other one. A new file that is internally consistent but uses the
-wrong indent is a **nit**. Reindenting lines the change did not otherwise
-need to touch is one finding asking for it to be split out, not one
-finding per line.
-
-Line length, import order, trailing whitespace, and end-of-line markers
-belong to the formatter and linter in CI. Do not spend attention on what
-a machine already handles.
+Check indentation and local file conventions. Mixed indentation is
+`major`; a consistent new file using the wrong local indent is `nit`.
+Leave machine-checkable formatting to existing formatters and linters;
+never demand unrelated reformatting.
 
 ### 2. Naming
 
-Whether new names follow this project's conventions — variables,
-functions, methods, classes, modules, files, constants, parameters.
-
-Conventions are discovered, never assumed: before calling a name wrong,
-find the closest existing names and read how they are spelled. Cite two
-or three, then propose the specific replacement. Where the repository is
-genuinely inconsistent in an area, say so and demand nothing. A name
-defensible in general but foreign here is still a finding; a name ugly in
-general but matching ten neighbours is not. **Nit** inside a module,
-**major** on a public name — the project lives with public names far
-longer than with the change that introduced them.
+Compare new names with nearby precedents before filing a finding. If the
+repository is inconsistent, demand nothing. A local mismatch is `nit`;
+an inconsistent public name is `major`.
 
 ### 3. Duplication
 
-Whether the change adds something the project already has.
-
-Near-equivalent means same job, not same text: a helper that resolves a
-path, parses a structure, or wraps a call the same way under a different
-name counts, and copy-pasted blocks across two platform or backend
-implementations count loudest. Grep the distinctive strings inside the
-new code — a constant, an error message, a field name, an unusual call
-sequence — not only the symbol names; the expensive duplicates are the
-ones that do not share a name.
-
-Every finding cites both sites and names the remedy: call the existing
-helper, merge the two, or lift the shared part out — and say where the
-shared code should live. Two functions that look alike and differ in one
-branch are not duplicates. Duplication spanning layers is **major**;
-small repetition inside one new module is a **nit**.
+Search distinctive constants, errors, fields, and call sequences—not
+only symbol names—for code performing the same job. Cite both sites and
+the remedy. Cross-layer duplication is `major`; small local repetition
+is `nit`. Similar code with meaningfully different branches is not
+duplication.
 
 ### 4. Quality
 
-Whether the code is well written, and whether anything is in the change
-that should not be there.
-
-Well written means control flow is followable, errors are handled where
-they occur, the abstraction matches the problem, and a reader can tell
-what the code does without running it. Exception handlers that swallow
-without re-raising or logging, prints where the project has a logger,
-unnamed magic numbers, and dead branches are **major**.
-
-Extra weight is the half that reviewers skip: code the change does not
-need, configurability nobody asked for, abstractions with exactly one
-caller, commented-out blocks, debugging leftovers, comments that restate
-the line beneath them, docstrings that name every parameter and explain
-none, defensive checks for conditions that cannot occur, and unrelated
-reformatting smuggled in beside the real change. Say plainly that it can
-be deleted and what breaks if it is not. Filler comments and unused
-parameters are **nits**. Missing tests are an observation here, not a
-finding — CI owns correctness.
+Require followable control flow, errors handled where they occur, and
+abstractions proportional to the problem. Swallowed errors,
+inappropriate prints, unexplained magic values, and dead branches are
+`major`. Remove unrequested configurability, one-caller wrappers, filler
+comments, debugging remnants, and unrelated formatting. Missing tests
+belong to Prove, not this check.
 
 ### 5. Fit
 
-Whether the change belongs in this project and leaves it better rather
-than merely larger.
-
-Read `ARCHITECTURE.md` and the owning `ARCHITECTURE/<module>.md` before
-the diff — that ordering is the point of the doc set. Then ask: is this
-in scope, or is it something to build on top of the project instead of
-inside it? Does it respect the layering, or reach across a boundary the
-architecture keeps closed? Does it deliver a fix, a real capability, or a
-measured speedup — or add surface, cost, and maintenance burden for a
-gain nobody has stated?
-
-Test performance claims for plausibility: a change that claims to be
-faster while adding a per-call allocation to a hot path is making things
-worse. A new public entry point overlapping one that exists grows the API
-the project must support forever. Layering violations and unjustified
-public-API growth are **major**. Where the goal is sound but the
-placement is wrong, say where it should go.
-
-A change that alters architecture, ownership, data flow, integration
-points, or public behaviour without updating `ARCHITECTURE.md` and the
-relevant `ARCHITECTURE/<module>.md` in the same change fails this check.
+Read `ARCHITECTURE.md` and the owning module doc before the diff. Check
+scope, layering, ownership, public-API growth, and performance claims. A
+layering violation or unjustified public API is `major`. Architectural or
+public-behavior changes must update the relevant docs in the same change.
 
 ### 6. Dependencies
 
-Whether the change adds a package, and whether it should.
-
-Four questions, in order. Is one actually being added — check the
-manifests *and* the imports, because code can import what the manifest
-never declared. Is it maintained: last release, cadence, maintainer
-count, archived upstream? Is it a supply-chain risk: known advisories, a
-very recent first release, a single maintainer holding a
-widely-installed name, a name close to a popular one, install-time code
-execution? And is it worth it — the honest comparison is the package
-plus its transitive tree plus its future breakage, against the
-standard-library code it would replace.
-
-The default answer to a new dependency is no and the burden is on the
-change to move it, but say so proportionately: a well-maintained package
-doing something genuinely hard is a good trade, and pretending otherwise
-is not rigour. An unjustified new top-level dependency is **major**; a
-live advisory or an abandoned upstream is a **blocker**. When the
-evidence cannot be gathered, say the check could not be completed rather
-than guessing.
+Check manifests and imports, maintenance, supply-chain risk, advisories,
+install-time behavior, license, transitive cost, and whether the standard
+library is sufficient. An unjustified top-level dependency is `major`;
+a live advisory or abandoned upstream is `blocker`. Incomplete evidence
+does not pass.
 
 ### 7. Security
 
-Whether the change introduces a security defect, and whether it widens
-exposure. Two distinct questions.
-
-Defects in the change: memory safety in native code, unchecked lengths
-and offsets, integer overflow feeding an allocation or an index, path
-traversal, unsafe deserialisation, commands built from input the code
-does not control, secrets or tokens committed, untrusted input reaching a
-parser without bounds.
-
-Exposure, separately: whatever this project treats as untrusted — user
-input, network data, sandboxed or emulated code, third-party content — a
-change that lets it reach the host filesystem, a subprocess, the network,
-or host memory is a serious finding even when the change contains no bug
-of its own.
-
-State the path from input to impact concretely: where the value enters,
-what it is not checked against, and what an attacker gets. If you cannot
-trace that path you have a question, not a finding — ask it, and withdraw
-it once answered. No severity inflation: a theoretical issue with no
-reachable path is **info**, a real bug in the change is **major**, and
-anything that breaks a trust boundary is a **blocker**. Describe the flaw
-and the fix; do not publish exploit steps.
+Check both defects and widened exposure: unsafe memory access, unchecked
+sizes or offsets, integer overflow, path traversal, unsafe
+deserialization, command construction, committed secrets, and unbounded
+untrusted input. Trace input to impact; without a reachable path there is
+no finding. A real defect is `major`; a trust-boundary break is `blocker`.
+Describe the fix without publishing exploit steps.
 
 ### Severity and the merge threshold
 
-| Severity | Meaning | Effect |
-| -------- | ------- | ------ |
-| `blocker` | Breaks a trust boundary, corrupts data, or ships a known-vulnerable dependency. | Must not merge. |
-| `major` | Wrong, unsafe, or costly enough that a maintainer would ask for a change. | Merge only with a stated, accepted reason. |
-| `nit` | Correct, but inconsistent with the project. | Author's call. |
-| `info` | Observation, question, or context. | No action implied. |
+| Severity | Effect |
+| -------- | ------ |
+| `blocker` | Must not merge. |
+| `major` | Must be resolved before merge. |
+| `nit` | Apply or consciously decline. |
+| `info` | Context or a question; no action implied. |
 
-Merge only when no `blocker` and no unresolved `major` remains. A verdict
-of "looks good" alongside a `major` finding is not an approval — resolve
-the finding or record why it stands.
-
-### Reporting
-
-Report once, as one document, not seven. Open with what the change is
-trying to do and what it gets right. List the findings that survived a
-verify pass, ordered by severity, each with its `file:line` and the
-reason it matters. Close with what would have to change. Then record the
-checklist, so it is visible which checks were actually walked:
-
-| Check | Status | Note |
-| ----- | ------ | ---- |
-| 1. Style | pass / concern / blocker | evidence, or "nothing found" |
-| 2. Naming | | |
-| 3. Duplication | | |
-| 4. Quality | | |
-| 5. Fit | | |
-| 6. Dependencies | | |
-| 7. Security | | |
-
-A check nobody could complete is a **concern**, not a pass. Never report
-a check that did not run: a confident verdict covering skipped checks
-reads exactly like a real one, which makes it worse than no review.
+Merge only with no `blocker` and no unresolved `major`. A check that did
+not run does not pass. Findings feed Write and Gate directly; they do not
+create a reporting phase.
 
 ## Index
 
@@ -705,7 +572,8 @@ reads exactly like a real one, which makes it worse than no review.
 - [provider.md](ARCHITECTURE/provider.md) — talking to a model, and the four built-in backends.
 - [role.md](ARCHITECTURE/role.md) — what an agent is in a session, and the chair it takes.
 - [selfcheck.md](ARCHITECTURE/selfcheck.md) — `python -m kerness.selfcheck`, the installation health check.
-- [session.md](ARCHITECTURE/session.md) — the top-level object that assembles and runs everything.
+- [session.md](ARCHITECTURE/session.md) — configuration, preparation and the blocking compatibility API.
+- [run.md](ARCHITECTURE/run.md) — owned execution, scoped tools, approvals, outcomes and recovery.
 - [sessionfile.md](ARCHITECTURE/sessionfile.md) — saving and resuming a run.
 - [skills.md](ARCHITECTURE/skills.md) — loading skill bundles and the `Skill` tool.
 - [testing.md](ARCHITECTURE/testing.md) — the three suites, the examples, and what CI runs.

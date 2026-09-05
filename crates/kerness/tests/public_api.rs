@@ -41,7 +41,7 @@ use common::{RecordingChannel, ScriptedProvider};
 /// A doc that names a number is a promise; this is where it is kept.
 #[test]
 fn the_documented_constants_hold_their_documented_values() {
-    assert_eq!(SCHEMA_VERSION, 1);
+    assert_eq!(SCHEMA_VERSION, 2);
     assert_eq!(DEFAULT_MAX_CONTEXT_TOKENS, 256_000);
     assert_eq!(CHARS_PER_TOKEN, 4);
     assert_eq!(COMPACT_TO_FRACTION, 0.5);
@@ -160,6 +160,16 @@ fn a_session_assembles_from_the_public_api_alone() {
 
     assert_eq!(session.agents().len(), 3);
     assert_eq!(session.max_rounds(), 3);
+    let mut run: kerness::SessionRun = session
+        .start(kerness::RunOptions::default())
+        .expect("owned run");
+    let control: kerness::RunControl = run.control();
+    control.cancel();
+    let kerness::StepOutcome::Finished { outcome } = run.step(kerness::RunInput::Continue).unwrap()
+    else {
+        panic!("cancelled");
+    };
+    assert_eq!(outcome.reason, kerness::RunReason::Cancelled);
 }
 
 /// Enumerated from disk, not from a literal list: an asset added or removed

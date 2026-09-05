@@ -26,9 +26,9 @@ use crate::types::path_to_py;
 
 /// A Python memory store, seen as a framework [`MemoryStore`].
 ///
-/// Every method is fallible on both sides, so an exception the store raises
-/// travels back out of `run()` as the same class it was raised as — there is
-/// nothing to park, unlike a channel, whose `send` cannot fail.
+/// Fallible methods convert Python exceptions through the framework's error
+/// mapping. Optional metadata and maintenance listing log failures and use
+/// their trait defaults because those Rust methods have no error return.
 pub struct PyStore {
     inner: Py<PyAny>,
 }
@@ -37,13 +37,13 @@ impl PyStore {
     /// Read an optional attribute that the trait's own default answers `None`
     /// for, treating a raise as that same `None`.
     ///
-    /// The trait cannot report a failure here — `age`, `path`, and `budget`
-    /// return `Option`, not `Result` — and the honest reading of a store that
+    /// The trait cannot report a failure here — metadata returns `Option`,
+    /// and maintenance listing returns a `Vec`, not `Result`. A store that
     /// cannot name its file is a store that names none, which is what a store
     /// keeping nothing on disk answers anyway. Logged, because it is a bug in
     /// the store and silence would hide it.
     ///
-    /// *scope* is `None` for the one of the three that takes no argument.
+    /// *scope* is `None` for methods that take no argument.
     fn optional<T>(&self, method: &str, scope: Option<&str>) -> Option<T>
     where
         T: for<'py> FromPyObject<'py>,
@@ -127,6 +127,35 @@ impl MemoryStore for PyStore {
     fn close(&self) -> Result<()> {
         Python::with_gil(|py| self.inner.bind(py).call_method0("close").map(drop)).catch()
     }
+
+    fn maintenance_scopes(&self) -> Vec<String> {
+        self.optional("maintenance_scopes", None)
+            .unwrap_or_default()
+    }
+
+    fn maintain_scope(&self, scope: &str) -> Result<()> {
+        Python::with_gil(|py| {
+            let store = self.inner.bind(py);
+            if store.hasattr("maintain_scope")? {
+                store.call_method1("maintain_scope", (scope,))?;
+            }
+            Ok(())
+        })
+        .catch()
+    }
+
+    fn close_run(&self) -> Result<()> {
+        Python::with_gil(|py| {
+            let store = self.inner.bind(py);
+            let method = if store.hasattr("close_run")? {
+                "close_run"
+            } else {
+                "close"
+            };
+            store.call_method0(method).map(drop)
+        })
+        .catch()
+    }
 }
 
 /// Bind *object* so the session can keep its memory in it.
@@ -203,6 +232,18 @@ impl PyFileMemory {
     fn close(&self) -> PyResult<()> {
         self.inner.close().raise()
     }
+
+    fn maintenance_scopes(&self) -> Vec<String> {
+        self.inner.maintenance_scopes()
+    }
+
+    fn maintain_scope(&self, scope: &str) -> PyResult<()> {
+        self.inner.maintain_scope(scope).raise()
+    }
+
+    fn close_run(slf: &Bound<'_, Self>) -> PyResult<()> {
+        slf.call_method0("close").map(drop)
+    }
 }
 
 /// Keeps the most recent entries verbatim and summarises the rest.
@@ -268,6 +309,18 @@ impl PySummarizingMemory {
     fn close(&self) -> PyResult<()> {
         self.inner.close().raise()
     }
+
+    fn maintenance_scopes(&self) -> Vec<String> {
+        self.inner.maintenance_scopes()
+    }
+
+    fn maintain_scope(&self, scope: &str) -> PyResult<()> {
+        self.inner.maintain_scope(scope).raise()
+    }
+
+    fn close_run(&self) -> PyResult<()> {
+        self.inner.close_run().raise()
+    }
 }
 
 /// Bounds a scope by characters and has the agents curate it.
@@ -319,6 +372,18 @@ impl PyCuratedMemory {
 
     fn close(&self) -> PyResult<()> {
         self.inner.close().raise()
+    }
+
+    fn maintenance_scopes(&self) -> Vec<String> {
+        self.inner.maintenance_scopes()
+    }
+
+    fn maintain_scope(&self, scope: &str) -> PyResult<()> {
+        self.inner.maintain_scope(scope).raise()
+    }
+
+    fn close_run(slf: &Bound<'_, Self>) -> PyResult<()> {
+        slf.call_method0("close").map(drop)
     }
 }
 

@@ -100,7 +100,7 @@ which can refuse it — see [access.md](access.md).
 
 `tools` is the third field that does not simply override the session's. A name
 the gameplan did not permit is refused when the session resolves its agents
-(`session.rs:1371`), before the first provider call and named with the agent, so
+(`session.rs:1460`), before the first provider call and named with the agent, so
 an agent cannot hand itself a tool the harness withheld. The reasoning is
 [access.md](access.md)'s: a per-agent list under override semantics turns a
 config file into a way around the contract, and the same syntax would spell both
@@ -155,12 +155,12 @@ cargo test -p kerness agent::                                     # pass = 0 fai
 - `:145` — `test_the_level_is_unset_until_named_and_round_trips_as_its_name` — and
   `:158` `test_an_unknown_level_is_rejected`: `reasoning_effort` crosses the
   boundary as a validated string, the way `position` does.
-- `bindings/python/tests/test_session.py:981` — `TestSessionDefaults`: a session
+- `bindings/python/tests/test_session.py:1093` — `TestSessionDefaults`: a session
   model filling the agents that named none, an agent on a second provider
   refused for naming no model, and a model named nowhere naming both places to
   write one. The Rust counterparts are in
   `crates/kerness/tests/session_run.rs`.
-- `bindings/python/tests/test_session.py:703` — `TestPerAgentTools` — and
+- `bindings/python/tests/test_session.py:815` — `TestPerAgentTools` — and
   `crates/kerness/tests/tools_e2e.rs`: what `tools` narrows, and that it cannot
   widen. Tested through a session because narrowing is resolved there, not on
   the record.

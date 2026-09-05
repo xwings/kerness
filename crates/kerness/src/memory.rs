@@ -145,8 +145,8 @@ pub trait MemoryFilter: Send + Sync {
 /// session holds it behind an `Arc`, so an implementation that caches or
 /// batches keeps its own lock rather than borrowing the session's.
 ///
-/// The four defaulted methods are the ones a store can honestly have no answer
-/// for. Only [`read`](MemoryStore::read) and [`append`](MemoryStore::append)
+/// Defaulted methods cover stores with no corresponding operation.
+/// Only [`read`](MemoryStore::read) and [`append`](MemoryStore::append)
 /// must be written, because a store that cannot do both is not one.
 pub trait MemoryStore: Send + Sync {
     /// Everything stored under *scope*, as the prompt should quote it.
@@ -195,15 +195,35 @@ pub trait MemoryStore: Send + Sync {
         None
     }
 
-    /// The run is over; settle whatever is outstanding.
+    /// Settle the store when used directly outside a session run.
     ///
-    /// Called once at the end of `run()`, after the session result has been
-    /// written. This is where a store that consolidates — summarising a run's
-    /// notes, pruning, reindexing — does it, because it is the only moment at
-    /// which the whole run is known and nothing further will be appended.
-    /// [`FileMemory`] writes through on every append and so has nothing to do.
+    /// Existing stores may use this to flush pending writes. Session runs call
+    /// [`close_run`](MemoryStore::close_run), which defaults to this method;
+    /// paid work belongs in explicit maintenance, never cleanup.
     fn close(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Scopes needing explicit maintenance after successful completion.
+    /// Listing must not invoke a provider or perform maintenance itself.
+    fn maintenance_scopes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Maintain one previously listed scope, using at most one logical
+    /// provider operation. The engine schedules and accounts for this action
+    /// separately from agent turns and other scopes.
+    fn maintain_scope(&self, scope: &str) -> Result<()> {
+        let _ = scope;
+        Ok(())
+    }
+
+    /// Flush and release resources on completion, failure, cancellation, or
+    /// abandonment. This method must not start provider work. Framework
+    /// dispatch rejects provider calls during cleanup; arbitrary custom I/O
+    /// remains the store author's responsibility and cannot be preempted.
+    fn close_run(&self) -> Result<()> {
+        self.close()
     }
 
     /// The character ceiling one scope may hold, or `None` for no ceiling.
@@ -442,10 +462,11 @@ pub const CONSOLIDATE_PROMPT: &str = concat!(
 /// entries written since it was last rewritten. [`read`](MemoryStore::read)
 /// renders the summary and then the entries;
 /// [`append`](MemoryStore::append) writes through on every note, so a crash
-/// mid-run loses nothing that was committed; and [`close`](MemoryStore::close)
-/// — once, at the end of the run — folds everything past the most recent
-/// [`keep`](SummarizingMemory::with_keep) entries into the summary with one
-/// provider call per scope that overflowed.
+/// mid-run loses nothing that was committed. Explicit
+/// [`maintain_scope`](MemoryStore::maintain_scope) steps fold entries past the
+/// most recent [`keep`](SummarizingMemory::with_keep) into the summary with one
+/// logical provider operation per overflowing scope. A standalone
+/// [`close`](MemoryStore::close) drives all those steps.
 ///
 /// The end of the run is the only honest moment for that call. It is the first
 /// point at which the whole run is known and the last at which nothing further
@@ -578,12 +599,19 @@ impl SummarizingMemory {
             json!({"role": "system", "content": CONSOLIDATE_PROMPT}),
             json!({"role": "user", "content": blocks.join("\n\n")}),
         ];
-        match self.provider.chat_with_retries(
+        match crate::usage::observe_provider_call(
+            self.provider.name(),
             &self.model,
-            &messages,
             "memory consolidation",
-            None,
-            ReasoningEffort::default(),
+            || {
+                self.provider.chat_with_retries(
+                    &self.model,
+                    &messages,
+                    "memory consolidation",
+                    None,
+                    ReasoningEffort::default(),
+                )
+            },
         ) {
             Ok(response) if response.content.trim().is_empty() => Ok(None),
             Ok(response) => Ok(Some(response.content.trim().to_string())),
@@ -627,43 +655,54 @@ impl MemoryStore for SummarizingMemory {
         Some(self.file(scope))
     }
 
-    /// Fold every overflowing scope's oldest entries into its summary.
-    ///
-    /// The overflowing scopes are collected and the lock dropped before the
-    /// first provider call, because a provider written by the caller may reach
-    /// back into this store — reading its own memory to decide what to say is
-    /// exactly what a store like this invites — and holding the lock across the
-    /// call would make that a deadlock rather than a re-entry.
+    /// Preserve the standalone store's historical whole-store close behavior.
     fn close(&self) -> Result<()> {
-        let overflowing: Vec<(String, String, Vec<String>)> = {
-            let scopes = self.scopes.lock().unwrap_or_else(|err| err.into_inner());
-            scopes
-                .iter()
-                .filter(|(_, held)| held.entries.len() > self.keep)
-                .map(|(name, held)| {
-                    let cut = held.entries.len() - self.keep;
-                    (
-                        name.clone(),
-                        held.summary.clone(),
-                        held.entries[..cut].to_vec(),
-                    )
-                })
-                .collect()
-        };
-
-        for (scope, summary, overflow) in overflowing {
-            let Some(consolidated) = self.consolidate(&summary, &overflow)? else {
-                continue;
-            };
-            let path = self.file(&scope);
-            self.with(&scope, |held| {
-                held.summary = consolidated;
-                // By count rather than by content: the entries handed to the
-                // summarizer were the oldest, and nothing removes an entry.
-                held.entries.drain(..overflow.len().min(held.entries.len()));
-                held.save(&path)
-            })?;
+        for scope in self.maintenance_scopes() {
+            self.maintain_scope(&scope)?;
         }
+        Ok(())
+    }
+
+    fn maintenance_scopes(&self) -> Vec<String> {
+        let mut scopes: Vec<_> = self
+            .scopes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .filter(|(_, held)| held.entries.len() > self.keep)
+            .map(|(name, _)| name.clone())
+            .collect();
+        scopes.sort();
+        scopes
+    }
+
+    /// Release the store lock before calling user-supplied provider code, so
+    /// a provider may read this store while constructing its response.
+    fn maintain_scope(&self, scope: &str) -> Result<()> {
+        let overflowing = self.with(scope, |held| {
+            Ok((held.entries.len() > self.keep).then(|| {
+                let cut = held.entries.len() - self.keep;
+                (held.summary.clone(), held.entries[..cut].to_vec())
+            }))
+        })?;
+        let Some((summary, overflow)) = overflowing else {
+            return Ok(());
+        };
+        let Some(consolidated) = self.consolidate(&summary, &overflow)? else {
+            return Ok(());
+        };
+        let path = self.file(scope);
+        self.with(scope, |held| {
+            held.summary = consolidated;
+            // Entries appended during the callback follow the summarized
+            // prefix and remain verbatim.
+            held.entries.drain(..overflow.len().min(held.entries.len()));
+            held.save(&path)
+        })
+    }
+
+    fn close_run(&self) -> Result<()> {
+        // Appends and successful maintenance already write through to disk.
         Ok(())
     }
 }
@@ -929,7 +968,6 @@ mod tests {
     use super::*;
     use crate::testing::TempDir;
 
-    /// A directory that removes itself, so these tests leave no trace either.
     #[test]
     fn loading_an_absent_file_reads_empty_and_creates_nothing() {
         let dir = TempDir::new("absent");
@@ -1077,6 +1115,13 @@ mod tests {
         assert_eq!(store.age("anything"), None, "no write time, so no caveat");
         store.open("anything").expect("nothing to open");
         store.close().expect("nothing to settle");
+        assert!(store.maintenance_scopes().is_empty());
+        store
+            .maintain_scope("anything")
+            .expect("no paid maintenance");
+        store
+            .close_run()
+            .expect("cleanup forwards to the default close");
     }
 
     // ---- SummarizingMemory ----------------------------------------------
@@ -1167,6 +1212,8 @@ mod tests {
 
     #[test]
     fn closing_folds_everything_past_the_kept_entries_into_one_summary() {
+        use crate::usage::{self, RunBudget, UsageCollector};
+
         let dir = TempDir::new("summarizing-close");
         let provider = Arc::new(StubProvider::saying("Alice chose the blue one."));
         let store = summarizing(&dir, Arc::clone(&provider)).with_keep(2);
@@ -1185,6 +1232,76 @@ mod tests {
             vec!["oldest\n\nolder".to_string()],
             "one call, carrying only what overflowed"
         );
+
+        for scope in ["zeta", "alpha"] {
+            for note in ["oldest", "recent", "newest"] {
+                store.append(scope, note).unwrap();
+            }
+        }
+        assert_eq!(store.maintenance_scopes(), ["alpha", "zeta"]);
+        assert_eq!(
+            provider.prompts().len(),
+            1,
+            "listing scopes is not maintenance"
+        );
+        let collector = UsageCollector::new(
+            RunBudget {
+                max_provider_operations: Some(1),
+                ..RunBudget::default()
+            },
+            vec![],
+        )
+        .unwrap();
+        collector
+            .with_scope("alpha", "memory consolidation", || {
+                store.maintain_scope("alpha")
+            })
+            .unwrap();
+        assert_eq!(
+            provider.prompts().len(),
+            2,
+            "maintenance advances exactly one scope"
+        );
+        assert_eq!(store.maintenance_scopes(), ["zeta"]);
+        assert_eq!(collector.snapshot().totals.provider_operations, 1);
+        assert_eq!(collector.snapshot().records[0].actor, "alpha");
+        assert_eq!(
+            collector.snapshot().records[0].purpose,
+            "memory consolidation"
+        );
+        assert!(collector
+            .with_scope("zeta", "memory consolidation", || store
+                .maintain_scope("zeta"))
+            .is_err());
+        assert_eq!(
+            provider.prompts().len(),
+            2,
+            "exhausted budgets prevent maintenance calls"
+        );
+        assert_eq!(store.read("zeta").unwrap(), "oldest\n\nrecent\n\nnewest");
+
+        usage::without_provider_calls(|| store.close_run()).unwrap();
+        assert_eq!(
+            provider.prompts().len(),
+            2,
+            "cleanup never consolidates outstanding scopes"
+        );
+        assert!(matches!(
+            usage::without_provider_calls(|| store.close()),
+            Err(Error::Session(_))
+        ));
+        assert_eq!(
+            provider.prompts().len(),
+            2,
+            "a cleanup cannot invoke the standalone paid close"
+        );
+        store.close().unwrap();
+        assert_eq!(
+            provider.prompts().len(),
+            3,
+            "standalone close retains its behavior"
+        );
+        assert!(store.maintenance_scopes().is_empty());
     }
 
     #[test]

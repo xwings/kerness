@@ -90,15 +90,11 @@ pub fn load_gameplan(name_or_path: &str) -> Result<GameplanConfig> {
     // filename is not, because the user did not choose it as an identifier.
     let mut harness = parse_harness(&frontmatter, &source)?;
     if harness.name.is_empty() {
-        harness.name = stem.clone();
+        harness.name = stem;
     }
 
     Ok(GameplanConfig {
-        name: if harness.name.is_empty() {
-            stem
-        } else {
-            harness.name.clone()
-        },
+        name: harness.name.clone(),
         harness,
         body: body.trim().to_string(),
         path: std::fs::canonicalize(&path)

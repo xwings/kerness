@@ -1,10 +1,8 @@
 //! Tool dispatch: what an agent may call, and what comes back when it does.
 //!
-//! Dispatch **never fails**. Every failure — unknown tool, bad arguments, a
-//! denied command, a handler blowing up — becomes a [`ToolResult`] with
-//! `is_error` set, which the runtime feeds back to the model as its chance to
-//! correct itself. That is the standard agentic contract, and it keeps
-//! re-prompt logic out of the session.
+//! Unknown tools, invalid arguments, and errors returned by a handler become a
+//! [`ToolResult`] with `is_error` set. The runtime feeds it back to the model
+//! so it can correct the call.
 //!
 //! The handler is the only path: `cmd`, `read_file`, and `list_dir` get no
 //! branches beside their registered handlers, and argument checking is
@@ -16,7 +14,7 @@ use crate::jsonschema::validate_arguments;
 use crate::tooling::{ToolCall, ToolSpec, INVALID_CALL};
 
 /// The outcome of one tool call.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolResult {
     /// The tool that was called.
     pub name: String,

@@ -17,7 +17,7 @@ framework falls back to the prompt rendering in [toolkit.md](toolkit.md), and
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/toolschema.rs` | `ToolDialect` and the per-dialect conversions |
-| `bindings/python/src/types.rs:38` | `register_dialect`, and dialect conversion both ways |
+| `bindings/python/src/types.rs:40` | `register_dialect`, and dialect conversion both ways |
 | `bindings/python/kerness/_enums.py:14` | `ToolDialect` as a real `enum.Enum` |
 | `bindings/python/kerness/toolschema.py` | re-export shim |
 
@@ -28,21 +28,21 @@ value.
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/toolschema.rs:37` — `ToolDialect` — the dialect, including
+- `crates/kerness/src/toolschema.rs:35` — `ToolDialect` — the dialect, including
   the "no native tools" case that selects the prompt fallback.
-- `crates/kerness/src/toolschema.rs:55` — `parse(value)` — returns `Option`; an
+- `crates/kerness/src/toolschema.rs:53` — `parse(value)` — returns `Option`; an
   unknown dialect string is not an error here, it is "not this one".
-- `crates/kerness/src/toolschema.rs:72` — `to_openai_tool(spec)` / `:84`
+- `crates/kerness/src/toolschema.rs:70` — `to_openai_tool(spec)` / `:82`
   `to_anthropic_tool(spec)` — one `ToolSpec` in each wire shape.
-- `crates/kerness/src/toolschema.rs:96` — `tool_schemas(dialect, tools)` — the
+- `crates/kerness/src/toolschema.rs:94` — `tool_schemas(dialect, tools)` — the
   whole list, or `None` when the dialect has no native tools; the `None` is what
   tells the caller to render a prompt instead.
-- `crates/kerness/src/toolschema.rs:111` — `parse_openai_tool_calls(message)` /
-  `:136` `parse_anthropic_tool_calls(response)` — calls out of a native response.
-- `crates/kerness/src/toolschema.rs:214` — `render_assistant_turn(dialect, response)` —
+- `crates/kerness/src/toolschema.rs:109` — `parse_openai_tool_calls(message)` /
+  `:134` `parse_anthropic_tool_calls(response)` — calls out of a native response.
+- `crates/kerness/src/toolschema.rs:202` — `render_assistant_turn(dialect, response)` —
   the assistant message to append, which must echo the tool calls in the shape the
   provider expects to see them again.
-- `crates/kerness/src/toolschema.rs:256` — `render_tool_result(dialect, call, result)` —
+- `crates/kerness/src/toolschema.rs:244` — `render_tool_result(dialect, call, result)` —
   the result message, which is where the dialects differ most: a `tool` role
   message versus a user message carrying a `tool_result` block.
 
@@ -50,7 +50,8 @@ value.
 
 - Selected per agent by [provider.md](provider.md)'s `effective_dialect`.
 - Consumes the `ToolSpec` list from [toolkit.md](toolkit.md) and produces the
-  calls it dispatches.
+  calls it dispatches. Both parsers use `tooling::wrap_raw` to preserve malformed
+  arguments; native and text-fence argument decoding keep their distinct rules.
 - Schemas are made strict by [jsonschema.md](jsonschema.md).
 - The dialect is branched on in [prompting.md](prompting.md), which omits tool
   instructions when they are native.

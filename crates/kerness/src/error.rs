@@ -13,7 +13,7 @@ use std::fmt;
 /// `Display` is the message a caller reads, and the bindings surface each
 /// variant as its own exception class — so the split drawn here is the split
 /// every caller sees, in either language.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Error {
     /// A provider failed in a way none of the specific variants describe.
     Provider(String),
@@ -50,9 +50,9 @@ pub enum Error {
 impl Error {
     /// Whether this is one of the provider variants.
     ///
-    /// The retry and dialect-fallback paths catch provider failures and let
-    /// everything else through, which is the only place the exception
-    /// hierarchy's shape is load-bearing.
+    /// Used after retry exhaustion to distinguish provider failures for
+    /// capability fallback, and by runtime compatibility paths that handle
+    /// provider failures separately from host errors.
     pub fn is_provider(&self) -> bool {
         matches!(
             self,

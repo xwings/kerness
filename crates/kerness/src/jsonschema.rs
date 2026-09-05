@@ -15,14 +15,13 @@ use crate::pyfmt::{repr as py_repr, repr_str as py_repr_str};
 /// Sets `additionalProperties: false` on every object, promotes every declared
 /// property to `required`, inlines single-element `allOf` and `$ref` siblings,
 /// and drops null defaults.
-///
-/// `path` is a breadcrumb that only ever appears in error messages; `root` is
-/// the document `$ref`s resolve against and defaults to *schema* itself.
 pub fn ensure_strict(schema: &mut Value) -> Result<()> {
     let root = schema.clone();
     strict(schema, &[], &root)
 }
 
+/// `path` is a breadcrumb used in error messages; `root` is the original
+/// document that `$ref`s resolve against.
 fn strict(schema: &mut Value, path: &[String], root: &Value) -> Result<()> {
     if !schema.is_object() {
         return Err(Error::session(format!(

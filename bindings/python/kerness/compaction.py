@@ -1,4 +1,4 @@
-"""The per-request context ceiling and the summarize-the-prefix rewrite."""
+"""Conversation token estimates and the summarize-the-prefix rewrite."""
 
 from kerness._core import (
     CHARS_PER_TOKEN,

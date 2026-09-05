@@ -42,6 +42,7 @@ pub mod skill;
 pub mod tooling;
 pub mod toolkit;
 pub mod toolschema;
+pub mod usage;
 pub mod utils;
 pub mod yaml;
 
@@ -57,7 +58,12 @@ pub use crate::memory::Memory;
 pub use crate::persona::PersonaConfig;
 pub use crate::provider::{Provider, ProviderResponse, ReasoningEffort};
 pub use crate::role::{Position, RoleConfig};
-pub use crate::session::{Session, SessionConfig, SessionResult};
+pub use crate::session::{
+    ApprovalMode, ApprovalRequest, ContextToolHandler, ContextToolSpec, EventSink, PreflightAction,
+    ResultDiagnostics, ResultIssue, ResultValidation, RunControl, RunEvent, RunEventKind, RunInput,
+    RunMode, RunOptions, RunOutcome, RunReason, Session, SessionConfig, SessionResult, SessionRun,
+    StepOutcome, ToolContext, ToolIdentity, WaitReason,
+};
 pub use crate::tooling::{ToolCall, ToolHandler, ToolSpec};
 pub use crate::toolkit::{ToolDispatcher, ToolResult};
 pub use crate::toolschema::ToolDialect;

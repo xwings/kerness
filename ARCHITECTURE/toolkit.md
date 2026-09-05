@@ -19,7 +19,7 @@ its result shaped (`ToolDispatcher`).
 | ---- | ---- |
 | `crates/kerness/src/tooling.rs` | `ToolSpec`, `ToolCall`, `ToolHandler`, parsing, prompt rendering |
 | `crates/kerness/src/toolkit.rs` | `ToolDispatcher`, `ToolResult`, `resolve` |
-| `bindings/python/src/types.rs:68,165,179,294` | `PyToolCall`, `PyToolHandler`, `PyToolSpec`, `PyToolResult` |
+| `bindings/python/src/types.rs:70,165,179,294` | `PyToolCall`, `PyToolHandler`, `PyToolSpec`, `PyToolResult` |
 | `bindings/python/src/runtime.rs:161` | `PyToolDispatcher` |
 | `bindings/python/kerness/{tooling,toolkit}.py` | re-export shims |
 
@@ -39,19 +39,20 @@ its result shaped (`ToolDispatcher`).
   ones.
 - `crates/kerness/src/tooling.rs:331` — `format_tools_prompt(tools)` — the tool
   instructions for a model without native tool support.
-- `crates/kerness/src/toolkit.rs:54` — `ToolDispatcher` — holds a `ToolsFor`
+- `crates/kerness/src/toolkit.rs:52` — `ToolDispatcher` — holds a `ToolsFor`
   closure rather than a tool list, so the available tools can change per turn as
   skills activate.
-- `crates/kerness/src/toolkit.rs:68` — `execute(call, actor)` — validates
+- `crates/kerness/src/toolkit.rs:66` — `execute(call, actor)` — validates
   arguments, calls the handler, and turns any error into a `ToolResult` the model
   can read. It does not propagate: a failing tool is information for the model,
   not a failed session.
-- `crates/kerness/src/toolkit.rs:108` — `resolve(tools, allowed)` — the
+- `crates/kerness/src/toolkit.rs:106` — `resolve(tools, allowed)` — the
   allowed-list narrowing, shared with the skill gate.
 
 `ToolSpec` implements `PartialEq` (`tooling.rs:87`) and `Debug` (`:97`) by hand,
-because the handler is a trait object: equality is by name and schema, and
-`Debug` prints the name rather than nothing.
+because the handler is a trait object. Equality compares the name, description,
+schema, actor flag and handler identity. `Debug` prints the spec's metadata
+without the handler.
 
 ### The catalog is whole, and narrowing is the lever
 
@@ -69,7 +70,7 @@ subtractive: a gameplan's `tools:` ([harness.md](harness.md)), an agent's own
 `tools` ([agent.md](agent.md)), a skill's `allowed-tools:`
 ([skills.md](skills.md)), and the access policy's `allowed_commands`
 ([access.md](access.md)) for what `run_command` can reach. `resolve`
-(`toolkit.rs:108`) is the shared body for the first three; `Shared::active_tools`
+(`toolkit.rs:106`) is the shared body for the first three; `Shared::active_tools`
 in [session.md](session.md) is the order they compose in.
 
 Narrowing beats lazy disclosure here because it binds the dispatcher as well as
@@ -81,6 +82,8 @@ using it.
 ## Interactions
 
 - Dispatched during a turn by [agent-runtime.md](agent-runtime.md).
+- [run.md](run.md) owns scoped tool capabilities, approval preflight, durable
+  invocation state, and reconciliation around this dispatcher.
 - Arguments validated by [jsonschema.md](jsonschema.md).
 - Native tool definitions built by [toolschema.md](toolschema.md); the prompt
   fallback is here.

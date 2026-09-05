@@ -136,6 +136,9 @@ class TestMemoryStore:
         assert store.age("anything") is None
         assert store.path("anything") is None
         assert store.close() is None
+        assert store.maintenance_scopes() == []
+        assert store.maintain_scope("anything") is None
+        assert store.close_run() is None
         assert store.budget() is None
         with pytest.raises(ValueError, match="cannot be revised"):
             store.revise("anything", "old", "new")
@@ -153,6 +156,21 @@ class TestMemoryStore:
         assert issubclass(SummarizingMemory, MemoryStore)
         assert isinstance(CuratedMemory(tmp_path), MemoryStore)
         assert issubclass(CuratedMemory, MemoryStore)
+        for store in [FileMemory(), summarizing, CuratedMemory(tmp_path)]:
+            assert store.maintenance_scopes() == []
+            assert store.close_run() is None
+
+        for base, arguments in [(FileMemory, ()), (CuratedMemory, (tmp_path,))]:
+            class WithCleanup(base):
+                closed = 0
+
+                def close(self):
+                    self.closed += 1
+                    super().close()
+
+            store = WithCleanup(*arguments)
+            assert store.close_run() is None
+            assert store.closed == 1, f"{base.__name__} skipped subclass cleanup"
 
     def test_the_bundled_store_keeps_one_file_per_scope(self, tmp_path):
         """A scope is a name the store interprets, and this one reads it as a
@@ -240,13 +258,21 @@ class TestSummarizingMemory:
         store.append("shared", "a note")
         assert store.age("shared") == 0
 
-    def test_a_session_can_be_told_to_keep_its_memory_in_one(self, tmp_path):
+    @pytest.mark.parametrize("subclassed", [False, True])
+    def test_a_session_can_be_told_to_keep_its_memory_in_one(self, tmp_path, subclassed):
         """The whole point of the slot: the session addresses it by scope and
         never learns it is not a file of prose."""
-        store = SummarizingMemory(tmp_path, MockProvider(), "test-model")
+        class CustomSummarizing(SummarizingMemory):
+            pass
+
+        summarizer = MockProvider(responses=["Kept recap."])
+        store_type = CustomSummarizing if subclassed else SummarizingMemory
+        store = store_type(tmp_path, summarizer, "test-model", keep=0)
         session = Session(
             gameplan="debate",
             topic="T",
+            provider=MockProvider(responses=["END_SESSION", "Summary."]),
+            turn_delay_sec=0,
             memory="the-session",
             memory_store=store,
             access_policy=AccessPolicy(workspace=tmp_path),
@@ -255,6 +281,12 @@ class TestSummarizingMemory:
         session.memory.append("something worth keeping")
         assert session.memory.read() == "something worth keeping"
         assert session.memory.path == tmp_path / "the-session.json"
+        session.add_agent("Alice", model="m")
+        session.add_agent("Bob", model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
+        session.run()
+        assert len(summarizer.calls) == 1
+        assert session.memory.read() == f"{CONSOLIDATED_PREFIX}\nKept recap."
 
 
 class TestCuratedMemory:

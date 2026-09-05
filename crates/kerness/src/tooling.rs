@@ -106,7 +106,7 @@ impl fmt::Debug for ToolSpec {
 }
 
 /// A call the model asked for.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     /// The tool to run.
     pub name: String,
@@ -255,7 +255,7 @@ fn decode_arguments(raw: Option<&Value>) -> Arguments {
     }
 }
 
-fn wrap_raw(value: Value) -> Arguments {
+pub(crate) fn wrap_raw(value: Value) -> Arguments {
     let mut arguments = Arguments::new();
     arguments.insert("raw".into(), value);
     arguments
@@ -302,7 +302,7 @@ fn followed_by_colon(bytes: &[u8], mut index: usize) -> bool {
 ///
 /// Returns the block body, `""` when no such fence opened, or [`UNCLOSED`]
 /// when one opened and the text ended first.
-fn extract_fenced_json(text: &str, fence_names: &[&str]) -> String {
+pub(crate) fn extract_fenced_json(text: &str, fence_names: &[&str]) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let mut index = 0usize;
     while index < lines.len() {

@@ -253,13 +253,6 @@ pub struct PyAccessManager {
     policy: Py<PyAny>,
 }
 
-impl PyAccessManager {
-    /// The framework manager, for a session assembling itself around one.
-    pub fn snapshot(&self) -> PyResult<AccessManager> {
-        Python::with_gil(|py| Ok(AccessManager::new(policy_from_py(self.policy.bind(py))?)))
-    }
-}
-
 #[pymethods]
 impl PyAccessManager {
     #[new]

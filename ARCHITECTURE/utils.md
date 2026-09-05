@@ -36,8 +36,8 @@ the bar for living in this module rather than beside its only user.
   scan.
 - `crates/kerness/src/utils.rs:122` — `parse_memory_markers(text)` — splits a reply
   into the text to show and the memory entries to append.
-- `crates/kerness/src/utils.rs:179` — `retry(...)` — attempts, backoff, and a
-  predicate deciding what is retryable; the provider retry is built on it.
+- `crates/kerness/src/utils.rs:179` — `retry(...)` — retries any returned error
+  with configured attempts and backoff; the provider retry is built on it.
 - `crates/kerness/src/pyfmt.rs:25` — `json_dumps_indent2(value)` — matches
   `json.dumps(..., indent=2)` byte for byte, which is what tool results and
   session files are compared against.
@@ -80,7 +80,7 @@ cargo test -p kerness pyfmt                                       # pass = 0 fai
 
 - `pyfmt` covers the JSON value model only. There is nothing for a Python object
   that is not JSON-representable, and nothing needs it.
-- `retry`'s backoff is fixed multiplicative with no jitter; see
+- `retry`'s backoff grows linearly, or uses a fixed interval, with no jitter; see
   [provider.md](provider.md).
 - User-supplied command patterns in [access.md](access.md) are compiled with
   `fancy-regex` rather than `regex`, because a caller's pattern may use

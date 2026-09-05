@@ -89,14 +89,14 @@ swap in your own — the rest of the kernel does not notice.
 | --- | --- | --- |
 | **Provider** | `OpenAiProvider`, `ClaudeProvider`, `OpenRouterProvider`, `CustomProvider`; OAuth credentials where the vendor offers them | implementing the `Provider` trait — one required method, `chat` |
 | **Channel** | `ConsoleChannel`, `FileChannel`, `LogChannel`, `MultiChannel` | implementing `Channel` — one required method, `send` |
-| **Tools** | `cmd`, `read_file`, `list_dir`, `write_memory` | `session.add_tool(name, description, parameters, handler)` |
+| **Tools** | `cmd`, `read_file`, `list_dir`, `write_memory` | `add_tool` for legacy handlers, `add_tool_spec` for complete specs, or `add_contextual_tool` for scoped capabilities |
 | **Skills** | `challenge`, `fact-check`, `summarize`, `agent-browser` | dropping a `SKILL.md` directory on disk |
 | **Roles** | `participant`, `orchestrator` | a `.md` file whose frontmatter declares a `position:`, or inline prose |
 | **Personas** | `pragmatic_engineer`, `devils_advocate` | a `.md` file, or inline prose |
 | **Gameplans** | `debate`, `discussion`, `research` | a new Markdown file — see below |
 | **Access** | closed by default; a workspace that grants its own contents, glob and regex command allow-lists, and path allow-lists that reach past the workspace | an `AccessPolicy`, plus an approval callback |
 | **Memory** | `FileMemory` — a plain `.md` file per scope, read-only unless asked; `SummarizingMemory` — recent notes verbatim, the rest folded into a running summary at the end of the run | implementing `MemoryStore` — two required methods, `read` and `append` — and passing it as `memory_store` |
-| **Session file** | JSON snapshot after every turn | `session_file` — absent means persist nothing |
+| **Session file** | Versioned JSON snapshots of turns, suspended tools, approvals, and usage | `session_file` — absent means persist nothing |
 
 The names are the Rust ones. Python spells the two acronym providers the way
 Python callers expect — `OpenAIProvider`, plus `OpenAIOAuthProvider` and
@@ -326,9 +326,8 @@ To watch a session run without an API key, use
 cargo run -p kerness --example offline_debate    # no key, no network
 ```
 
-Seven more examples sit beside it — per-agent providers, memory, structured
-output, a custom tool, a custom channel, and the access boundary widened for one
-program.
+Other examples cover per-agent providers, memory, structured output, custom
+tools and channels, host control, and durable approvals.
 
 ## The same run, in Python
 
@@ -392,6 +391,58 @@ print(result.rounds_run, result.end_reason)
 The `add_*` calls return the session, so registration chains if you would rather
 write it that way.
 
+## Host-controlled runs
+
+`Session::start(RunOptions)` transfers configuration into an owned `SessionRun`.
+Choose `RunMode::HostDriven` to select participants yourself; an orchestrator is
+needed only when the gameplan explicitly requires one. `step(RunInput)` returns
+progress, an identified waiting state, or a typed terminal outcome with partial
+history, result diagnostics, usage, and any original framework error.
+
+Each step dispatches at most one engine-selected logical provider operation,
+tool invocation, compaction, or maintenance scope, and may settle several local
+effects. Providers may retry synchronously, and callbacks can call provider
+APIs; supplied metering seams count those calls against the run.
+Events report progress; inputs select an agent, add user text at a turn
+boundary, answer an approval, reconcile an interrupted action, or finish with a
+host-supplied result. `Finish` validates the declared result without an implicit
+agent or judge call to generate it; configured memory maintenance may still call
+a provider. A separate `RunControl` requests cooperative cancellation.
+
+Custom contextual handlers receive trusted actor/run/turn/call identity and
+file, command, and memory capabilities. Those handles enforce the actor's
+policy and expire when the invocation ends. A side-effect-free preflight can
+request confirmation before the handler runs. A saved pending approval resumes
+with its same request ID and completed tool results; an interrupted action with
+an unknown outcome requires reconciliation instead of automatic replay.
+
+`RunOptions` also accepts operation/tool limits, host-supplied token pricing,
+and measured token/cost/time thresholds. Unsupported hard token/cost caps are
+rejected. Cancellation cannot forcibly interrupt an arbitrary blocking
+provider or user callback.
+
+Run the complete offline examples:
+
+```sh
+cargo run -p kerness --example host_control
+cargo run -p kerness --example resume_approval
+python bindings/python/examples/host_control.py
+```
+
+[`host_control.rs`](crates/kerness/examples/host_control.rs) selects one
+participant, observes events, and supplies a validated result.
+[`resume_approval.rs`](crates/kerness/examples/resume_approval.rs) saves a pending
+confirmation, drops and rebinds the run, then completes two tools once each.
+Both create and clean their own temporary workspaces.
+
+The [Python example](bindings/python/examples/host_control.py) uses the same
+engine through `session.start(mode="host_driven")` and `run.step(...)`.
+Inputs are dictionaries such as
+`{"kind": "select_agent", "agent": "Advisor", "instruction": "Recommend a policy."}`;
+outcomes carry `status: "progress"`, `"waiting"`, or `"finished"`.
+[`ARCHITECTURE/bindings.md`](ARCHITECTURE/bindings.md#owned-execution-and-contextual-tools)
+documents the thin API, callback signatures, and handle lifetimes.
+
 ## What the kernel does while it runs
 
 Neither of the above is a different runtime, so the following holds for both.
@@ -404,19 +455,19 @@ the session registered. A skill requiring a tool nobody registered is refused
 before the first call rather than quietly doing nothing. When the policy trusts
 bundles, loading a skill also grants read access to its own directory.
 
-There is no daemon and no server. A run given a session file writes its state to
-disk after every turn and continues from that file the next time the same
-program runs. Resume checks identity first: a snapshot from a different gameplan
-or a different agent roster is refused, not half-applied.
+There is no daemon and no server. A run given a session file saves coherent
+execution boundaries and resumes from that file when the host reattaches its
+providers and handlers. Resume checks identity and the saved runtime contract
+before continuing; valid version 1 turn-boundary snapshots are migrated.
 
 ## Layout
 
 ```text
 Cargo.toml       # the only manifest at the root
 crates/kerness/  # the kernel, pure Rust — no PyO3, no Python
-  src/           #   30 modules, 380 unit tests inline
-  tests/         #   109 integration tests, over the public API only
-  examples/      #   8 runnable Rust harnesses, one needing no key
+  src/           #   kernel implementation, with unit tests inline
+  tests/         #   integration tests over the public API
+  examples/      #   10 runnable Rust harnesses, three needing no key
   assets/        #   bundled gameplans, roles, personas, skills
 bindings/python/ # everything the wheel is built from
   pyproject.toml #   the wheel's manifest — `pip install .` runs here
@@ -440,11 +491,11 @@ carries the kernel's behaviour across the FFI boundary intact.
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # 380 unit + 109 integration
+cargo test --workspace                     # unit and public API integration suites
 cargo build -p kerness --examples          # every example still compiles
 cargo run -p kerness --example offline_debate   # a whole session, no key
 
-python -m pytest bindings/python/tests -q      # 487 tests
+python -m pytest bindings/python/tests -q      # binding suite
 python -m kerness.selfcheck                    # exit 0
 ruff check bindings/python
 ```

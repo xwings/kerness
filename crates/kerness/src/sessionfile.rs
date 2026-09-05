@@ -16,9 +16,12 @@
 //! already taken by [`crate::channel::LogChannel`], which is transcript output
 //! rather than resumable state.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::conversation::{Message, Turn};
@@ -30,7 +33,7 @@ use crate::pyfmt;
 /// A file from a version this build does not know is rejected rather than
 /// guessed at: the fields it is missing would otherwise resume as silent
 /// defaults.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Identity fields, in the order a mismatch is reported.
 ///
@@ -45,7 +48,8 @@ pub struct SessionSnapshot {
     pub identity: Map<String, Value>,
     pub turns: Vec<Turn>,
     pub transcript: Vec<Message>,
-    /// Loop counters and phase position; see `OrchestratorLoop::snapshot`.
+    /// Loop counters, phase position, and optional version 2 `runtime`
+    /// continuation; see `OrchestratorLoop::snapshot` and `SessionRun`.
     /// Stored under the `loop` key, which is a keyword here and nowhere else.
     pub loop_state: Map<String, Value>,
     /// How many times this session has compacted, for the record.
@@ -108,9 +112,12 @@ pub fn check_identity(saved: &Map<String, Value>, current: &Map<String, Value>) 
 
 /// Write *snapshot* to *path*, replacing whatever is there.
 ///
-/// Written to a sibling temp file and renamed. A crash partway through a direct
-/// write would leave a truncated file exactly where a resumable one belongs,
-/// which is the one moment this feature exists to survive.
+/// Written through an exclusively created sibling file and renamed. Existing
+/// temporary files and symlinks are left untouched; a collision gets a new
+/// name. A failed write or rename removes only the temporary file this save
+/// created, leaving the previous snapshot intact. The file is synced before
+/// rename; on Unix the containing directory is synced afterward. A directory
+/// sync failure is reported even though replacement has already occurred.
 pub fn save_snapshot(path: &Path, snapshot: &SessionSnapshot) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -122,18 +129,50 @@ pub fn save_snapshot(path: &Path, snapshot: &SessionSnapshot) -> Result<()> {
     let payload = json!({
         "version": SCHEMA_VERSION,
         "identity": snapshot.identity,
-        "turns": snapshot.turns.iter().map(turn_to_value).collect::<Vec<_>>(),
-        "transcript": snapshot.transcript.iter().map(message_to_value).collect::<Vec<_>>(),
+        "turns": snapshot.turns,
+        "transcript": snapshot.transcript,
         "loop": snapshot.loop_state,
         "compactions": snapshot.compactions,
     });
+    validate_payload(payload.as_object().expect("snapshot is an object"), path)?;
 
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(".tmp");
-    let tmp = path.with_file_name(tmp_name);
-    fs::write(&tmp, pyfmt::json_dumps_indent2(&payload) + "\n")
-        .map_err(|err| Error::Io(format!("{}: {err}", tmp.display())))?;
-    fs::rename(&tmp, path).map_err(|err| Error::Io(format!("{}: {err}", path.display())))
+    let mut tmp = path.with_file_name(&tmp_name);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = loop {
+        match options.open(&tmp) {
+            Ok(file) => break file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let mut name = tmp_name.clone();
+                name.push(format!(
+                    ".{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                tmp = path.with_file_name(name);
+            }
+            Err(err) => return Err(Error::Io(format!("{}: {err}", tmp.display()))),
+        }
+    };
+    let written = file
+        .write_all((pyfmt::json_dumps_indent2(&payload) + "\n").as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    let result = written
+        .and_then(|()| fs::rename(&tmp, path))
+        .and_then(|()| sync_parent(path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.map_err(|err| Error::Io(format!("{}: {err}", path.display())))
 }
 
 /// Read *path*, or return `None` when there is nothing to resume.
@@ -162,93 +201,149 @@ pub fn load_snapshot(path: &Path) -> Result<Option<SessionSnapshot>> {
     };
 
     let version = payload.get("version").unwrap_or(&Value::Null);
-    if version.as_i64() != Some(SCHEMA_VERSION) {
+    if !matches!(version.as_i64(), Some(1 | SCHEMA_VERSION)) {
         return Err(Error::Session(format!(
             "Session file {} has schema version {}; this build of kerness \
-             writes and reads version {SCHEMA_VERSION}. Delete it to start \
+             writes version {SCHEMA_VERSION} and reads versions 1 and {SCHEMA_VERSION}. Delete it to start \
              fresh, or pass a different session_file path.",
             path.display(),
             pyfmt::repr(version)
         )));
     }
+    validate_payload(&payload, path)?;
 
     Ok(Some(SessionSnapshot {
-        identity: object_at(&payload, "identity"),
-        turns: array_at(&payload, "turns")
-            .iter()
-            .map(turn_from_value)
-            .collect(),
-        transcript: array_at(&payload, "transcript")
-            .iter()
-            .map(message_from_value)
-            .collect(),
-        loop_state: object_at(&payload, "loop"),
-        compactions: payload
-            .get("compactions")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
+        identity: payload["identity"]
+            .as_object()
+            .expect("validated identity")
+            .clone(),
+        turns: Vec::deserialize(&payload["turns"]).expect("validated turns"),
+        transcript: Vec::deserialize(&payload["transcript"]).expect("validated transcript"),
+        loop_state: payload["loop"]
+            .as_object()
+            .expect("validated loop state")
+            .clone(),
+        compactions: payload["compactions"]
+            .as_i64()
+            .expect("validated compactions count"),
     }))
 }
 
-fn object_at(payload: &Map<String, Value>, key: &str) -> Map<String, Value> {
-    payload
-        .get(key)
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default()
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::File::open(parent)?.sync_all()
 }
 
-fn array_at<'a>(payload: &'a Map<String, Value>, key: &str) -> &'a [Value] {
-    payload
-        .get(key)
-        .and_then(Value::as_array)
-        .map_or(&[], Vec::as_slice)
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
-/// The text at *key*, or *fallback* when the field is missing or not a string.
-fn text_at(data: &Value, key: &str, fallback: &str) -> String {
-    data.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or(fallback)
-        .to_string()
-}
-
-fn turn_to_value(turn: &Turn) -> Value {
-    json!({
-        "role": turn.role,
-        "speaker": turn.speaker,
-        "content": turn.content,
-        "round_idx": turn.round_idx,
-        "msg_type": turn.msg_type,
-    })
-}
-
-fn turn_from_value(data: &Value) -> Turn {
-    Turn {
-        role: text_at(data, "role", "user"),
-        speaker: text_at(data, "speaker", ""),
-        content: text_at(data, "content", ""),
-        round_idx: data.get("round_idx").and_then(Value::as_i64).unwrap_or(0),
-        msg_type: text_at(data, "msg_type", "turn"),
+/// Check the shared envelope before any conversion. The runtime and scheduler
+/// owners validate their own version 2 continuation objects when resuming.
+fn validate_payload(payload: &Map<String, Value>, path: &Path) -> Result<()> {
+    let invalid = |field: &str| {
+        Error::session(format!(
+        "Session file {} has an invalid or missing {field}. Delete it to start fresh, or pass a different session_file path.",
+        path.display()
+    ))
+    };
+    let fields = [
+        "version",
+        "identity",
+        "turns",
+        "transcript",
+        "loop",
+        "compactions",
+    ];
+    if fields.iter().any(|field| !payload.contains_key(*field))
+        || payload
+            .keys()
+            .any(|field| !fields.contains(&field.as_str()))
+    {
+        return Err(invalid("snapshot envelope field"));
     }
-}
-
-fn message_to_value(message: &Message) -> Value {
-    json!({
-        "sender": message.sender,
-        "content": message.content,
-        "round_idx": message.round_idx,
-        "msg_type": message.msg_type,
-    })
-}
-
-fn message_from_value(data: &Value) -> Message {
-    Message {
-        sender: text_at(data, "sender", ""),
-        content: text_at(data, "content", ""),
-        round_idx: data.get("round_idx").and_then(Value::as_i64).unwrap_or(0),
-        msg_type: text_at(data, "msg_type", "turn"),
+    let identity = payload["identity"]
+        .as_object()
+        .ok_or_else(|| invalid("identity"))?;
+    if identity.len() != IDENTITY_FIELDS.len()
+        || ["gameplan", "topic", "orchestrator"]
+            .iter()
+            .any(|field| !identity.get(*field).is_some_and(Value::is_string))
+        || !identity.get("participants").is_some_and(string_array)
+    {
+        return Err(invalid("identity fields"));
     }
+    for (field, names) in [
+        (
+            "turns",
+            &["role", "speaker", "content", "round_idx", "msg_type"][..],
+        ),
+        (
+            "transcript",
+            &["sender", "content", "round_idx", "msg_type"][..],
+        ),
+    ] {
+        let records = payload[field].as_array().ok_or_else(|| invalid(field))?;
+        for (index, value) in records.iter().enumerate() {
+            let valid = value.as_object().is_some_and(|record| {
+                record.len() == names.len()
+                    && names.iter().all(|name| {
+                        record.get(*name).is_some_and(|value| {
+                            if *name == "round_idx" {
+                                nonnegative(value)
+                            } else {
+                                value.is_string()
+                            }
+                        })
+                    })
+            });
+            if !valid {
+                return Err(invalid(&format!("{field}[{index}] record")));
+            }
+        }
+    }
+    if !nonnegative(&payload["compactions"]) {
+        return Err(invalid("compactions count"));
+    }
+    let state = payload["loop"]
+        .as_object()
+        .ok_or_else(|| invalid("loop state"))?;
+    for (field, value) in state {
+        let valid = match field.as_str() {
+            "turn_count" => nonnegative(value),
+            "phases" => value.as_object().is_some_and(|phases| {
+                phases.iter().all(|(name, value)| match name.as_str() {
+                    "index" | "round_in_phase" | "rounds_run" => nonnegative(value),
+                    "pending" => string_array(value),
+                    "exhausted" => value.is_boolean(),
+                    _ => false,
+                })
+            }),
+            "runtime" | "scheduler" => {
+                payload["version"].as_i64() == Some(SCHEMA_VERSION) && value.is_object()
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid(&format!("loop.{field}")));
+        }
+    }
+    Ok(())
+}
+
+fn nonnegative(value: &Value) -> bool {
+    value.as_i64().is_some_and(|count| count >= 0)
+}
+
+fn string_array(value: &Value) -> bool {
+    value
+        .as_array()
+        .is_some_and(|items| items.iter().all(Value::is_string))
 }
 
 #[cfg(test)]
@@ -259,7 +354,6 @@ mod tests {
     use crate::conversation::Conversation;
     use crate::testing::TempDir;
 
-    /// A directory that removes itself, so these tests leave no trace either.
     fn identity() -> Map<String, Value> {
         identity_for(
             "debate",
@@ -273,7 +367,7 @@ mod tests {
     fn every_kind_of_record_survives() {
         // Conversation keeps directives, agent turns, and system notes in
         // different places — turns only, both, and transcript only — and
-        // render() folds speaker and msg_type into a string. A snapshot that
+        // render() folds speaker into content and drops msg_type. A snapshot that
         // round-trips one kind proves nothing about the others, and one that
         // persists the rendered form resumes a session that cannot tell an
         // agent turn from a directive. The loop state is what stops a resume
@@ -316,6 +410,29 @@ mod tests {
         assert_eq!(loaded.transcript, conversation.transcript());
         assert_eq!(loaded.loop_state, loop_state);
         assert_eq!(loaded.compactions, 3);
+
+        // Valid version-1 boundaries remain readable without inventing a
+        // suspended action. The run owner migrates that boundary on start.
+        let mut payload: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        payload["version"] = json!(1);
+        fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert_eq!(load_snapshot(&path).unwrap(), Some(loaded.clone()));
+        assert!(!loaded.loop_state.contains_key("runtime"));
+
+        // The common envelope preserves the runtime owner's continuation
+        // verbatim, including identities and side-effect progress.
+        let mut suspended = loaded;
+        suspended.loop_state.insert(
+            "runtime".to_string(),
+            json!({
+                "run_id": "run-1", "turn_id": "turn-2",
+                "pending_approval": {"id": "approval-2", "call_id": "call-2"},
+                "completed_results": [{"call_id": "call-1", "result": "done"}],
+                "usage": crate::usage::UsageLedger::default()
+            }),
+        );
+        save_snapshot(&path, &suspended).unwrap();
+        assert_eq!(load_snapshot(&path).unwrap(), Some(suspended));
     }
 
     #[test]
@@ -373,6 +490,55 @@ mod tests {
 
         let error = load_snapshot(&path).expect_err("half a file is not a snapshot");
         assert!(error.to_string().contains("run.json"), "{error}");
+
+        save_snapshot(&path, &SessionSnapshot::new(identity())).unwrap();
+        let valid: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut malformed = Vec::new();
+        for field in ["identity", "turns", "transcript", "loop", "compactions"] {
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            malformed.push(missing);
+        }
+        for (field, bad) in [
+            ("identity", json!({})),
+            (
+                "turns",
+                json!([{"role": "assistant", "speaker": "a", "content": 4, "round_idx": 1, "msg_type": "turn"}]),
+            ),
+            (
+                "transcript",
+                json!([{"sender": "a", "content": "x", "round_idx": -1, "msg_type": "turn"}]),
+            ),
+            ("loop", json!({"turn_count": "1"})),
+            ("loop", json!({"phases": {"pending": [1]}})),
+            ("loop", json!({"phases": {"index": -1}})),
+            ("loop", json!({"runtime": []})),
+            ("loop", json!({"extra": true})),
+            ("compactions", json!(-1)),
+            ("extra", json!(true)),
+        ] {
+            let mut value = valid.clone();
+            value[field] = bad;
+            malformed.push(value);
+        }
+        for mut value in malformed {
+            for version in [1, SCHEMA_VERSION] {
+                value["version"] = json!(version);
+                fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+                let error = load_snapshot(&path).expect_err("malformed snapshots cannot default");
+                assert!(error.to_string().contains("run.json"), "{value}: {error}");
+            }
+        }
+        for continuation in ["runtime", "scheduler"] {
+            let mut value = valid.clone();
+            value["version"] = json!(1);
+            value["loop"][continuation] = json!({});
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(
+                load_snapshot(&path).is_err(),
+                "v1 cannot contain suspended work"
+            );
+        }
     }
 
     #[test]
@@ -398,6 +564,61 @@ mod tests {
             .collect();
         left.sort();
         assert_eq!(left, ["nested", "run.json"]);
+
+        let path = dir.join("run.json");
+        let occupied = dir.join("run.json.tmp");
+        let mut replacement = SessionSnapshot::new(identity());
+        replacement.compactions = 7;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let outside = TempDir::new("snapshot-outside");
+            let victim = outside.write("private.txt", "untouched");
+            std::os::unix::fs::symlink(&victim, &occupied).unwrap();
+            save_snapshot(&path, &replacement).expect("a temporary symlink is skipped");
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+            assert!(fs::symlink_metadata(&occupied)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(!fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(load_snapshot(&path).unwrap(), Some(replacement.clone()));
+            fs::remove_file(&occupied).unwrap();
+        }
+
+        fs::write(&occupied, "unrelated temporary file").unwrap();
+        save_snapshot(&path, &replacement).expect("an occupied temporary name is skipped");
+        assert_eq!(
+            fs::read_to_string(&occupied).unwrap(),
+            "unrelated temporary file"
+        );
+        assert_eq!(load_snapshot(&path).unwrap(), Some(replacement));
+
+        let blocked = dir.join("directory.json");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("keep.txt"), "keep").unwrap();
+        assert!(save_snapshot(&blocked, &SessionSnapshot::new(identity())).is_err());
+        assert_eq!(
+            fs::read_to_string(blocked.join("keep.txt")).unwrap(),
+            "keep"
+        );
+        let mut left: Vec<_> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["directory.json", "nested", "run.json", "run.json.tmp"]
+        );
     }
 
     #[test]

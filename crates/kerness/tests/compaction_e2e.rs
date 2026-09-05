@@ -56,6 +56,7 @@ fn run(
     ceiling: usize,
     summary: &str,
     channel: Option<Arc<RecordingChannel>>,
+    stepped: bool,
 ) -> (SessionResult, Arc<ScriptedProvider>, TempDir) {
     let temp = TempDir::new("compaction");
     let path = temp.write("long.md", LONG);
@@ -87,7 +88,40 @@ fn run(
         )
         .expect("the roster has no orchestrator yet");
 
-    let result = session.run().expect("a scripted run cannot fail");
+    let result = if stepped {
+        let mut run = session.start(kerness::RunOptions::default()).unwrap();
+        loop {
+            let before = provider.call_count();
+            let step = run.step(kerness::RunInput::Continue).unwrap();
+            assert!(
+                provider.call_count() - before <= 1,
+                "compaction and turn calls need separate steps"
+            );
+            if let kerness::StepOutcome::Finished { outcome } = step {
+                assert_eq!(outcome.reason, kerness::RunReason::Completed);
+                assert_eq!(
+                    outcome.usage.totals.provider_operations as usize,
+                    provider.call_count()
+                );
+                assert_eq!(
+                    outcome
+                        .usage
+                        .records
+                        .iter()
+                        .filter(|record| record.purpose == "compaction")
+                        .count(),
+                    provider
+                        .purposes()
+                        .iter()
+                        .filter(|purpose| purpose.as_str() == "compaction")
+                        .count()
+                );
+                break outcome.result;
+            }
+        }
+    } else {
+        session.run().expect("a scripted run cannot fail")
+    };
     (result, provider, temp)
 }
 
@@ -95,29 +129,36 @@ fn run(
 /// the summary is asked for from the orchestrator's own provider.
 #[test]
 fn a_conversation_over_the_ceiling_is_compacted() {
-    let channel = RecordingChannel::new();
-    let (_result, provider, _temp) = run(2_000, "Alice and Bob disagreed.", Some(channel.clone()));
+    for stepped in [false, true] {
+        let channel = RecordingChannel::new();
+        let (_result, provider, _temp) = run(
+            2_000,
+            "Alice and Bob disagreed.",
+            Some(channel.clone()),
+            stepped,
+        );
 
-    assert!(
-        provider
-            .purposes()
-            .iter()
-            .any(|purpose| purpose == "compaction"),
-        "no summary was ever requested: {:?}",
-        provider.purposes()
-    );
-    assert!(
-        channel.noted("Compacted conversation:"),
-        "the compaction was not announced: {:?}",
-        channel.system()
-    );
+        assert!(
+            provider
+                .purposes()
+                .iter()
+                .any(|purpose| purpose == "compaction"),
+            "no summary was ever requested: {:?}",
+            provider.purposes()
+        );
+        assert!(
+            channel.noted("Compacted conversation:"),
+            "the compaction was not announced: {:?}",
+            channel.system()
+        );
+    }
 }
 
 /// What replaces the dropped turns is labelled, so neither a model nor a reader
 /// mistakes a framework-written recap for something an agent said.
 #[test]
 fn the_summary_replaces_the_dropped_turns_under_its_own_label() {
-    let (_result, provider, _temp) = run(2_000, "Alice and Bob disagreed.", None);
+    let (_result, provider, _temp) = run(2_000, "Alice and Bob disagreed.", None, false);
 
     let later = provider
         .last_call_for("final summary")
@@ -135,7 +176,7 @@ fn the_summary_replaces_the_dropped_turns_under_its_own_label() {
 /// can no longer see.
 #[test]
 fn the_topic_survives_compaction() {
-    let (_result, provider, _temp) = run(2_000, "Alice and Bob disagreed.", None);
+    let (_result, provider, _temp) = run(2_000, "Alice and Bob disagreed.", None, false);
 
     let later = provider
         .last_call_for("final summary")
@@ -151,7 +192,7 @@ fn the_topic_survives_compaction() {
 #[test]
 fn an_empty_summary_leaves_the_history_alone() {
     let channel = RecordingChannel::new();
-    let (result, provider, _temp) = run(2_000, "   ", Some(channel.clone()));
+    let (result, provider, _temp) = run(2_000, "   ", Some(channel.clone()), false);
 
     assert!(
         provider
@@ -177,7 +218,7 @@ fn an_empty_summary_leaves_the_history_alone() {
 /// interrupted session does not forget what it has already summarized.
 #[test]
 fn the_session_file_records_how_often_it_compacted() {
-    let (_result, _provider, temp) = run(2_000, "Alice and Bob disagreed.", None);
+    let (_result, _provider, temp) = run(2_000, "Alice and Bob disagreed.", None, false);
 
     let payload: Value = serde_json::from_str(&temp.read("run.json")).expect("the file is JSON");
     assert!(
@@ -234,6 +275,7 @@ fn an_ordinary_run_under_the_default_ceiling_never_compacts() {
         kerness::session::DEFAULT_MAX_CONTEXT_TOKENS,
         "unused",
         Some(channel.clone()),
+        false,
     );
 
     assert!(

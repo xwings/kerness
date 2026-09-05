@@ -29,7 +29,7 @@ harness parser then rejects it as "must be a boolean".
 | ---- | ---- |
 | `crates/kerness/src/harness.rs` | the specs, the parser, and validation |
 | `crates/kerness/src/yaml.rs` | YAML 1.1 scalar resolution over an event stream |
-| `bindings/python/src/types.rs` | eight spec pyclasses, `:1348` `OrchestratorSpec` through `:1824` `Permitted` |
+| `bindings/python/src/types.rs` | eight spec pyclasses, `:1312` `OrchestratorSpec` through `:1780` `Permitted` |
 | `bindings/python/kerness/harness.py` | re-export shim |
 
 ## Key Types and Entry Points

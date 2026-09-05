@@ -8,8 +8,11 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::{io, os::fd::AsRawFd, os::unix::process::CommandExt};
 
 use crate::access::AccessManager;
 use crate::error::{Error, Result};
@@ -34,6 +37,20 @@ pub fn run_command(
     timeout: Option<Duration>,
     actor: &str,
 ) -> Result<String> {
+    run_command_cancellable(access, command, cwd, timeout, actor, &|| false)
+}
+
+pub(crate) fn run_command_cancellable(
+    access: &AccessManager,
+    command: &str,
+    cwd: Option<&Path>,
+    timeout: Option<Duration>,
+    actor: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String> {
+    if cancelled() {
+        return Err(Error::session("Command cancelled."));
+    }
     let argv = shell_words::split(command)
         .map_err(|err| Error::session(format!("Invalid command syntax: {err}")))?;
     // A command that is only a comment or only whitespace splits to nothing,
@@ -54,14 +71,152 @@ pub fn run_command(
     if let Some(cwd) = cwd {
         builder.current_dir(cwd);
     }
+    #[cfg(unix)]
+    builder.process_group(0);
 
-    let mut child = builder
+    let child = builder
         .spawn()
         .map_err(|err| Error::session(format!("Command failed: {command}: {err}")))?;
+    let output = capture_output(child, timeout, cancelled)
+        .map_err(|err| Error::session(format!("Command failed: {command}: {err}")))?
+        .ok_or_else(|| Error::session(format!("Command timed out: {command}")))?;
 
-    // Drained on their own threads: a child that fills a pipe buffer blocks
-    // until someone reads it, and a parent waiting on exit before reading would
-    // wait forever for a command that produced more output than the buffer.
+    let stdout = decode(output.stdout);
+    let stderr = decode(output.stderr);
+
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let mut message = format!("Command failed (exit {code}): {command}");
+        let trailer = stderr.trim();
+        if !trailer.is_empty() {
+            message.push('\n');
+            message.push_str(trailer);
+        }
+        return Err(Error::session(message));
+    }
+    Ok(stdout)
+}
+
+/// Collect both pipes without letting a full pipe or a surviving descendant
+/// hide the deadline. The caller distinguishes timeout (`None`) from IO errors.
+#[cfg(unix)]
+fn capture_output(
+    mut child: Child,
+    timeout: Option<Duration>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<Output>> {
+    let started = Instant::now();
+    let mut stdout = child.stdout.take().expect("stdout was piped");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let outcome = (|| {
+        nonblocking(&stdout)?;
+        nonblocking(&stderr)?;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut out_open = true;
+        let mut err_open = true;
+        loop {
+            if cancelled() {
+                return Err(Error::session("Command cancelled."));
+            }
+            // One bounded read per pipe: continuous output must not postpone
+            // the deadline check or starve the other pipe.
+            let out_progress = read_pipe(&mut stdout, &mut out, &mut out_open)?;
+            let err_progress = read_pipe(&mut stderr, &mut err, &mut err_open)?;
+            if !out_open && !err_open {
+                // Leave the leader unreaped while descendants hold its pipes.
+                // Its PID then cannot be reused as another process group's ID
+                // before timeout cleanup signals the group we created.
+                if let Some(status) = child.try_wait().map_err(|err| Error::Io(err.to_string()))? {
+                    return Ok(Some(Output {
+                        status,
+                        stdout: out,
+                        stderr: err,
+                    }));
+                }
+            }
+            if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+                return Ok(None);
+            }
+            if !out_progress && !err_progress {
+                std::thread::sleep(POLL_INTERVAL);
+            }
+        }
+    })();
+    if !matches!(&outcome, Ok(Some(_))) {
+        // Cleanup also covers a failed pipe setup, read, or wait. Closing our
+        // pipe ends never waits for EOF, even if a daemon left the group.
+        stop_group(&mut child)?;
+    }
+    outcome
+}
+
+#[cfg(unix)]
+fn nonblocking(pipe: &impl AsRawFd) -> Result<()> {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: `pipe` owns a live descriptor for both calls. These fcntl
+    // commands access descriptor flags and take no pointer arguments.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(Error::Io(io::Error::last_os_error().to_string()));
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(Error::Io(io::Error::last_os_error().to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_pipe(pipe: &mut impl Read, bytes: &mut Vec<u8>, open: &mut bool) -> Result<bool> {
+    if !*open {
+        return Ok(false);
+    }
+    let mut buffer = [0; 8192];
+    match pipe.read(&mut buffer) {
+        Ok(0) => {
+            *open = false;
+            Ok(false)
+        }
+        Ok(count) => {
+            bytes.extend_from_slice(&buffer[..count]);
+            Ok(true)
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(err) => Err(Error::Io(err.to_string())),
+    }
+}
+
+#[cfg(unix)]
+fn stop_group(child: &mut Child) -> Result<()> {
+    // SAFETY: process_group(0) made the child's positive PID its group ID, and
+    // capture_output has not reaped it. A negative PID targets only that group.
+    let killed = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+    let group_error = (killed == -1).then(io::Error::last_os_error);
+    // The leader can move groups while leaving descendants in the original
+    // one. A successful group signal therefore still needs direct-child cleanup.
+    let _ = child.kill();
+    let waited = child.wait();
+    if let Some(err) = group_error.filter(|err| err.raw_os_error() != Some(libc::ESRCH)) {
+        return Err(Error::Io(err.to_string()));
+    }
+    waited.map(|_| ()).map_err(|err| Error::Io(err.to_string()))
+}
+
+/// Other platforms retain direct-child timeout semantics. The access boundary
+/// and process-group cleanup are supported on POSIX systems.
+#[cfg(not(unix))]
+fn capture_output(
+    mut child: Child,
+    timeout: Option<Duration>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<Output>> {
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
     let out_reader = std::thread::spawn(move || {
@@ -81,33 +236,28 @@ pub fn run_command(
             Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(err) => {
-                return Err(Error::session(format!("Command failed: {command}: {err}")));
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                return Err(Error::Io(err.to_string()));
             }
         }
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if cancelled() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = out_reader.join();
             let _ = err_reader.join();
-            return Err(Error::session(format!("Command timed out: {command}")));
+            return Ok(None);
         }
         std::thread::sleep(POLL_INTERVAL);
     };
 
-    let stdout = decode(out_reader.join().unwrap_or_default());
-    let stderr = decode(err_reader.join().unwrap_or_default());
-
-    if !status.success() {
-        let code = status.code().unwrap_or(-1);
-        let mut message = format!("Command failed (exit {code}): {command}");
-        let trailer = stderr.trim();
-        if !trailer.is_empty() {
-            message.push('\n');
-            message.push_str(trailer);
-        }
-        return Err(Error::session(message));
-    }
-    Ok(stdout)
+    Ok(Some(Output {
+        status,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    }))
 }
 
 /// Read a file the policy permits.
@@ -212,33 +362,89 @@ mod tests {
 
     #[test]
     fn a_command_that_overruns_its_deadline_is_killed() {
-        let access = allowing(|policy| policy.allowed_commands = vec!["sleep *".into()]);
-        let error = run_command(
-            &access,
-            "sleep 30",
-            None,
-            Some(Duration::from_millis(100)),
-            "",
-        )
-        .expect_err("timed out");
-        assert!(error.to_string().contains("Command timed out"), "{error}");
+        #[cfg(unix)]
+        if std::env::var_os("KERNESS_EXEC_TEST_MOVE_GROUP").is_some() {
+            // This branch runs only in a fresh copy of the test executable.
+            // SAFETY: the fork child makes only async-signal-safe libc calls
+            // before _exit; it never touches the test runner's inherited locks.
+            unsafe {
+                match libc::fork() {
+                    -1 => libc::_exit(10),
+                    0 => {
+                        libc::sleep(2);
+                        libc::_exit(0);
+                    }
+                    _ => {}
+                }
+                // Keep the descendant in the original group while the direct
+                // child joins our parent's group. Killing the former succeeds
+                // without terminating the latter.
+                if libc::setpgid(0, libc::getpgid(libc::getppid())) == -1 {
+                    libc::_exit(11);
+                }
+                libc::sleep(2);
+                libc::_exit(0);
+            }
+        }
+        let access = allowing(|policy| {
+            policy.allowed_commands = vec!["sleep *".into(), "sh *".into(), "env *".into()]
+        });
+        // Finite sleepers leave nothing running if the deadline regresses.
+        // Both shell cases leave a descendant holding the output pipes: one
+        // while the leader waits and one after the leader has already exited.
+        let commands = [
+            "sleep 2".to_string(),
+            "sh -c 'sleep 2 & wait'".to_string(),
+            "sh -c 'sleep 2 &'".to_string(),
+        ];
+        #[cfg(unix)]
+        let commands = {
+            let mut commands = commands.to_vec();
+            commands.push(format!(
+                "env KERNESS_EXEC_TEST_MOVE_GROUP=1 {} --exact \
+                 exec::tests::a_command_that_overruns_its_deadline_is_killed",
+                shell_words::quote(
+                    std::env::current_exe()
+                        .expect("test executable")
+                        .to_str()
+                        .expect("path")
+                )
+            ));
+            commands
+        };
+        for command in commands {
+            let started = Instant::now();
+            let error = run_command(
+                &access,
+                &command,
+                None,
+                Some(Duration::from_millis(100)),
+                "",
+            )
+            .expect_err("timed out");
+            assert!(error.to_string().contains("Command timed out"), "{error}");
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{command} exceeded its deadline: {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]
     fn output_larger_than_a_pipe_buffer_still_completes() {
-        // The reader threads exist for this: a child filling its pipe blocks
-        // until someone drains it, and a parent that waited for exit first
-        // would deadlock.
+        // Both pipes must be drained while the command runs. Either one can
+        // fill before the child exits, and the final bytes must survive EOF.
         let access = allowing(|policy| policy.allowed_commands = vec!["sh *".into()]);
         let out = run_command(
             &access,
-            "sh -c 'yes abcdefgh | head -n 100000'",
+            "sh -c '(yes abcdefgh | head -n 100000) & yes ignored | head -n 100000 >&2; wait'",
             None,
             Some(Duration::from_secs(30)),
             "",
         )
         .expect("runs");
-        assert_eq!(out.lines().count(), 100_000);
+        assert_eq!(out, "abcdefgh\n".repeat(100_000));
     }
 
     #[test]

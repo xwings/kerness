@@ -2,120 +2,119 @@
 
 ## Goal
 
-One agent turn, from the provider call to the text that goes into the
-transcript. The cycle is: call the provider, parse tool calls out of the reply,
-dispatch them, feed the results back, and call again — until the model stops
-asking for tools or a bound is hit.
-
-This is the smallest piece of the framework a caller can reuse on its own: a
-harness that wants a different loop but the same turn mechanics constructs an
-`AgentRunner` directly.
+Run one agent turn through provider requests and ordered tool results. The
+continuation is owned data, so a host can inspect the next call, request
+approval, persist it, and resume without repeating a completed tool. The
+blocking `AgentRunner::run` and caller-driven sessions use the same state.
+This implements M2's turn stepping and M3's typed turn outcomes.
 
 ## Status
 
-`done`
+`done` — owned continuations, typed turn reasons, and legacy driving are
+implemented; the Rust and rebuilt Python module tests pass.
 
 ## Code Structure
 
 | File | Role |
 | ---- | ---- |
-| `crates/kerness/src/agent_runtime.rs` | `AgentRunner` and the tool-call cycle |
-| `bindings/python/src/runtime.rs` | `PyAgentRunner` |
+| `crates/kerness/src/agent_runtime.rs` | owned turn state, provider advancement, legacy driver |
+| `bindings/python/src/runtime.rs` | standalone `PyAgentRunner` adapter |
 | `bindings/python/kerness/agent_runtime.py` | re-export shim |
 
 ## Key Types and Entry Points
 
-- `crates/kerness/src/agent_runtime.rs:61` — `AgentRunner<'a>` — borrows the
-  agent, the dispatcher, and the callbacks; it is built for one turn and dropped.
-- `crates/kerness/src/agent_runtime.rs:80` — `new(...)` — the required parts.
-- `crates/kerness/src/agent_runtime.rs:129` — `run(...)` — the cycle itself.
-- `crates/kerness/src/agent_runtime.rs:31` — `FOLLOWUP_PROMPT` — what the model is
-  told after tool results are appended.
-- `crates/kerness/src/agent_runtime.rs:41` — `MAX_INVALID_CALLS` — three
-  consecutive unparseable tool blocks end the turn rather than looping.
-- `crates/kerness/src/agent_runtime.rs:52` — `MAX_REPEATED_FAILURES` — three
-  consecutive rounds in which every call failed with exactly the failures of the
-  round before end the turn.
-- `crates/kerness/src/agent_runtime.rs:101` — `with_max_tool_iterations(limit)` —
-  the per-turn ceiling on tool rounds.
-- `crates/kerness/src/agent_runtime.rs:108` — `with_record(f)` — the hook the
-  session uses to write each provider exchange to the session file.
+- `crates/kerness/src/agent_runtime.rs:51` — `AgentTurn` — private scratch,
+  pending calls, completed results, loop guards, and record outbox; serializable
+  without carrying a provider or a handler.
+- `crates/kerness/src/agent_runtime.rs:154` — `snapshot` / `:158` `from_snapshot` — preserve the
+  exact tool cursor and reject inconsistent history or result positions.
+- `crates/kerness/src/agent_runtime.rs:243` — `accept_tool_result` — consumes one pending call;
+  `pending_call` exposes it without executing it.
+- `crates/kerness/src/agent_runtime.rs:140` — `take_recorded` — drains newly appended exchange
+  messages once; the drained state survives a snapshot.
+- `crates/kerness/src/agent_runtime.rs:146` — `replace_history` — replaces only the shared-history
+  prefix after compaction, preserving the instruction and private tool results.
+- `crates/kerness/src/agent_runtime.rs:293` — `AgentRunner` — borrows the provider, agent,
+  dispatcher, and prompt callbacks while advancing an owned continuation.
+- `crates/kerness/src/agent_runtime.rs:356` — `start` — assembles initial state without IO;
+  `:376` `advance` makes one logical provider request and executes no tools.
+- `crates/kerness/src/agent_runtime.rs:368` — `with_strict_errors` — returns provider errors to a
+  session driver; the default records their cause and returns a placeholder.
+- `crates/kerness/src/agent_runtime.rs:410` — `run` — drives the same state to completion and
+  dispatches each pending call through `ToolDispatcher`.
+- `crates/kerness/src/agent_runtime.rs:39` — `TurnReason`; `:134` `reason` —
+  distinguish a completed answer from an iteration limit, invalid calls,
+  repeated failures, or an absorbed provider error.
 
-### Three bounds, and why the framework owns two of them
+### What a step promises
 
-The loop is driven by the model rather than by a count, so it needs bounds a
-stuck model cannot argue with. `max_tool_iterations` is the caller's and is
-optional. The other two are the framework's and are not, because with the
-iteration bound unset an unbounded loop runs against a paid API.
+`advance` calls `Provider::chat_with_retries` once, preserving provider
+subclasses that override that method. Its internal retries can make several
+network requests; this is a logical provider boundary, not a network-attempt
+boundary. Usage observers count the attempts the provider exposes.
 
-Both watch for the same thing — a round that told the model nothing it was not
-told last round — at two different depths:
+A provider response can queue several tools. Each `accept_tool_result` commits
+one result and advances one cursor. Advancing the provider while any call is
+pending is an error. Native assistant/tool messages therefore reach the next
+provider request as a complete batch, even if a session was saved between two
+calls. Only the final answer belongs to the shared conversation by default.
 
-- `MAX_INVALID_CALLS` counts blocks that never parsed. An invalid block gets the
-  same "here is the format" text every time, so a model that cannot produce
-  valid JSON emits the same reply forever.
-- `MAX_REPEATED_FAILURES` counts rounds that parsed and got nowhere: every call
-  in the round failed, and the results are equal, in order, to the previous
-  round's (`agent_runtime.rs:183`). The model has been told what is wrong, has
-  changed nothing, and would be told the same thing again.
+`advance` propagates context overflow with the continuation unchanged.
+Compaction replaces the shared-history prefix and retries the provider with
+completed tool results still present. A standalone legacy `run` cannot expose
+its private continuation to its caller, so it preserves its placeholder on a
+followup failure; an opening overflow still propagates.
 
-Both counters are *consecutive*, reset by any round that made progress. That is
-what keeps a model that recovers from one bad block, or works through several
-different wrong calls, from being cut off — a round with even one success in it
-is progress, and the guard has to let it run.
+### Bounds and record delivery
 
-Both end the turn, not the session, and both log a warning naming the purpose.
-A turn that produced no text is a turn the session can carry on without, so this
-is deliberately not an [errors.md](errors.md) error and deliberately not a
-[loop.md](loop.md) end reason: the session's own bounds decide when a run stops.
+`max_tool_iterations` caps tool rounds. `MAX_INVALID_CALLS` stops three
+consecutive unparseable blocks; `MAX_REPEATED_FAILURES` stops three repeats of
+an identical all-error result batch. Their counters and previous results are
+part of the continuation, so restoring a snapshot grants no new allowance.
+A success or a different failure resets the relevant consecutive counter.
+Restoration rejects impossible guard counts and terminal state without its
+reason. Public mutation validates even states deserialized directly through
+serde; saturating counters cannot wrap back into a fresh allowance.
+
+The record outbox holds exchanges until `take_recorded` consumes them. A caller
+that persists those exchanges must checkpoint the drained continuation with
+the corresponding conversation update. The standalone `with_record` callback
+consumes the same outbox. Final text is returned separately.
 
 ## Interactions
 
-- Called by [session.md](session.md) for a participant turn and by
-  [loop.md](loop.md) for an orchestrator turn.
-- Calls [provider.md](provider.md) for each model exchange.
-- Parses calls with [toolkit.md](toolkit.md) and dispatches through its
-  `ToolDispatcher`; `MAX_REPEATED_FAILURES` compares the `ToolResult`s that
-  dispatcher returns, so an access refusal repeated verbatim trips it.
-- Records exchanges into [sessionfile.md](sessionfile.md) via `with_record`.
+- [session.md](session.md) binds providers, prompt assembly, permissions,
+  approval, persistence, cancellation, and usage budgets around each step.
+- [loop.md](loop.md) requests whole turns without knowing how many provider or
+  tool steps they require.
+- [provider.md](provider.md) owns retries and wire transport.
+- [toolkit.md](toolkit.md) validates and dispatches the single pending call;
+  [toolschema.md](toolschema.md) renders its dialect-specific result.
+- [sessionfile.md](sessionfile.md) persists turn state together with loop state.
 
 ## How to Test
 
 ```sh
-cargo test -p kerness agent_runtime                                       # pass = 0 failed
-.venv/bin/python -m pytest bindings/python/tests/test_agent_runtime.py -q # pass = 0 failed
+cargo test -p kerness --lib agent_runtime
+.venv/bin/python -m pytest bindings/python/tests/test_agent_runtime.py -q
 ```
 
-- The Rust tests drive a `MockProvider` (`crates/kerness/src/agent_runtime.rs:339`)
-  through a fixed reply sequence, so the cycle is exercised without a network call.
-- `crates/kerness/src/agent_runtime.rs:550` —
-  `a_model_repeating_one_failing_call_does_not_loop_forever` — the block parses,
-  so `MAX_INVALID_CALLS` never sees it. `:570`
-  `a_failing_call_the_model_varies_is_left_alone` and `:590`
-  `a_tool_that_keeps_succeeding_is_never_cut_off` are the two the guard must not
-  catch.
-- `bindings/python/tests/test_agent_runtime.py:129` — `test_a_model_stuck_on_invalid_json_does_not_loop_forever` —
-  the `MAX_INVALID_CALLS` cutoff — paired with `:152`
-  `test_a_recovering_model_is_not_penalised_for_an_earlier_bad_block`, which is
-  what makes the counter consecutive rather than cumulative.
-- `:140` — `test_a_model_repeating_a_hopeless_call_does_not_loop_forever` — the
-  `MAX_REPEATED_FAILURES` cutoff reached through a Python handler that raises,
-  which is the part the crate's own tests cannot exercise. What the guard must
-  *not* catch is counter logic, asserted in `agent_runtime.rs` alone.
-- `:82` — `test_the_caller_history_is_not_mutated` — a turn appends to its own
-  copy.
-- `:284` — `test_a_fenced_call_still_works_under_a_native_dialect` — the prompt
-  fallback is not switched off just because native tools are available.
+Both commands must exit zero. Existing native-exchange coverage exercises two
+calls, restores between them, and checks correlation IDs and exactly two tool
+executions. Multi-round and guard tests restore after each step. Recording tests
+prove a drained outbox stays drained, and the followup-failure test proves an
+overflow retry preserves its instruction and completed tool output. The legacy
+provider fixture overrides `chat_with_retries` and refuses direct `chat` calls.
+Guard owners assert typed completion reasons after restoration and refuse
+malformed counters before a provider or result mutation can run.
+Verified on the current source: 19 Rust agent-runtime tests pass; the rebuilt
+Python agent-runtime and loop suites pass together with 57 tests.
 
 ## Open Gaps / Roadmap
 
-- Tool calls within one reply are dispatched in order, one at a time. Parallel
-  dispatch would change nothing observable today because everything is
-  synchronous, but a caller with slow tools has no way to overlap them.
-- All three bounds are per turn, not per session. A model that trips
-  `MAX_REPEATED_FAILURES` every turn produces a short turn every turn and the
-  session runs to its own limit; nothing aggregates the pattern. Budgets on the
-  root roadmap are where a session-wide bound would live.
-- `MAX_REPEATED_FAILURES` compares results for equality, so a failure carrying a
-  varying detail — a timestamp, a path that changes — reads as progress and is
-  never counted.
+- One logical provider request may block through provider-owned retries.
+  Cancellation is cooperative between runtime steps.
+- Tool handlers execute synchronously; an arbitrary handler needs its own
+  deadline or cancellation support while it is running.
+- Repeated-failure detection compares rendered results. A changing timestamp
+  or other varying detail counts as a different failure.

@@ -17,15 +17,12 @@
 //! | result goes in | a `role: "tool"` message | a `tool_result` block in a `role: "user"` message |
 //!
 //! [`ToolDialect::Text`] is the fallback for endpoints with no native support.
-//! It is not a lesser sibling here — it is the only dialect every provider can
-//! speak, and its rendering is byte-for-byte what the session produced before
-//! native calling existed.
 
 use serde_json::{json, Value};
 
 use crate::provider::ProviderResponse;
 use crate::pyfmt::json_dumps;
-use crate::tooling::{Arguments, ToolCall, ToolSpec};
+use crate::tooling::{wrap_raw, Arguments, ToolCall, ToolSpec};
 use crate::toolkit::ToolResult;
 
 /// How a provider expects tool schemas and tool results to be encoded.
@@ -33,7 +30,8 @@ use crate::toolkit::ToolResult;
 /// `Text` is the fallback: tools are described in prose and calls are scraped
 /// out of a fenced JSON block. `Openai` and `Anthropic` send real schemas in
 /// the request and read structured tool-use blocks back.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolDialect {
     #[default]
     Text,
@@ -151,11 +149,7 @@ pub fn parse_anthropic_tool_calls(response: &Value) -> Vec<ToolCall> {
         };
         let arguments = match block.get("input") {
             Some(Value::Object(input)) => input.clone(),
-            other => {
-                let mut wrapped = Arguments::new();
-                wrapped.insert("raw".into(), other.cloned().unwrap_or(Value::Null));
-                wrapped
-            }
+            other => wrap_raw(other.cloned().unwrap_or(Value::Null)),
         };
         calls.push(ToolCall {
             name,
@@ -199,12 +193,6 @@ fn decode_arguments(raw: Option<&Value>) -> Arguments {
         }
         _ => Arguments::new(),
     }
-}
-
-fn wrap_raw(value: Value) -> Arguments {
-    let mut arguments = Arguments::new();
-    arguments.insert("raw".into(), value);
-    arguments
 }
 
 /// Render the model's tool-calling turn back into the message list.

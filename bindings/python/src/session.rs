@@ -1,7 +1,7 @@
 //! The session, and what a completed run reports.
 //!
 //! One difference from the Rust API is visible here: `Session::new` takes a
-//! [`SessionConfig`] struct, while Python callers pass seventeen keyword
+//! [`SessionConfig`] struct, while Python callers pass keyword
 //! arguments. The struct is assembled in [`PySession::new`] and nowhere else,
 //! so a Rust caller keeps the builder and a Python caller keeps the keywords.
 //!
@@ -20,9 +20,11 @@ use kerness::memory::MemoryFilter;
 use kerness::provider::ReasoningEffort;
 use kerness::pyfmt::repr_str;
 use kerness::role::Position;
-use kerness::session::{Session, SessionConfig, SessionResult, DEFAULT_MAX_CONTEXT_TOKENS};
+use kerness::session::{
+    ContextToolSpec, RunOptions, Session, SessionConfig, SessionResult, DEFAULT_MAX_CONTEXT_TOKENS,
+};
 use kerness::tooling::{Arguments, ToolHandler};
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -32,7 +34,8 @@ use crate::convert::{map_from_py, map_to_py, value_from_py};
 use crate::errors::Raise;
 use crate::memory::{bind_memory_store, PySessionMemory};
 use crate::provider::bind_provider;
-use crate::types::{PyAgent, PyMessage};
+use crate::run::{require_callable, PyContextHandler, PyEventSink, PySessionRun};
+use crate::types::{PyAgent, PyMessage, PyToolSpec};
 
 /// What a completed run reports.
 #[pyclass(name = "SessionResult", module = "kerness._core", frozen)]
@@ -247,7 +250,7 @@ impl ContextSource for PySource {
 /// Orchestrates a multi-agent collaboration session.
 #[pyclass(name = "Session", module = "kerness._core")]
 pub struct PySession {
-    inner: Session,
+    inner: Option<Session>,
     /// The channel the run writes to, when the caller wrote it in Python, kept
     /// so that an exception it raised can be re-raised from [`PySession::run`]
     /// rather than reported as the framework error it had to be reduced to on
@@ -257,6 +260,24 @@ pub struct PySession {
 }
 
 impl PySession {
+    fn prepared(&self) -> PyResult<&Session> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| {
+                kerness::Error::session("Session already started; use its SessionRun handle.")
+            })
+            .raise()
+    }
+
+    fn prepared_mut(&mut self) -> PyResult<&mut Session> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| {
+                kerness::Error::session("Session already started; use its SessionRun handle.")
+            })
+            .raise()
+    }
+
     /// Build an agent from `add_agent`'s keywords.
     #[allow(clippy::too_many_arguments)]
     fn agent(
@@ -390,46 +411,48 @@ impl PySession {
             memory_filter: bind_memory_filter(memory_filter)?,
         };
         Ok(PySession {
-            inner: Session::new(config).raise()?,
+            inner: Some(Session::new(config).raise()?),
             channel: bound_channel.and_then(|bound| bound.python),
         })
     }
 
     /// The agents registered so far.
     #[getter]
-    fn _agents(&self) -> Vec<PyAgent> {
-        self.inner
+    fn _agents(&self) -> PyResult<Vec<PyAgent>> {
+        Ok(self
+            .prepared()?
             .agents()
             .iter()
             .map(|agent| PyAgent {
                 inner: agent.clone(),
                 provider: None,
             })
-            .collect()
+            .collect())
     }
 
     /// The session-level memory, live: reading it after `run()` reads what
     /// the run wrote.
     #[getter]
-    fn memory(&self) -> PySessionMemory {
-        PySessionMemory::of_session(self.inner.memories())
+    fn memory(&self) -> PyResult<PySessionMemory> {
+        Ok(PySessionMemory::of_session(self.prepared()?.memories()))
     }
 
     /// The rounds limit in force, after the gameplan's default is applied.
     #[getter]
-    fn _max_rounds(&self) -> i64 {
-        self.inner.max_rounds()
+    fn _max_rounds(&self) -> PyResult<i64> {
+        Ok(self.prepared()?.max_rounds())
     }
 
     /// The allowed command regex patterns.
     #[getter]
-    fn exec(&self) -> Vec<String> {
-        self.inner.exec()
+    fn exec(&self) -> PyResult<Vec<String>> {
+        Ok(self.prepared()?.exec())
     }
 
     #[setter]
-    fn set_exec(&mut self, patterns: Vec<String>) {
-        self.inner.set_exec(patterns);
+    fn set_exec(&mut self, patterns: Vec<String>) -> PyResult<()> {
+        self.prepared_mut()?.set_exec(patterns);
+        Ok(())
     }
 
     /// Add an agent to the session.
@@ -487,13 +510,13 @@ impl PySession {
             memory,
             workspace,
         )?;
-        slf.inner.add_agent(agent).raise()?;
+        slf.prepared_mut()?.add_agent(agent).raise()?;
         Ok(slf)
     }
 
     /// Attach a skill to the session.
     fn add_skill<'py>(mut slf: PyRefMut<'py, Self>, name: &str) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner.add_skill(name).raise()?;
+        slf.prepared_mut()?.add_skill(name).raise()?;
         Ok(slf)
     }
 
@@ -506,7 +529,7 @@ impl PySession {
         handler: Py<PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let parameters = value_from_py(parameters)?;
-        slf.inner
+        slf.prepared_mut()?
             .add_tool(
                 name,
                 description,
@@ -514,6 +537,41 @@ impl PySession {
                 Arc::new(PyHandler { callable: handler }),
             )
             .raise()?;
+        Ok(slf)
+    }
+
+    /// Register a complete ToolSpec, preserving its actor-aware handler.
+    fn add_tool_spec<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        spec: &PyToolSpec,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.prepared_mut()?
+            .add_tool_spec(spec.inner.clone())
+            .raise()?;
+        Ok(slf)
+    }
+
+    /// Register handler(arguments, context) and optional preflight(arguments, identity).
+    #[pyo3(signature = (name, description, parameters, handler, *, preflight=None))]
+    fn add_contextual_tool<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        name: String,
+        description: String,
+        parameters: &Bound<'_, PyAny>,
+        handler: Py<PyAny>,
+        preflight: Option<Py<PyAny>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        require_callable(handler.bind(slf.py()), "handler")?;
+        if let Some(callable) = &preflight {
+            require_callable(callable.bind(slf.py()), "preflight")?;
+        }
+        let spec = ContextToolSpec {
+            name,
+            description,
+            parameters: value_from_py(parameters)?,
+            handler: Arc::new(PyContextHandler { handler, preflight }),
+        };
+        slf.prepared_mut()?.add_contextual_tool(spec).raise()?;
         Ok(slf)
     }
 
@@ -526,7 +584,7 @@ impl PySession {
         name: &str,
         source: Py<PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner
+        slf.prepared_mut()?
             .add_context(name, Arc::new(PySource { callable: source }))
             .raise()?;
         Ok(slf)
@@ -541,7 +599,7 @@ impl PySession {
         timeout_sec: Option<f64>,
         actor: &str,
     ) -> PyResult<String> {
-        self.inner
+        self.prepared()?
             .run_command(
                 command,
                 cwd.as_deref(),
@@ -555,19 +613,70 @@ impl PySession {
     #[pyo3(signature = (path, *, actor=""))]
     fn read_file(&self, path: &Bound<'_, PyAny>, actor: &str) -> PyResult<String> {
         let path = path.str()?.to_string_lossy().into_owned();
-        self.inner.read_file(&path, actor).raise()
+        self.prepared()?.read_file(&path, actor).raise()
     }
 
     /// List a directory with access control.
     #[pyo3(signature = (path, *, actor=""))]
     fn list_dir(&self, path: &Bound<'_, PyAny>, actor: &str) -> PyResult<Vec<String>> {
         let path = path.str()?.to_string_lossy().into_owned();
-        self.inner.list_dir(&path, actor).raise()
+        self.prepared()?.list_dir(&path, actor).raise()
+    }
+
+    /// Transfer this configuration into an owned run controlled through step().
+    /// This Session is consumed even when Rust preparation fails.
+    #[pyo3(signature = (
+        *, mode="automatic", approvals="external", budget=None, pricing=None,
+        event_sink=None, result_validation="strict", binding_version=String::new(),
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        &mut self,
+        mode: &str,
+        approvals: &str,
+        budget: Option<&Bound<'_, PyAny>>,
+        pricing: Option<&Bound<'_, PyAny>>,
+        event_sink: Option<Py<PyAny>>,
+        result_validation: &str,
+        binding_version: String,
+    ) -> PyResult<PySessionRun> {
+        let mut options = RunOptions {
+            mode: serde_json::from_value(mode.into())
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+            approvals: serde_json::from_value(approvals.into())
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+            result_validation: serde_json::from_value(result_validation.into())
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+            binding_version,
+            ..RunOptions::default()
+        };
+        if let Some(budget) = budget.filter(|object| !object.is_none()) {
+            options.budget = serde_json::from_value(value_from_py(budget)?)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        if let Some(pricing) = pricing.filter(|object| !object.is_none()) {
+            options.pricing = serde_json::from_value(value_from_py(pricing)?)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        if let Some(callable) = event_sink {
+            Python::with_gil(|py| require_callable(callable.bind(py), "event_sink"))?;
+            options.event_sink = Some(Arc::new(PyEventSink { callable }));
+        }
+        self.prepared()?;
+        let session = self.inner.take().expect("prepared above");
+        let started = session.start(options);
+        if let Some(raised) = self.channel.as_ref().and_then(|channel| channel.parked()) {
+            return Err(raised);
+        }
+        Ok(PySessionRun {
+            inner: started.raise()?,
+            channel: self.channel.clone(),
+        })
     }
 
     /// Execute the session, blocking until the loop terminates.
     fn run(&mut self) -> PyResult<PySessionResult> {
-        let finished = self.inner.run();
+        let finished = self.prepared_mut()?.run();
         if let Some(raised) = self.channel.as_ref().and_then(|channel| channel.parked()) {
             return Err(raised);
         }

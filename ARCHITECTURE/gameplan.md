@@ -22,7 +22,7 @@ ship with the framework, and the three-step resolution of where they live.
 | `crates/kerness/src/gameplan.rs` | loading, splitting, and the built-in list |
 | `crates/kerness/src/assets.rs` | the assets root and Markdown-stem enumeration |
 | `crates/kerness/assets/gameplans/*.md` | the built-in gameplans |
-| `bindings/python/src/types.rs:1864` | `PyGameplanConfig` |
+| `bindings/python/src/types.rs:1854` | `PyGameplanConfig` |
 | `bindings/python/kerness/gameplan_loader.py` | re-export shim |
 
 ## Key Types and Entry Points
@@ -37,7 +37,7 @@ ship with the framework, and the three-step resolution of where they live.
   session must have an orchestrator registered before it can run.
 - `crates/kerness/src/gameplan.rs:55` — `max_rounds()` — the loop bound, read from
   the harness spec.
-- `crates/kerness/src/gameplan.rs:113` — `list_builtin_gameplans()` — enumerated
+- `crates/kerness/src/gameplan.rs:109` — `list_builtin_gameplans()` — enumerated
   from disk, not from a literal list, so an added or removed asset cannot escape
   the self-check.
 - `crates/kerness/src/assets.rs:38` — `root()` — resolution order:

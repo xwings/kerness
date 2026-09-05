@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 use kerness::agent_runtime;
 use kerness::compaction;
-use kerness::conversation::ChatMessage;
 use kerness::exec;
 use kerness::gameplan;
 use kerness::harness;
@@ -32,7 +31,9 @@ use kerness::{orchestrator, prompting};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::convert::{chat_to_py, map_from_py, map_to_py, value_from_py, value_to_py};
+use crate::convert::{
+    chat_message_to_py, chat_to_py, map_from_py, map_to_py, value_from_py, value_to_py,
+};
 use crate::errors::Raise;
 use crate::types::{
     dialect_from_py, PyGameplanConfig, PyHarnessSpec, PyPermitted, PyPersonaConfig,
@@ -98,7 +99,7 @@ pub fn retry(
 
 // -------------------------------------------------------------------- tooling
 
-/// Read `<tool_call>` blocks out of a model's text reply.
+/// Read tool calls from JSON fences or bare JSON in a model's text reply.
 #[pyfunction]
 pub fn parse_tool_calls(text: &str) -> Vec<PyToolCall> {
     tooling::parse_tool_calls(text)
@@ -664,11 +665,7 @@ pub fn load_snapshot(path: PathBuf) -> PyResult<Option<PySessionSnapshot>> {
 /// The chat message a single turn renders to.
 #[pyfunction]
 pub fn render_turn<'py>(py: Python<'py>, turn: PyRef<'_, PyTurn>) -> PyResult<Bound<'py, PyDict>> {
-    let ChatMessage { role, content } = turn.inner.render();
-    let dict = PyDict::new(py);
-    dict.set_item("role", role)?;
-    dict.set_item("content", content)?;
-    Ok(dict)
+    chat_message_to_py(py, &turn.inner.render())
 }
 
 /// Register every function in this module on `_core`.

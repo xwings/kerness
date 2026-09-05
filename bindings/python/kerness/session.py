@@ -5,8 +5,11 @@ from kerness._core import (
     DEFAULT_TIMEOUT_SEC,
     OVERFLOW_RETRY_FRACTION,
     Message,
+    RunControl,
     Session,
     SessionResult,
+    SessionRun,
+    ToolContext,
 )
 
 __all__ = [
@@ -16,4 +19,7 @@ __all__ = [
     "Message",
     "Session",
     "SessionResult",
+    "SessionRun",
+    "RunControl",
+    "ToolContext",
 ]

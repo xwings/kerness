@@ -26,7 +26,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple, PyType};
 use serde_json::Value;
 
-use crate::convert::{map_from_py, map_to_py, optional_map, value_from_py, value_to_py};
+use crate::convert::{
+    chat_message_to_py, map_from_py, map_to_py, optional_map, value_from_py, value_to_py,
+};
 use crate::errors::{to_py, Catch, Raise};
 use crate::provider::bind_provider;
 
@@ -616,11 +618,7 @@ impl PyTurn {
 
     /// The chat message this turn renders to.
     fn render<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let rendered = self.inner.render();
-        let dict = PyDict::new(py);
-        dict.set_item("role", rendered.role)?;
-        dict.set_item("content", rendered.content)?;
-        Ok(dict)
+        chat_message_to_py(py, &self.inner.render())
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -1587,14 +1585,6 @@ pub struct PyResultField {
 }
 
 impl PyResultField {
-    pub fn adopt(field: &ResultField) -> Self {
-        PyResultField {
-            name: field.name.clone(),
-            type_name: field.type_name.clone(),
-            description: field.description.clone(),
-        }
-    }
-
     pub fn snapshot(&self) -> ResultField {
         ResultField {
             name: self.name.clone(),

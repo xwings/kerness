@@ -547,3 +547,345 @@ fn an_agent_workspace_narrows_the_sessions_and_a_wider_one_names_the_agent() {
     assert!(message.contains("'Alice'"), "{message}");
     assert!(message.contains("never widens it"), "{message}");
 }
+
+const HOST_TOOLS: &str = r#"---
+name: host_tools
+agents:
+  orchestrator: false
+  participants: {min: 1}
+loop:
+  max_turns: 10
+  max_rounds: 1
+---
+# Host tools
+"#;
+
+fn host_tools(temp: &TempDir, provider: Arc<ToolProvider>, policy: AccessPolicy) -> Session {
+    let path = temp.write("host_tools.md", HOST_TOOLS);
+    let mut settings = config(&path.to_string_lossy(), "Run tools", provider);
+    settings.access_policy = Some(policy);
+    settings.memory = temp.str_join("memory.md");
+    let mut session = Session::new(settings).unwrap();
+    session
+        .add_agent(Agent::new("P0").with_model("model"))
+        .unwrap();
+    session
+}
+
+fn advance_until_waiting(run: &mut kerness::session::SessionRun) -> kerness::session::WaitReason {
+    use kerness::session::{RunInput, StepOutcome};
+    for _ in 0..30 {
+        match run.step(RunInput::Continue).unwrap() {
+            StepOutcome::Progress => {}
+            StepOutcome::Waiting { reason } => return reason,
+            StepOutcome::Finished { outcome } => panic!("unexpected terminal outcome: {outcome:?}"),
+        }
+    }
+    panic!("run did not reach a waiting boundary")
+}
+
+#[test]
+fn external_approval_freezes_a_native_call_and_only_its_decision_can_execute_it() {
+    use kerness::session::{
+        ContextToolHandler, ContextToolSpec, PreflightAction, RunInput, RunMode, RunOptions,
+        RunReason, StepOutcome, ToolContext, ToolIdentity, WaitReason,
+    };
+    use kerness::tooling::Arguments;
+    use std::sync::Mutex;
+
+    struct Confirming(Arc<Mutex<Vec<ToolIdentity>>>);
+    impl ContextToolHandler for Confirming {
+        fn preflight(
+            &self,
+            arguments: &Arguments,
+            _: &ToolIdentity,
+        ) -> kerness::Result<Option<PreflightAction>> {
+            Ok(
+                (arguments["value"] == "second").then(|| PreflightAction::Confirm {
+                    description: "Record second".into(),
+                }),
+            )
+        }
+        fn call(&self, arguments: &Arguments, context: &ToolContext) -> kerness::Result<String> {
+            self.0.lock().unwrap().push(context.identity().clone());
+            Ok(arguments["value"].as_str().unwrap().to_string())
+        }
+    }
+
+    for decision in [Some(true), Some(false), None] {
+        let temp = TempDir::new("external-approval");
+        let first =
+            common::tool_call_reply("record", json!({"value": "first", "actor": "spoof"}), "c1");
+        let second =
+            common::tool_call_reply("record", json!({"value": "second", "actor": "spoof"}), "c2");
+        let provider = ToolProvider::new(
+            ToolDialect::Openai,
+            vec![
+                ProviderResponse {
+                    tool_calls: [first.tool_calls, second.tool_calls].concat(),
+                    ..ProviderResponse::default()
+                },
+                ProviderResponse::text("Finished tools."),
+            ],
+        )
+        .shared();
+        let policy = AccessPolicy {
+            workspace: Some(temp.str_join("")),
+            ..AccessPolicy::new()
+        };
+        let mut session = host_tools(&temp, provider.clone(), policy);
+        let called = Arc::new(Mutex::new(Vec::new()));
+        session
+            .add_contextual_tool(ContextToolSpec::new(
+                "record",
+                "Record a value",
+                json!({"type": "object"}),
+                Arc::new(Confirming(called.clone())),
+            ))
+            .unwrap();
+        let mut run = session
+            .start(RunOptions {
+                mode: RunMode::HostDriven,
+                ..RunOptions::default()
+            })
+            .unwrap();
+        run.step(RunInput::SelectAgent {
+            agent: "P0".into(),
+            instruction: "Record both".into(),
+        })
+        .unwrap();
+        let WaitReason::Approval { request } = advance_until_waiting(&mut run) else {
+            panic!("second call needs approval")
+        };
+        assert_eq!(
+            called.lock().unwrap().len(),
+            1,
+            "preflight cannot invoke the handler"
+        );
+        assert_eq!(
+            provider.call_count(),
+            1,
+            "the followup waits for both tool results"
+        );
+        assert_eq!(request.call.id, "c2");
+        assert_eq!(
+            request.call.arguments,
+            json!({"value": "second", "actor": "spoof"})
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+        assert_eq!(request.identity.actor(), "P0");
+        assert_eq!(
+            request.identity.run_id(),
+            called.lock().unwrap()[0].run_id()
+        );
+        assert_eq!(
+            request.identity.turn_id(),
+            called.lock().unwrap()[0].turn_id()
+        );
+        assert_ne!(
+            request.identity.call_id(),
+            called.lock().unwrap()[0].call_id()
+        );
+        assert_eq!(
+            advance_until_waiting(&mut run),
+            WaitReason::Approval {
+                request: request.clone()
+            }
+        );
+        assert!(run
+            .step(RunInput::Approve {
+                request_id: format!("{}-stale", request.request_id),
+                approved: true
+            })
+            .is_err());
+        assert!(run
+            .step(RunInput::UserMessage {
+                text: "steer during tool calls".into()
+            })
+            .is_err());
+        assert_eq!(called.lock().unwrap().len(), 1);
+        if let Some(approved) = decision {
+            run.step(RunInput::Approve {
+                request_id: request.request_id.clone(),
+                approved,
+            })
+            .unwrap();
+            assert!(run
+                .step(RunInput::Approve {
+                    request_id: request.request_id,
+                    approved: true
+                })
+                .is_err());
+            assert_eq!(advance_until_waiting(&mut run), WaitReason::Input);
+            assert_eq!(called.lock().unwrap().len(), if approved { 2 } else { 1 });
+            let followup = provider.calls()[1].clone();
+            assert!(followup
+                .messages
+                .iter()
+                .any(|message| message["tool_call_id"] == "c1" && message["content"] == "first"));
+            assert!(followup
+                .messages
+                .iter()
+                .any(|message| message["tool_call_id"] == "c2"
+                    && message["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(if approved {
+                            "second"
+                        } else {
+                            "Approval denied"
+                        }))));
+        } else {
+            run.control().cancel();
+            let StepOutcome::Finished { outcome } = run.step(RunInput::Continue).unwrap() else {
+                panic!("cancellation terminates")
+            };
+            assert_eq!(outcome.reason, RunReason::Cancelled);
+            assert_eq!(called.lock().unwrap().len(), 1);
+            assert_eq!(provider.call_count(), 1);
+        }
+    }
+}
+
+#[test]
+fn command_preflight_checks_hard_denials_and_grants_only_the_frozen_command_once() {
+    use kerness::session::{
+        ContextToolHandler, ContextToolSpec, PreflightAction, RunInput, RunMode, RunOptions,
+        ToolContext, ToolIdentity, WaitReason,
+    };
+    use kerness::tooling::Arguments;
+    use std::path::PathBuf;
+
+    struct Command {
+        command: String,
+        cwd: PathBuf,
+        invoked: Arc<AtomicUsize>,
+    }
+    impl ContextToolHandler for Command {
+        fn preflight(
+            &self,
+            _: &Arguments,
+            _: &ToolIdentity,
+        ) -> kerness::Result<Option<PreflightAction>> {
+            Ok(Some(PreflightAction::Command {
+                command: self.command.clone(),
+                cwd: Some(self.cwd.clone()),
+            }))
+        }
+        fn call(&self, _: &Arguments, context: &ToolContext) -> kerness::Result<String> {
+            self.invoked.fetch_add(1, Ordering::SeqCst);
+            let output = context.run_command(&self.command, Some(&self.cwd), None)?;
+            assert!(
+                context
+                    .run_command("echo another", Some(&self.cwd), None)
+                    .is_err(),
+                "approval cannot grant a different command"
+            );
+            assert!(
+                context
+                    .run_command(&self.command, Some(&self.cwd), None)
+                    .is_err(),
+                "approval is consumed once"
+            );
+            Ok(output)
+        }
+    }
+
+    for denied in [None, Some("host"), Some("directory")] {
+        let temp = TempDir::new("command-preflight");
+        let workspace = temp.join("work");
+        std::fs::create_dir(&workspace).unwrap();
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let command = if denied == Some("host") {
+            "echo https://evil.test/"
+        } else {
+            "echo approved"
+        };
+        let cwd = if denied == Some("directory") {
+            temp.path().to_path_buf()
+        } else {
+            workspace.clone()
+        };
+        let provider = ToolProvider::new(
+            ToolDialect::Openai,
+            vec![
+                common::tool_call_reply("execute", json!({}), "command"),
+                ProviderResponse::text("Command handled."),
+            ],
+        )
+        .shared();
+        let policy = AccessPolicy {
+            workspace: Some(workspace.display().to_string()),
+            allowed_hosts: vec!["ok.test".into()],
+            ..AccessPolicy::new()
+        };
+        // Memory is disabled by the integration config, but its declared path
+        // still must lie inside the workspace during preparation.
+        let path = temp.write("host_tools.md", HOST_TOOLS);
+        let mut settings = config(&path.to_string_lossy(), "Run tools", provider.clone());
+        settings.access_policy = Some(policy);
+        settings.memory = workspace.join("memory.md").display().to_string();
+        let mut session = Session::new(settings).unwrap();
+        session
+            .add_agent(Agent::new("P0").with_model("model"))
+            .unwrap();
+        session
+            .add_contextual_tool(ContextToolSpec::new(
+                "execute",
+                "Execute declared command",
+                json!({"type": "object"}),
+                Arc::new(Command {
+                    command: command.into(),
+                    cwd: cwd.clone(),
+                    invoked: invoked.clone(),
+                }),
+            ))
+            .unwrap();
+        let mut run = session
+            .start(RunOptions {
+                mode: RunMode::HostDriven,
+                ..RunOptions::default()
+            })
+            .unwrap();
+        run.step(RunInput::SelectAgent {
+            agent: "P0".into(),
+            instruction: "Execute".into(),
+        })
+        .unwrap();
+        let waiting = advance_until_waiting(&mut run);
+        if let Some(kind) = denied {
+            assert_eq!(
+                waiting,
+                WaitReason::Input,
+                "hard {kind} denials must not request approval"
+            );
+            assert_eq!(invoked.load(Ordering::SeqCst), 0);
+            assert!(provider.calls()[1].text().contains(if kind == "host" {
+                "allowed_hosts"
+            } else {
+                "outside the workspace"
+            }));
+        } else {
+            let WaitReason::Approval { request } = waiting else {
+                panic!("unlisted command requires approval")
+            };
+            assert_eq!(
+                request.action,
+                PreflightAction::Command {
+                    command: command.into(),
+                    cwd: Some(cwd)
+                }
+            );
+            assert_eq!(invoked.load(Ordering::SeqCst), 0);
+            run.step(RunInput::Approve {
+                request_id: request.request_id,
+                approved: true,
+            })
+            .unwrap();
+            assert_eq!(advance_until_waiting(&mut run), WaitReason::Input);
+            assert_eq!(invoked.load(Ordering::SeqCst), 1);
+            assert!(provider.calls()[1].text().contains("approved"));
+        }
+    }
+}

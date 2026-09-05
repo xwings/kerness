@@ -32,7 +32,7 @@ impl ChatMessage {
 /// Part of the public API — returned in `SessionResult::history`. It lives
 /// here rather than in the session because [`Conversation`] builds it and the
 /// session depends on the conversation, not the other way around.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub sender: String,
     pub content: String,
@@ -54,7 +54,7 @@ impl Message {
 }
 
 /// One entry in the conversation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
     /// `"user"` for a directive addressed to the next speaker, `"assistant"`
     /// for something an agent said.
@@ -166,8 +166,8 @@ impl Conversation {
 
     /// The turns themselves, oldest first.
     ///
-    /// [`Conversation::render`] is lossy — speaker and `msg_type` are folded
-    /// into a string — so persistence and compaction need the structured form.
+    /// [`Conversation::render`] folds speaker into content and drops `msg_type`
+    /// and `round_idx`, so persistence and compaction need the structured form.
     pub fn turns(&self) -> &[Turn] {
         &self.turns
     }
