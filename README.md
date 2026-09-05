@@ -503,6 +503,58 @@ ruff check bindings/python
 CI runs all of it on every push, on Rust stable and the 1.88 MSRV floor, and on
 Python 3.10 and 3.13.
 
+## Releasing
+
+Pushing a `v*` tag runs [Release](.github/workflows/release.yml): it builds the
+Python wheels and source distribution, installs the source distribution in a
+clean interpreter, then uploads all artifacts to PyPI and attaches them to a
+draft GitHub Release. PyPI publishing happens on the tag push; publishing the
+GitHub Release draft is a separate step.
+
+Configure PyPI once after registering your account. At
+[PyPI Publishing](https://pypi.org/manage/account/publishing/), add a **pending
+publisher** for a new project with these exact GitHub settings:
+
+| Field | Value |
+| --- | --- |
+| PyPI project name | `kerness` |
+| Owner | `xwings` |
+| Repository name | `kerness` |
+| Workflow name | `release.yml` |
+| Environment name | `pypi` |
+
+The first successful upload creates the project. If you already own the
+`kerness` project on PyPI, add the same Trusted Publisher under that project's
+Publishing settings instead. GitHub exchanges its identity for a short-lived
+PyPI credential, so no API token or repository secret is needed.
+
+In [GitHub's `pypi` environment](https://github.com/xwings/kerness/settings/environments),
+allow **Tags** matching `v*` under deployment branches and tags. A `main` branch
+rule alone does not permit tag runs. Leave required reviewers unset for
+automatic uploads on each release.
+
+For each release:
+
+1. Set `[workspace.package] version` in the root `Cargo.toml` to the release
+   version, for example `0.1.1`. Run `cargo check --workspace` to update
+   `Cargo.lock`, commit both files, and merge the release changes to `main`.
+   The Python package derives its version from Cargo; the tag does not set it.
+2. Once CI passes, tag that release commit with the matching version and push:
+
+   ```sh
+   git switch main
+   git pull --ff-only
+   git tag v0.1.1
+   git push origin v0.1.1
+   ```
+
+3. Check the [Release workflow](https://github.com/xwings/kerness/actions/workflows/release.yml)
+   for a successful **Publish to PyPI** job, then publish the GitHub Release draft.
+
+Use a new version for each release: PyPI does not allow replacing an uploaded
+file. To check the build before tagging, run **Release → Run workflow** on a
+branch; branch runs build and verify artifacts without publishing.
+
 ## Documentation
 
 [`ARCHITECTURE.md`](https://github.com/xwings/kerness/blob/main/ARCHITECTURE.md) is the entry point: mission, workspace

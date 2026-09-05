@@ -131,6 +131,13 @@ The eight integration files:
   `readme` resolve against that directory, and if they resolve to nothing the
   build still succeeds and simply ships less. `publish-pypi` needs it, so a
   distribution that cannot install from clean is never uploaded.
+- Release wheels use Linux x86-64/ARM64, macOS Intel (`macos-15-intel`) and
+  Apple Silicon (`macos-15`), and Windows x64 runners. Every matrix job must
+  succeed before publishing, so a retired runner blocks the entire release.
+  A `v*` tag triggers publication through the `pypi` environment, which must
+  permit `v*` tags. PyPI trusts `xwings/kerness`, workflow `release.yml`, and
+  environment `pypi`; [the release guide](../README.md#releasing) owns the
+  one-time pending-publisher setup and version/tag procedure.
 
 ## How to Test
 
@@ -152,6 +159,11 @@ cd bindings/python && ../../.venv/bin/maturin develop # pass = installed workspa
 CI runs those, plus `cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D
 warnings`, `cargo check --workspace --all-targets --locked` on the MSRV
 toolchain, and `ruff check` over the Python tree.
+
+For release workflow edits, run `actionlint .github/workflows/release.yml`
+(exit 0). A manual **Release → Run workflow** on a branch builds all platform
+wheels and verifies the sdist; both publishing jobs are skipped. A `v*` tag run
+also proves PyPI's OIDC exchange and upload, which local checks cannot exercise.
 
 The MSRV job passes `--locked` deliberately. The MSRV is a claim about the
 committed resolution; without the flag a dependency raising its own MSRV fails

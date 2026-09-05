@@ -133,6 +133,11 @@ The version is declared once, as `[workspace.package] version` in the root
 `env!("CARGO_PKG_VERSION")` as `_core.__version__`, and the package re-exports
 that as `kerness.__version__`. A release bumps one number.
 
+The release workflow publishes Python artifacts from `v*` tags through the
+GitHub `pypi` environment and PyPI Trusted Publishing. The setup and release
+procedure live in [README.md](README.md#releasing); build and verification
+ownership lives in [testing.md](ARCHITECTURE/testing.md).
+
 `crates/kerness/assets/` and
 `bindings/python/kerness/{gameplans,roles,personas,skills}/` hold byte-identical
 copies. Both must exist: the crate cannot read the package's copy when used from
@@ -576,7 +581,7 @@ create a reporting phase.
 - [run.md](ARCHITECTURE/run.md) — owned execution, scoped tools, approvals, outcomes and recovery.
 - [sessionfile.md](ARCHITECTURE/sessionfile.md) — saving and resuming a run.
 - [skills.md](ARCHITECTURE/skills.md) — loading skill bundles and the `Skill` tool.
-- [testing.md](ARCHITECTURE/testing.md) — the three suites, the examples, and what CI runs.
+- [testing.md](ARCHITECTURE/testing.md) — the three suites, the examples, CI, and release publishing.
 - [toolkit.md](ARCHITECTURE/toolkit.md) — tool specs, parsing calls out of text, dispatching them.
 - [toolschema.md](ARCHITECTURE/toolschema.md) — native tool dialects and their wire shapes.
 - [utils.md](ARCHITECTURE/utils.md) — text scanning, retry, and Python-compatible formatting.

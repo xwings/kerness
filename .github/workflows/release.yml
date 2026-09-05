@@ -7,11 +7,10 @@
 # repository `kerness`, workflow `release.yml`, environment `pypi`. The four
 # have to match exactly or the exchange is refused.
 #
-# Uploading is a one-way door — a version can be yanked but never re-uploaded
-# under the same number — so the job is fenced three ways: only on a `v*` tag,
-# only once every wheel and the from-clean sdist install have gone green, and
-# only through the `pypi` environment, which is where an approval rule holds it
-# for a human.
+# Publishing runs on `v*` tags after every wheel and the clean sdist install
+# pass. The `pypi` environment must allow tags matching `v*`; a branch rule for
+# `main` does not allow tags. Required reviewers are optional; leave them unset
+# for automatic publishing. See README.md#releasing for the one-time setup.
 #
 # The crate is not published from here. To start, add to the end of this file:
 #
@@ -48,8 +47,8 @@ jobs:
         include:
           - { platform: linux, runner: ubuntu-latest, target: x86_64 }
           - { platform: linux, runner: ubuntu-24.04-arm, target: aarch64 }
-          - { platform: macos, runner: macos-13, target: x86_64 }
-          - { platform: macos, runner: macos-14, target: aarch64 }
+          - { platform: macos, runner: macos-15-intel, target: x86_64 }
+          - { platform: macos, runner: macos-15, target: aarch64 }
           - { platform: windows, runner: windows-latest, target: x64 }
     steps:
       - uses: actions/checkout@v4
