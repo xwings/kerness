@@ -37,7 +37,7 @@ use kerness::{
 
 use common::{RecordingChannel, ScriptedProvider};
 
-/// Every value `ARCHITECTURE.md` publishes in its "Well-Known Constants" table.
+/// Every value `ARCHITECTURE/runtime.md` publishes in its "Well-known constants" table.
 /// A doc that names a number is a promise; this is where it is kept.
 #[test]
 fn the_documented_constants_hold_their_documented_values() {

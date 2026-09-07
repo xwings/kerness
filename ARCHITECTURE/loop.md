@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Orchestrator Loop
@@ -13,7 +13,7 @@ closing summary, or completion — and hands that decision to whoever is driving
 it. It performs no provider calls, filesystem operations, or channel writes
 itself: [run.md](run.md) executes each action in owned mode, and the blocking
 `LoopHost` adapter does the same for a caller that drives the loop directly.
-This supplies M2's scheduling and host-driven phase progression.
+This supplies scheduling and host-driven phase progression.
 
 It does not own the contract it is bounded by ([harness.md](harness.md)), the
 text scans it routes on ([utils.md](utils.md)), or the conversation it
@@ -61,7 +61,7 @@ rules apply; local facts:
   `call_method1` and converted through `Catch`
   (`bindings/python/src/runtime.rs:583`), and `record_position` failures are
   deliberately dropped there (`:640`).
-- Unit tests are inline: a `StubHost` (`crates/kerness/src/orchestrator.rs:1145`)
+- Unit tests are inline: a `StubHost` (`crates/kerness/src/orchestrator.rs:1116`)
   replays scripted orchestrator replies and records deliveries and
   checkpoints; `driver` (`:1252`) builds a
   loop for three fixed participants. The Python tests mirror that with their
@@ -97,7 +97,7 @@ An orchestrator response (`accept_orchestrator`,
 count, checks termination (`:856`), reads `advance_on` back (`:857`), queues
 its delivery, and then either routes (`:879`), re-asks with a hint (`:891`),
 or forces the end (`:896`). A participant response updates the pending set and
-round count through `PhaseTracker::record_turn` (`:279`) before queuing its
+round count through `PhaseTracker::record_turn` (`:278`) before queuing its
 delivery. The next participant request is already selected in the saved
 scheduler state, so restoring it does not ask the orchestrator to route that
 completed response again.
@@ -126,7 +126,7 @@ interrupted continuations keep their exact pending action.
 `scheduler` object is deserialized under `deny_unknown_fields` (`:749`) and
 then rejected if its counters disagree with the outer ones, an active turn is
 already past the configured allowance, a retry count is outside its budget, or
-a `Turn`/`Complete` action sits in the pending queue (`:751`). A pending
+a `Turn`/`Complete` action sits in the pending queue (`:760`). A pending
 participant who left the roster is refused by name (`:771`). Negative progress
 is refused before either path (`:743`). `PhaseTracker::restore` (`:322`) clamps
 a saved index to the current phase list (`:325`) and drops pending names no
@@ -168,7 +168,7 @@ another participant is still owed a turn.
   `max_turns_stops_a_loop_that_never_ends` (`:1471`) and
   `max_turns_still_outranks_max_rounds` (`:1990`).
 - A round closes on the last straggler, not on a repeat (`record_turn`,
-  `crates/kerness/src/orchestrator.rs:279`). Enforced by
+  `crates/kerness/src/orchestrator.rs:278`). Enforced by
   `it_takes_the_last_straggler_and_not_a_repeat_to_close_one` (`:1748`),
   which also drives the host-driven interface through the same counters.
 - `parse_result_fields` returns one entry per declared field, always
@@ -295,8 +295,9 @@ cargo test -p kerness --lib orchestrator                                        
   `the_turn_budget_stops_the_loop` (`:909`),
   `an_unroutable_orchestrator_is_retried_and_then_forced` (`:945`), and
   `a_host_selects_an_agent_and_finishes_without_a_judge_call` (`:257`).
-- Gap: `host_briefing` (`crates/kerness/src/orchestrator.rs:673`) has no direct test; it is reached only through
-  the owned run.
+- Gap: `host_briefing` (`crates/kerness/src/orchestrator.rs:673`) has no test
+  and no caller in the crate or the binding; `run.rs` reaches
+  `host_limit_reached`, `host_instruction` and `commit_host_turn` instead.
 
 ## Review and Refactor Guide
 
@@ -308,7 +309,7 @@ cargo test -p kerness --lib orchestrator                                        
   and a `StubHost` case. The variant
   name is a checkpoint tag.
 - **Changing when a round or phase closes** → `PhaseTracker::record_turn`
-  (`crates/kerness/src/orchestrator.rs:279`), `next_phase` (`:359`),
+  (`crates/kerness/src/orchestrator.rs:278`), `next_phase` (`:359`),
   `structure_complete` (`:834`), and the phase tests from `:1682`;
   [harness.md](harness.md)'s `max_rounds` clamp (`:179`) applies per phase.
 - **Changing the closing prompts or parser** → `closing_prompt`
@@ -331,7 +332,7 @@ cargo test -p kerness --lib orchestrator                                        
   bundled `orchestrator.md` role ([role.md](role.md)) describes the same
   protocol to the model.
 - Safe extension points: `LoopHost` default methods (only `record_position`
-  is defaulted today); the builders on `OrchestratorLoop`.
+  has a default); the builders on `OrchestratorLoop`.
 - Forbidden coupling: no provider, channel, conversation, or filesystem
   handle in this module; a loop that reaches a resource cannot be stepped by
   a host.
@@ -341,13 +342,14 @@ cargo test -p kerness --lib orchestrator                                        
 
 Improvement candidates (proposals, not accepted work):
 
-- A `LoopHost` trait-object test for `host_briefing` would close the one
-  direct gap named above. Success check: the briefing text is asserted
-  outside a `SessionRun`.
+- `host_briefing` is public and unreferenced; either a caller in `run.rs` with
+  a test asserting the briefing text outside a `SessionRun`, or removal.
+  Success check: `grep host_briefing` finds a call site or nothing.
 - `parse_result_fields` and `session/outcome.rs` read the same closing reply
-  twice with different rules; a single extraction shared by both would remove
-  the double `extract_fenced_json` pass, once the legacy coercing path is
-  retired.
+  twice with different rules through two fence extractors (`extract_json`,
+  `crates/kerness/src/orchestrator.rs:1016`, and `tooling::extract_fenced_json`);
+  one extraction shared by both would remove the second pass, once the
+  coercing path is retired.
 
 ## Open Gaps / Roadmap
 
@@ -355,5 +357,5 @@ Improvement candidates (proposals, not accepted work):
   can choose another schedule but tool/provider execution remains
   synchronous.
 - Phase transitions are forward-only.
-- `parse_result_fields` remains the legacy coercing parser. Strict validation
-  belongs to the session outcome layer and uses `raw_closing_result`.
+- `parse_result_fields` is the coercing parser behind `Session::run`. Strict
+  validation belongs to the session outcome layer and uses `raw_closing_result`.

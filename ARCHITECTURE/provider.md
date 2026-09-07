@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Provider
@@ -11,7 +11,7 @@ model name, messages, a reasoning effort level, and optionally tool schemas, and
 get a `ProviderResponse` back. Four backends ship — OpenAI, OpenRouter,
 Anthropic, and a `CustomProvider` for an OpenAI-compatible endpoint the caller
 describes — and the retry, dialect selection, and the two degrade latches are
-supplied once for all of them. The M3 run accounting and budgets in `usage.rs`
+supplied once for all of them. The run accounting and budgets in `usage.rs`
 sit at the supplied dispatch boundary and belong here too.
 
 `http.rs` underneath is the transport, and it is a seam on purpose: the default
@@ -129,7 +129,7 @@ says nothing about parameter support and must not degrade a session for life.
 `note_native_tools_rejected` (`crates/kerness/src/provider/mod.rs:376`) drops to `ToolDialect::Text` when the
 body names `tool`; `note_reasoning_effort_rejected` (`crates/kerness/src/provider/mod.rs:399`) drops the effort
 key when the body names any of the four spellings. The effort latch reports
-itself once — it sets with `swap` (`crates/kerness/src/provider/mod.rs:416`) — which is load-bearing: the tools
+itself once — it sets with `swap` (`crates/kerness/src/provider/mod.rs:419`) — which is load-bearing: the tools
 retry guards re-entry by passing `tools: None`, but the effort retry re-sends
 identical arguments, so the latch is the only thing that ends the recursion.
 `High` is a default that is *sent*, so a session against a model with no
@@ -142,7 +142,7 @@ provider, logged. Enforced by
 
 ### Three tiers decide the dialect
 
-`effective_dialect` (`crates/kerness/src/provider/mod.rs:318`) checks the latch, then the declared
+`supplied_effective_dialect` (`crates/kerness/src/provider/mod.rs:318`) checks the latch, then the declared
 `tool_dialect`, then `accepts_tools`. The last is always true for a Rust
 implementation, whose signature says so; the binding answers it by inspecting
 the subclass's `chat` (`bindings/python/src/provider.rs:562`), which keeps a
@@ -409,7 +409,7 @@ Rebuild the Python extension before running its tests after a Rust change.
 - Changing a request default → the constant only; both
   `the_shared_request_defaults_hold` and
   `test_the_constants_carry_the_frameworks_values` name the values, and the
-  root's Well-Known Constants table lists them.
+  well-known constants table in [runtime.md](runtime.md) lists them.
 - Changing retry or latch behaviour → `supplied_chat_with_retries` (`crates/kerness/src/provider/mod.rs:432`)
   and the latch functions (`:376`, `:399`); the Python `Provider` methods that
   forward to them; and the `TestChatWithRetries`, `TestDialectDetection`, and
@@ -452,7 +452,9 @@ Improvement candidates (proposals, not accepted work):
 - `context_window` is a figure the caller supplies; nothing checks it against
   what the endpoint will accept, so a wrong one is wrong in whichever direction
   it was written.
-- The minimum-interval throttle is per provider instance, so two providers
-  against one endpoint do not coordinate.
+- `interval_sec` is only the fixed wait between retry attempts
+  (`crates/kerness/src/provider/mod.rs:454`, `crates/kerness/src/utils.rs:196`);
+  nothing paces successful requests, and two providers against one endpoint
+  do not coordinate.
 - Three dialects cover the four backends. A `CustomProvider` against an
   endpoint with a fourth tool shape has to use the text protocol.

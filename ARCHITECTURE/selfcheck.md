@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Self-Check
@@ -82,8 +82,8 @@ Invariants a change must preserve:
 - **Core modules are a literal list held in step by a test.** `_CORE_MODULES`
   (`bindings/python/kerness/selfcheck.py:15`) is the definition of "core"; `test_every_package_module_is_in_the_core_list`
   (`bindings/python/tests/test_selfcheck.py:18`) walks the package directory
-  and fails on any unlisted module. The comment at `:38` records the one
-  naming constraint in the package: `kerness.skills` is the `SKILL.md` data
+  and fails on any unlisted module. The comment at
+  `bindings/python/kerness/selfcheck.py:38` records the one naming constraint in the package: `kerness.skills` is the `SKILL.md` data
   directory, so the runtime module is `skill_runtime` to avoid shadowing it.
 - **Optional absence is a SKIP, never a failure.** Enforced by
   `test_a_healthy_install_exits_zero_even_without_the_extras` (`:88`).
@@ -160,8 +160,8 @@ two halves of one guarantee and neither substitutes for the other.
 
 - Adding a package module → add its `(module, label)` pair to
   `_CORE_MODULES` (`bindings/python/kerness/selfcheck.py:15`);
-  `test_every_package_module_is_in_the_core_list` fails until you do. Add the
-  label to [bindings.md](bindings.md)'s shim table if it is a shim.
+  `test_every_package_module_is_in_the_core_list` fails until you do. If it is
+  a new kind of module, add it to [bindings.md](bindings.md)'s Code Structure.
 - Adding an asset class → add a fourth block to `_check_assets` (`:62`)
   following the existing shape (enumerate, load each, print `PASS <class>
   (<names>)`), extend `test_every_asset_class_is_enumerated_from_disk` and

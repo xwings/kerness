@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # JSON Schema
@@ -94,9 +94,10 @@ mistakes models make rather than implementing JSON Schema.
 - A boolean is not a number (`a_boolean_is_not_a_number`,
   `crates/kerness/src/jsonschema.rs:325`), because `serde_json` would
   otherwise let `true` satisfy an integer field.
-- `$ref` resolves against the document root only, through `$defs` and
-  `definitions` (`resolve_ref`, `crates/kerness/src/jsonschema.rs:138`);
-  there is no remote or cross-document resolution.
+- `$ref` resolves `#/`-anchored paths against the document root only
+  (`resolve_ref`, `crates/kerness/src/jsonschema.rs:138`); `strict` walks
+  `$defs` and `definitions` (`:35`). There is no remote or cross-document
+  resolution.
 
 ## Key Types and Entry Points
 
@@ -162,9 +163,10 @@ cargo test -p kerness jsonschema                                       # pass = 
 ## Review and Refactor Guide
 
 - **Changing a failure message** → the two message-pinning tests
-  (`crates/kerness/src/jsonschema.rs:308`, `:334`) and any Python test asserting the joined string through a tool
-  result (`bindings/python/tests/test_toolkit.py`, `test_session.py`
-  `TestToolCalls`). The text is model-facing output.
+  (`crates/kerness/src/jsonschema.rs:308`, `:334`) and the Python tests
+  asserting the joined string through a tool result
+  (`bindings/python/tests/test_toolkit.py:83`, `:87`). The text is
+  model-facing output.
 - **Adding a composition keyword** (`oneOf`, `not`) → a new branch in `strict`
   (`crates/kerness/src/jsonschema.rs:25`) following the `anyOf` shape at `:71`, with the breadcrumb extended
   through `extend` (`:159`), plus a test beside `:363`.

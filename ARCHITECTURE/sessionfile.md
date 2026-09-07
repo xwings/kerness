@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Session File
@@ -10,7 +10,7 @@ Saving a run so it can be resumed. A snapshot holds the conversation's turns and
 transcript, the orchestrator's loop state, the compaction count, and an identity
 block describing the session it came from. On resume, the identity is checked
 first: a snapshot from a different gameplan or a different agent roster is
-refused rather than half-applied. This is M2's durable continuation boundary at
+refused rather than half-applied. This is the durable continuation boundary at
 provider, tool, approval and scheduler steps.
 
 This module owns the file's envelope, the identity check, and the atomic
@@ -36,7 +36,7 @@ kerness --test resume` passes 12, and
 | `crates/kerness/src/sessionfile.rs` | `SCHEMA_VERSION`, `SessionSnapshot`, the identity functions, atomic `save_snapshot`, validating `load_snapshot` |
 | `crates/kerness/src/session/run.rs` | `checkpoint`, the caller that fills `loop.runtime`; documented in [run.md](run.md) |
 | `crates/kerness/src/session.rs` | `resume` and `save`, the compatibility adapter's reader and writer |
-| `bindings/python/src/funcs.rs:550` | `PySessionSnapshot` and the four functions |
+| `bindings/python/src/funcs.rs:550` | the four snapshot pyfunctions, and `PySessionSnapshot` at `:574` |
 | `bindings/python/kerness/sessionfile.py` | Re-export shim: `SCHEMA_VERSION`, `SessionSnapshot`, `check_identity`, `identity_for`, `load_snapshot`, `save_snapshot` |
 
 ## Language and Conventions
@@ -55,12 +55,13 @@ facts:
 - The file is written through `pyfmt::json_dumps_indent2` (`:165`) so a
   snapshot compares byte-for-byte with what Python's `json.dumps(indent=2)`
   produces; [utils.md](utils.md) owns that guarantee.
-- Two `#[cfg(unix)]` sites: owner-only `0o600` on the temporary file (`:135`)
+- Two `#[cfg(unix)]` sites: owner-only `0o600` on the temporary file (`:144`)
   and `sync_parent` (`:233`), whose non-Unix twin at `:242` is a no-op.
 - Every IO failure is `Error::Io` naming the path; every malformed-content
-  failure is `Error::Session` naming the file and the two ways out ("Delete it
-  to start fresh, or pass a different session_file path"). Observed convention,
-  asserted by the tests below.
+  failure is `Error::Session` naming the file, and all but the not-an-object
+  case (`:197`) name the two ways out ("Delete it to start fresh, or pass a
+  different session_file path"). Observed convention, asserted by the tests
+  below.
 - The Python constructor takes `loop=` as a keyword, which is a Rust keyword;
   the binding uses the raw identifier `r#loop`
   (`bindings/python/src/funcs.rs:582`) and names the getter with
@@ -85,9 +86,9 @@ output rather than resumable state.
 ### Two readable versions, one envelope
 
 `SCHEMA_VERSION` (`crates/kerness/src/sessionfile.rs:36`) is 2. Version 2
-stores the suspended runtime inside the existing `loop.runtime` object and the
-scheduler under `loop.scheduler`, preserving the public `SessionSnapshot`
-struct layout and the Python constructor. The engine owns that continuation's
+stores the suspended runtime inside the `loop.runtime` object and the
+scheduler under `loop.scheduler`; the public `SessionSnapshot` struct layout
+and the Python constructor are the same for both versions. The engine owns that continuation's
 schema: pending provider and tool actions, approval identity, completed
 results, scheduler progress, correlation IDs and usage accounting. Providers
 and handlers are re-registered, not serialized. A version 1 file cannot contain
@@ -100,7 +101,7 @@ integer counters (`validate_payload`, `:248`). Unknown envelope, record or
 legacy-loop fields and malformed values are errors rather than a source of
 silent empty strings or reset counters. Standalone snapshots may have an empty
 loop; optional legacy phase fields are type-checked when present. `runtime` and
-`scheduler` are accepted only under version 2 (`:326`). Enforced by
+`scheduler` are accepted only under version 2 (`:327`). Enforced by
 `unparseable_json_names_the_file` (`:484`), which strips and mistypes each
 envelope field in turn.
 
@@ -119,10 +120,10 @@ by `crates/kerness/tests/resume.rs:276` and `:304`.
 
 `save_snapshot` (`crates/kerness/src/sessionfile.rs:121`) exclusively creates a sibling temporary file with
 `create_new`, taking a fresh process-and-counter suffix when the first name is
-occupied (`:141`). Existing files and symlinks at that name are left untouched.
+occupied (`:151`). Existing files and symlinks at that name are left untouched.
 Bytes go through the opened handle; only a successful write and `sync_all` are
 renamed over the destination. A write or rename failure removes the file this
-save created and leaves the previous snapshot intact (`:176`). On Unix the
+save created and leaves the previous snapshot intact (`:172`). On Unix the
 temporary file is created owner-only and the parent directory is synced after
 the rename. A directory-sync failure is reported even though the new snapshot
 has already replaced the old one; callers must not infer that a failed save
@@ -167,7 +168,8 @@ callers; `crates/kerness/tests/resume.rs:125`
   `Ok(())` or `Error::Session` naming the first field that differs.
 - `crates/kerness/src/sessionfile.rs:121` — `save_snapshot(path, snapshot)` —
   validate, write a private temporary sibling, sync, rename, sync the parent;
-  `Error::Io` names the path that failed and leaves the previous file intact.
+  `Error::Io` names the failed path. Failures before rename preserve the
+  previous file; parent-directory sync can fail after replacement (`:171`).
 - `crates/kerness/src/sessionfile.rs:183` — `load_snapshot(path)` —
   `Result<Option<SessionSnapshot>>`: `None` for a missing file, `Error::Session`
   for bad JSON, a wrong version or a malformed envelope, `Error::Io` for an
@@ -266,7 +268,7 @@ develop`) before the Python command after a Rust change.
   `validate_payload` (`crates/kerness/src/sessionfile.rs:317` onward), which
   rejects an unknown `loop` key.
 - Changing the write path → keep the sequence create-new, write, `sync_all`,
-  rename, `sync_parent`, and the cleanup-only-what-we-created rule at `:176`;
+  rename, `sync_parent`, and the cleanup-only-what-we-created rule at `:172`;
   `a_save_lands_at_the_path_it_was_given_and_leaves_nothing_else` asserts
   every branch.
 - Changing an error message → the tests match `run.json` and the two-ways-out

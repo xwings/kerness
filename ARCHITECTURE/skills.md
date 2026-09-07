@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Skills
@@ -21,9 +21,9 @@ session, before the first provider call).
 
 ## Status
 
-`done` — `cargo test -p kerness skill` passes 45 tests,
-`cargo test -p kerness --test skills_e2e` passes 13, and the two Python modules
-pass 10 and 17.
+`done` — `cargo test -p kerness skill` passes 45 tests across four binaries
+(37 in the lib), `cargo test -p kerness --test skills_e2e` passes 13, and the
+two Python modules pass 10 and 17.
 
 ## Code Structure
 
@@ -151,7 +151,7 @@ agent with no skills (`bindings/python/src/skill.rs:95`). Neither swallow is ass
 ## Key Types and Entry Points
 
 - `crates/kerness/src/skill/loader.rs:27` — `SkillConfig` — name, description,
-  body, `allowed_tools: Option<Vec<String>>`, `requires_tools: Vec<String>`,
+  `content`, `allowed_tools: Option<Vec<String>>`, `requires_tools: Vec<String>`,
   `base_dir`, `builtin`. `bundle_paths()` at `:56` returns the `scripts/` and
   `references/` directories that exist (`BUNDLE_DIRS`, `:23`).
 - `crates/kerness/src/skill/loader.rs:78` — `load_skill(name_or_path)` — a bare
@@ -208,7 +208,7 @@ agent with no skills (`bindings/python/src/skill.rs:95`). Neither swallow is ass
 ## How to Test
 
 ```sh
-cargo test -p kerness skill                                               # pass = 45 passed, 0 failed
+cargo test -p kerness skill                                               # pass = 45 across four binaries (37 lib, 1, 1, 6), 0 failed
 cargo test -p kerness --test skills_e2e                                   # pass = 13 passed, 0 failed
 .venv/bin/python -m pytest bindings/python/tests/test_skill_loader.py -q  # pass = 10 passed
 .venv/bin/python -m pytest bindings/python/tests/test_skill_runtime.py -q # pass = 17 passed

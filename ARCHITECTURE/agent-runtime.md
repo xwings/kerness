@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Agent Runtime
@@ -10,7 +10,6 @@ Run one agent turn through provider requests and ordered tool results. The
 continuation is owned data, so a host can inspect the next call, request
 approval, persist it, and resume without repeating a completed tool. The
 blocking `AgentRunner::run` and the owned run engine drive the same state.
-This is M2's turn stepping and M3's typed turn outcomes.
 
 The loop runs in a private scratch buffer seeded from the shared conversation,
 and only the final text goes back into the conversation. That isolation is the
@@ -54,11 +53,11 @@ rules apply. Local facts:
 - **Every public mutation validates first.** `accept_tool_result`,
   `replace_history`, `advance`, and `from_snapshot` each call `validate()`
   (`crates/kerness/src/agent_runtime.rs:165`), so a turn deserialised straight through serde is still checked
-  ahead of any provider call. Observed in every `pub fn` that takes
-  `&mut self`.
+  ahead of any provider call. Observed in those four; `take_recorded`
+  (`:140`) only drains and does not validate.
 - **Counters saturate.** `iterations`, `invalid`, and `repeated` use
   `saturating_add`, so a hand-edited snapshot cannot wrap into a fresh
-  allowance (`crates/kerness/src/agent_runtime.rs:207`, `:265`).
+  allowance (`crates/kerness/src/agent_runtime.rs:224`, `:264`, `:281`).
 - **Borrowing driver, owned state.** `AgentRunner<'a>` (`crates/kerness/src/agent_runtime.rs:293`) borrows the
   agent, provider, and dispatcher and boxes its two callbacks; `AgentTurn`
   holds no reference. The Python class therefore stores the pieces and
@@ -74,8 +73,9 @@ rules apply. Local facts:
   asserts the `TurnReason`; its `MockProvider` (`:553`) overrides
   `chat_with_retries` (`:617`) so a runner that bypassed the logical boundary
   would fail. The Python suite's `runner(...)` helper
-  (`bindings/python/tests/test_agent_runtime.py:36`) and `NativeMockProvider`
-  (`:52`) play the same roles.
+  (`bindings/python/tests/test_agent_runtime.py:36`) plays the same role;
+  its `NativeMockProvider` (`:52`) implements `chat` directly and does not
+  guard the boundary.
 
 ## Design and Invariants
 
@@ -270,8 +270,10 @@ cargo test -p kerness --test tools_e2e                                     # pas
 - `bindings/python/tests/test_agent_runtime.py:82` —
   `test_the_caller_history_is_not_mutated` — the boundary's own claim: the
   Python list a caller passed is untouched.
-- `bindings/python/tests/test_agent_runtime.py:183`, `:194` — the legacy provider fixture overrides `chat_with_retries` and
-  refuses direct `chat`, proving the logical boundary from Python.
+- `bindings/python/tests/test_agent_runtime.py:183`, `:194` — the two
+  failing-provider fixtures raise from both `chat` and `chat_with_retries`,
+  proving the placeholder on an opening and on a follow-up failure from
+  Python; the logical-boundary proof is Rust-only.
 - `crates/kerness/tests/tools_e2e.rs:144`, `:321`, `:347`: one turn in each
   dialect through a session; `:387`, `:400`, `:413`: unknown tool, schema
   violation, and failing handler each answered as text; `:427`, `:439`: the
@@ -284,7 +286,8 @@ cargo test -p kerness --test tools_e2e                                     # pas
 - **Changing a guard or its threshold** → `accept_response` (`crates/kerness/src/agent_runtime.rs:204`),
   `accept_tool_result` (`:243`), `validate` (`:165`), the constants (`:30`,
   `:34`); the root's constants table and `crates/kerness/tests/public_api.rs`
-  assert the values; tests `:774`, `:791`, `:869` and their Python twins
+  assert the values; tests `crates/kerness/src/agent_runtime.rs:774`, `:791`,
+  `:869` and their Python twins
   (`bindings/python/tests/test_agent_runtime.py:129`, `:140`, `:160`).
 - **Changing what a snapshot holds** → `AgentTurn` (`crates/kerness/src/agent_runtime.rs:51`) and `validate`
   (`:165`); [sessionfile.md](sessionfile.md) stores it under `loop.runtime`, so

@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Session
@@ -7,8 +7,8 @@ eatmycode_version: "1.1.0"
 ## Goal
 
 Assemble a validated harness from configuration, registered agents, tools,
-skills, context and memory. This is the M1 preparation boundary and the public
-entry point to M2–M3 execution: `Session::new` loads the gameplan and confines
+skills, context and memory. This is the preparation boundary and the public
+entry point to execution: `Session::new` loads the gameplan and confines
 the session's own write paths, the `add_*` methods register the roster and its
 capabilities, `prepare` resolves everything against the harness contract, and
 `start` or `run` hands the result to the owned engine.
@@ -36,7 +36,7 @@ passes 52; `bindings/python/tests/test_session.py` passes 122 and
 | `crates/kerness/src/session/run.rs` | Owned execution; documented in [run.md](run.md) |
 | `crates/kerness/src/session/capabilities.rs` | Contextual tool identity and capabilities; documented in [run.md](run.md) |
 | `crates/kerness/src/session/outcome.rs` | Strict result validation; documented in [run.md](run.md) |
-| `bindings/python/src/session.rs` | `PySession`, `PySessionResult`, `PySessionMemory`, `PyFilter`; keyword-argument construction and the consumed-session slot |
+| `bindings/python/src/session.rs` | `PySession`, `PySessionResult`, `PyHandler`, `PyFilter`, `PySource`; keyword-argument construction and the consumed-session slot |
 | `bindings/python/kerness/session.py` | Re-export shim: `Session`, `SessionResult`, `SessionRun`, `RunControl`, `ToolContext`, `Message` and three constants |
 
 ## Language and Conventions
@@ -55,10 +55,12 @@ facts:
   that unwound must not take the session down with it. Every `Mutex` in this
   module goes through it; observed, no lint enforces it.
 - Five `#[allow(clippy::too_many_arguments)]` sites in
-  `bindings/python/src/session.rs` (`:60`, `:282`, `:349`, `:483`, `:632`)
-  cover the keyword-argument constructors; the Python signature is spelled in
-  the `#[pyo3(signature = (...))]` attribute directly above each.
-- `SessionResult` derives `Serialize`/`Deserialize` (`:80`) because it travels
+  `bindings/python/src/session.rs`: four keyword-argument constructors (`:60`,
+  `:349`, `:483`, `:632`), each with its Python signature spelled in the
+  `#[pyo3(signature = (...))]` attribute directly above, and the private
+  `agent` helper (`:282`) that `add_agent` calls.
+- `SessionResult` derives `Serialize`/`Deserialize`
+  (`crates/kerness/src/session.rs:80`) because it travels
   inside the run checkpoint; `SessionConfig` does not, because it carries
   `Arc<dyn Provider>` and friends and is never persisted.
 - Unit tests live inline at `crates/kerness/src/session.rs:2251` with their
@@ -153,7 +155,7 @@ and the owned run schedules it as its own step.
 
 ### Compatibility adapter
 
-`impl LoopHost for Session` (`:1846`) remains for callers driving an
+`impl LoopHost for Session` (`:1846`) serves callers driving an
 `OrchestratorLoop` directly: `turn` (`:1140`) retries one context overflow
 through `fit_conversation` at `OVERFLOW_RETRY_FRACTION` (`:77`), `deliver`
 strips memory markers on every routed turn, and `record_position` (`:1897`)
@@ -206,7 +208,7 @@ interrupted runs; explicit `start()` keeps terminal checkpoints terminal.
   `crates/kerness/tests/session_run.rs:1197`.
 - [access.md](access.md), [skills.md](skills.md) and [toolkit.md](toolkit.md)
   define access enforcement and the available tools: the manager built at
-  `crates/kerness/src/session.rs:563`, `SkillRegistry` with its grant callback at `:601`, `default_tools`
+  `crates/kerness/src/session.rs:563`, `SkillRegistry` (`:633`) with its grant callback (`:602`), `default_tools`
   (`:2017`) and `ToolDispatcher` over `active_tools`. Integration:
   `crates/kerness/tests/access_e2e.rs`, `skills_e2e.rs`, `tools_e2e.rs`.
 - [prompting.md](prompting.md), [context.md](context.md),
@@ -343,7 +345,7 @@ Improvement candidates (proposals, not accepted work):
 
 ## Open Gaps / Roadmap
 
-- Configuration and prompt/resource assembly remain in `session.rs`; live
+- Configuration and prompt/resource assembly live in `session.rs`; live
   execution has its own [run.md](run.md) owner. The public `LoopHost` adapter
   supports callers driving the lower-level scheduler directly.
 - One access policy and skill registry are shared by a synchronous run;

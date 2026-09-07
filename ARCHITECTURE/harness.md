@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Harness
@@ -10,8 +10,9 @@ The contract. A gameplan's YAML frontmatter declares who the agents are, how the
 loop runs, what phases exist, which tools and skills are available, and what
 fields the result must contain. This module parses that into typed specs,
 validates it against what the session actually registered, and resolves the two
-lists — tools and skills — that the declaration and the registration have to
-agree on.
+lists — tools and context — that the declaration and registration must agree
+on (`crates/kerness/src/harness.rs:342`). Skills are resolved separately as a
+union with the session's registrations (`:296`).
 
 The project rule that shapes this module: **dead configuration keys are
 defects.** Every field the parser accepts is validated, rendered into a prompt,
@@ -19,9 +20,11 @@ or enforced at runtime. Nothing is reserved for later.
 
 `yaml.rs` sits underneath, and is not a detail. Frontmatter is hand-written
 configuration, and how a bare scalar resolves is a behavioural decision: this
-parser implements YAML **1.1**, where `no` is a boolean. Every current YAML
-library implements 1.2, where `verdict_rethink: no` is the string `"no"` and the
-harness parser then rejects it as "must be a boolean".
+parser implements YAML **1.1**, where `no` is a boolean. It uses the
+`yaml-rust2` event API and custom scalar resolution (`Cargo.toml`,
+`crates/kerness/src/yaml.rs:42`) to preserve the distinction between bare `no`
+and quoted `"no"`; a YAML 1.2 scalar interpretation would make the former a
+string and cause `verdict_rethink: no` to fail boolean validation.
 
 This module does not own the loop that the contract bounds
 ([loop.md](loop.md)), the file the frontmatter is cut out of
@@ -54,7 +57,7 @@ rules apply; local facts:
 
 - Both `harness.rs` and `yaml.rs` compile their patterns once through
   `LazyLock<Regex>` (`crates/kerness/src/harness.rs:27`,
-  `crates/kerness/src/yaml.rs:28`); the `.expect("static pattern")` there is
+  `crates/kerness/src/yaml.rs:256`); the `.expect("static pattern")` there is
   the crate-wide spelling for a literal that cannot fail.
 - Load-time refusals are `Error::GameplanLoad`, run-time refusals
   `Error::Session` — `crates/kerness/src/harness.rs:314` against `:423`. The
@@ -68,12 +71,12 @@ rules apply; local facts:
 - Rendering a scalar back to text goes through `pyfmt::str` and `pyfmt::repr`
   (`crates/kerness/src/harness.rs:535`, `:732`), so a refusal quotes the value
   the way a Python caller would spell it.
-- Unit tests sit inline under `#[cfg(test)]` with three helpers — `parse`,
-  `ok`, `message` at `crates/kerness/src/harness.rs:829` — and sentence-style
+- Unit tests sit inline under `#[cfg(test)]` with four helpers — `parse`,
+  `ok`, `message`, `names` at `crates/kerness/src/harness.rs:829` — and sentence-style
   names. The Python tests group by parser stage (`TestParseAgents`,
   `TestParseLoop`, …) in `bindings/python/tests/test_harness.py:19` onward.
-- The `HarnessSpec` and `LoopSpec` pyclasses carry
-  `#[allow(clippy::too_many_arguments)]` on their constructors
+- The `HarnessSpec` pyclass carries
+  `#[allow(clippy::too_many_arguments)]` on its constructor
   (`bindings/python/src/types.rs:1661`) because the keyword signature mirrors
   the frontmatter one key per argument, `loop` spelled `r#loop` because it is
   a Rust keyword.
@@ -133,7 +136,7 @@ The rule the module exists for, and where each key lands:
 
 | Key | Consumed at |
 | --- | --- |
-| `name` | every refusal message; `crates/kerness/src/session.rs:797` names the gameplan an agent was refused against |
+| `name` | every validation refusal (`crates/kerness/src/harness.rs:364`, `:277`); the run identity (`crates/kerness/src/session.rs:1081`) and the `{gameplan}` placeholder in the orchestrator prompt (`:1404`) |
 | `description` | the orchestrator prompt, `crates/kerness/src/session.rs:1381` |
 | `agents.orchestrator.required` / `.instruction` | `validate_harness` (`crates/kerness/src/harness.rs:362`); the orchestrator prompt, `crates/kerness/src/session.rs:1388` |
 | `agents.participants.min` / `.max` | `validate_harness` (`crates/kerness/src/harness.rs:370`) |

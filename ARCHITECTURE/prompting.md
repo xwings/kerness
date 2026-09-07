@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Prompting
@@ -79,10 +79,12 @@ handed.
 
 ### The part order is fixed
 
-For the orchestrator: base, context, skills, tools, memory. For a participant:
-base, persona, reasoning note, language, context, skills, memory, tools — the
-first four inside `Agent::build_messages` (`crates/kerness/src/agent.rs:218`),
-the rest appended here. Enforced by
+Both positions start with base, persona, reasoning note and language through
+`Agent::decorate_system_prompt` (`crates/kerness/src/agent.rs:157`). The
+orchestrator then receives context, skills, tools and memory
+(`crates/kerness/src/prompting.rs:254`); a participant receives context, skills,
+memory and tools (`:270`). Optional blocks appear only when configured. Tests
+for the relative context/skills/tools/memory order are
 `the_orchestrator_order_is_base_skills_tools_memory`
 (`crates/kerness/src/prompting.rs:453`),
 `a_participants_memory_rides_with_its_skills_before_the_tools` (`:507`), and
@@ -105,7 +107,7 @@ filtering on the way in, is [memory.md](memory.md)'s.
 
 The age is rendered as days elapsed rather than as a timestamp: a model asked to
 subtract two dates does it badly and often does not think to try, while "written
-47 days ago" prompts the doubt the timestamp was supposed to. Under
+47 days ago" prompts the doubt the timestamp was supposed to. At or under
 `MEMORY_STALE_AFTER_DAYS` there is no line at all, because a warning on every
 resumed run is noise; `None` — no file on disk — renders none either, since
 notes written this run are as fresh as the run. Enforced by
@@ -150,8 +152,8 @@ mixed-provider session has one per backend. Enforced by
 `tools_for` is read on every call so harness narrowing is picked up
 (`the_tools_block_reflects_the_currently_permitted_set`, `:578`). The binding's
 `memory_for` returns the agent's memory *object* and the binding calls
-`.read()` on it (`bindings/python/src/runtime.rs:234`) and reads `.age`
-(`:255`), which is what lets two agents share one scope and both see a write
+`.read()` on it (`bindings/python/src/runtime.rs:240`) and reads `.age`
+(`:261`), which is what lets two agents share one scope and both see a write
 while the crate keeps taking plain content and plain days. `with_context` is the
 exception: its blocks arrive already rendered, because a source is called once
 per agent at the top of the run rather than once per prompt, and reading it here
@@ -264,7 +266,7 @@ cargo test -p kerness prompting                                       # pass = 2
   [compaction.md](compaction.md)'s overhead figure, which measures the result.
 - Changing a block constant → the Python re-export block in
   `bindings/python/src/funcs.rs:712` and any caller matching on the string;
-  `MEMORY_STALE_AFTER_DAYS` is in the root's Well-Known Constants table and
+  `MEMORY_STALE_AFTER_DAYS` is in [runtime.md](runtime.md)'s well-known constants table and
   asserted by `crates/kerness/tests/public_api.rs:43`.
 - Adding a prompt part → a new builder in the `with_*` style with a `None`
   default that renders nothing, a callback the session supplies from

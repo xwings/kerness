@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Testing
@@ -27,8 +27,10 @@ can be broken. A suite that catches one of those says nothing about the others.
 `done` — `cargo test --workspace -q` passes 407 unit tests, 118 integration
 tests and one doctest; `.venv/bin/python -m pytest bindings/python/tests -q`
 passes 502; format, clippy, rustdoc, the example build, the three offline
-examples, self-check and ruff all exit 0. The two `--locked` commands in the
-gate fail against the committed `Cargo.lock` — see **Open Gaps / Roadmap**.
+examples, self-check and ruff all exit 0. Both `--locked` commands pass with
+the current lockfile. A fresh source copy passes the Rust suite on 1.88.0 and
+the Python suite after installation into a new virtualenv. The CI MSRV pin
+still disagrees with the manifest — see **Open Gaps / Roadmap**.
 
 ## Code Structure
 
@@ -109,12 +111,13 @@ rather than the seam.
 **Nothing reaches the network.** Every provider in every suite is a double; the
 four backends are proved down to the request they build and the response they
 parse. `offline_debate` drives a real gameplan to completion the same way, which
-is why CI runs it as the smoke test (`.github/workflows/ci.yml:39` onward).
+is why CI runs it as the smoke test (`.github/workflows/ci.yml:48`).
 
 **Examples are compiled, not read.** `cargo build -p kerness --examples` fails
-on an example that no longer matches the API. The Python examples need keys and
-cannot run, so `bindings/python/tests/test_examples.py:132` parses each one and
-asserts every `kerness.X` attribute, `Session` method and `SessionResult`
+on an example that no longer matches the API. Live-provider Python examples
+need credentials; `host_control.py` runs offline. The static checks in
+`bindings/python/tests/test_examples.py:132` parse each script and
+assert every `kerness.X` attribute, `Session` method and `SessionResult`
 attribute it names still exists; `:148` loads every gameplan shipped beside an
 example under the current schema.
 
@@ -193,8 +196,8 @@ The eight integration files:
   and suspended-approval contracts.
 - The Python suite and [selfcheck.md](selfcheck.md) cover
   [bindings.md](bindings.md), which nothing on the Rust side can reach.
-- `crates/kerness/tests/public_api.rs:40` and
-  `bindings/python/tests/test_provider.py` each assert the root's well-known
+- `crates/kerness/tests/public_api.rs:43` and
+  `bindings/python/tests/test_provider.py` each assert [runtime.md](runtime.md)'s well-known
   constants and the shared request defaults; a constant changed in one language
   fails here before it drifts.
 - `release.yml`'s `verify-sdist` job is the only check that the installed
@@ -208,13 +211,13 @@ The whole gate, from the repository root:
 cargo fmt --all -- --check                             # pass = exit 0
 cargo clippy --workspace --all-targets -- -D warnings  # pass = exit 0
 cargo test --workspace -q                              # pass = 407 unit + 118 integration + 1 doctest
-cargo test --workspace -q --locked                     # observed: fails on the committed Cargo.lock, see Open Gaps
+cargo test --workspace -q --locked                     # pass = exit 0 with the current lockfile
 cargo build -p kerness --examples                      # pass = all 10 compile
 cargo run -p kerness --example offline_debate          # pass = completes with no key, exit 0
 cargo run -p kerness --example host_control            # pass = validated host result, exit 0
 cargo run -p kerness --example resume_approval         # pass = restored approval, each tool once, exit 0
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p kerness   # pass = exit 0
-cargo +1.88.0 check --workspace --all-targets --locked # observed: fails on the committed Cargo.lock, see Open Gaps
+cargo +1.88.0 check --workspace --all-targets --locked # pass = exit 0 with the current lockfile
 .venv/bin/python -m pytest bindings/python/tests -q    # pass = 502 passed
 .venv/bin/python -m kerness.selfcheck                  # pass = "OK: all core checks passed", exit 0
 .venv/bin/ruff check bindings/python                   # pass = "All checks passed!"
@@ -226,17 +229,17 @@ The wheel is built from `bindings/python/`, where `pyproject.toml` lives:
 cd bindings/python && ../../.venv/bin/maturin develop  # pass = installed workspace version
 ```
 
-Regenerating `Cargo.lock` (any unlocked `cargo` command rewrites the two
-workspace entries) makes both `--locked` commands pass on the current tree with
-the counts above; the failure is a property of the committed file.
+For installation prerequisites and the fresh-virtualenv commands, use the
+[root verification support](verification.md#local-prerequisites). Rebuild
+before testing Python; a matching package version cannot prove source freshness.
 
 `.github/workflows/ci.yml` runs format, clippy, `cargo test --workspace`
 (without `--locked`, `.github/workflows/ci.yml:39`), the example build,
 `offline_debate`, rustdoc, the MSRV check with `--locked`
 (`.github/workflows/ci.yml:70`), then on Python 3.10 and 3.13 the pytest
 suite, self-check and ruff. Rebuild the extension with `maturin develop` before
-running the Python suite after a Rust change; `test_packaging.py` catches a
-stale one by version.
+running the Python suite after a Rust change; `test_packaging.py` detects
+version mismatches but cannot detect stale builds within a version.
 
 - Suite-level invariants and their owners: the seam-contention rule at
   `crates/kerness/src/channel.rs:440` and `crates/kerness/src/access.rs:1125`;
@@ -256,7 +259,7 @@ stale one by version.
   `bindings/python/tests/conftest.py` for Python. Keep the zero-retry
   construction; a double that retries hides a failure behind a sleep.
 - Changing a well-known constant or request default → the crate, the Python
-  constructor signature, `crates/kerness/tests/public_api.rs:40` and
+  constructor signature, `crates/kerness/tests/public_api.rs:43` and
   `bindings/python/tests/test_provider.py` in one change.
 - Adding a Python module → `_CORE_MODULES` in `bindings/python/kerness/selfcheck.py`,
   or `bindings/python/tests/test_selfcheck.py:18` fails; it must also declare
@@ -288,17 +291,9 @@ Improvement candidates (proposals, not accepted work):
 
 ## Open Gaps / Roadmap
 
-- **CI defect:** `.github/workflows/ci.yml:62` pins `dtolnay/rust-toolchain@1.120.0`,
-  a Rust version that does not exist, so the "Rust (MSRV 1.88)" job fails at
-  `rustup toolchain install` with a 404.
-  The intended ref is `1.88.0`, matching `rust-version` in `Cargo.toml`;
-  dependabot (`.github/dependabot.yml:11`) will re-bump it unless told to
-  ignore that action.
-- **Lockfile defect:** the committed `Cargo.lock` records `kerness` and
-  `kerness-py` at `0.1.1-dev` while `Cargo.toml` says `0.1.2-dev`, so every
-  `--locked` command — the MSRV job's `cargo check --locked` and the gate's
-  `cargo test --locked` — fails from a fresh clone until the lock is regenerated
-  and committed.
+- **CI defect:** `.github/workflows/ci.yml:62` pins `dtolnay/rust-toolchain@1.120.0`
+  despite the declared 1.88 minimum. The proposed correction and success check
+  are in the [root roadmap](roadmap.md#repository-defects-evidence-backed-not-yet-fixed).
 - The integration tests never reach the network, so the four provider backends
   are proved only down to the request they build. Nothing here catches an
   endpoint changing its response shape.

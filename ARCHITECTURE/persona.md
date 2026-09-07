@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Persona
@@ -39,7 +39,7 @@ passes 8. Both bundled personas load and render through
 | `crates/kerness/src/assets.rs` | the shared root, candidate order, and `resolve_path` every asset family uses |
 | `crates/kerness/assets/personas/*.md` | the two built-in personas |
 | `bindings/python/src/types.rs:1027` | `PyPersonaConfig`, a `get_all, set_all` pyclass |
-| `bindings/python/src/funcs.rs:372` | the four `#[pyfunction]` loaders and the renderer |
+| `bindings/python/src/funcs.rs:372` | four `#[pyfunction]`s: the three loaders and the renderer |
 | `bindings/python/kerness/persona_loader.py` | re-export shim |
 | `bindings/python/kerness/personas/*.md` | the byte-identical installed copies |
 
@@ -209,8 +209,8 @@ cargo test -p kerness --test public_api every_bundled_persona              # pas
   `:36`), `PersonaConfig` and `PyPersonaConfig` (`bindings/python/src/types.rs:1027`,
   whose `__eq__` and constructor list every field), both built-in files, and the
   parse tests at `crates/kerness/src/persona.rs:129`.
-- Changing the rendered block → `format_persona_for_prompt` only; the order test
-  at `bindings/python/tests/test_prompting.py:127` and the decoration test at
+- Changing the rendered block → `format_persona_for_prompt` only; the decoration
+  tests at `bindings/python/tests/test_prompting.py:127` and
   `bindings/python/tests/test_agent.py:21` assert the `Persona:` prefix.
 - Changing resolution order → `assets::candidates`
   (`crates/kerness/src/assets.rs:79`) is shared with [role.md](role.md); change

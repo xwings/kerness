@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Bindings
@@ -23,13 +23,13 @@ four seams that keep it true when a feature needs the interpreter.
 This module owns the wheel's manifest and the boundary. It does not own any
 behaviour a Python test observes: scheduling, approvals, recovery, budgets,
 access, and prompt assembly stay in the crate, and each subsystem doc names its
-own pyclass. The boundary serves every milestone; M1–M3 are exposed through
+own pyclass. The owned run and contextual tools are exposed through
 `Session.start`, `SessionRun`, and `ToolContext`.
 
 ## Status
 
-`done`. The legacy and M1–M3 owned-run/contextual-tool APIs forward to the Rust
-engine. `.venv/bin/python -m pytest bindings/python/tests -q` passes 502 tests
+`done`. The blocking `run`, the owned-run and the contextual-tool APIs forward
+to the Rust engine. `.venv/bin/python -m pytest bindings/python/tests -q` passes 502 tests
 against the extension `maturin develop` installs;
 `.venv/bin/python -m kerness.selfcheck` reports `OK: all core checks passed`;
 `.venv/bin/ruff check bindings/python` reports `All checks passed!`; and
@@ -64,13 +64,15 @@ root's [Coding Style and Code Design](../ARCHITECTURE.md#coding-style-and-code-d
 rules apply. Local facts:
 
 - **`#[allow(clippy::too_many_arguments)]` is a binding idiom.** Thirteen of
-  the crate's fourteen `#[allow]` sites are pyo3 keyword constructors:
-  `bindings/python/src/session.rs:60`, `:282`, `:349`, `:483`, `:632`;
+  the workspace's fourteen `#[allow]` attributes on items sit in the binding:
+  twelve pyo3 keyword constructors and methods —
+  `bindings/python/src/session.rs:60`, `:349`, `:483`, `:632`;
   `bindings/python/src/types.rs:685`, `:1661`;
   `bindings/python/src/runtime.rs:417`, `:669`;
-  `bindings/python/src/provider.rs:174`, `:221`, `:276`, `:323`. The Python signature is spelled in the
-  `#[pyo3(signature = (...))]` directly above each. Enforced by clippy
-  `-D warnings`.
+  `bindings/python/src/provider.rs:174`, `:221`, `:276`, `:323` — each with its
+  Python signature spelled in the `#[pyo3(signature = (...))]` directly above,
+  and the private `agent` helper that `add_agent` builds its record with
+  (`bindings/python/src/session.rs:282`). Enforced by clippy `-D warnings`.
 - **pyclass attribute shapes.** Every class is
   `#[pyclass(name = "...", module = "kerness._core")]`; value types add
   `frozen` and `get_all`; the four channels and three bundled stores add
@@ -102,12 +104,14 @@ rules apply. Local facts:
 
 ### Decomposition and dependency direction
 
-`kerness-py` depends on `kerness` and `pyo3` only; the crate has zero `pyo3`
-references, and every Python package module imports from `kerness._core`
-alone. Inside the extension, `convert.rs` and `errors.rs` are leaves; `types.rs`
+`kerness-py` depends on `kerness`, `pyo3` and `serde_json` only; the crate has
+zero `pyo3` references, and the Python package reaches the crate only through
+`kerness._core` (`provider.py` and `toolschema.py` also import the package's
+own `_enums` and `exceptions`). Inside the extension, `convert.rs` and `errors.rs` are leaves; `types.rs`
 holds the value pyclasses every other module passes around; `session.rs`,
-`run.rs`, and `runtime.rs` compose them. `bindings/python/src/lib.rs:52` is the `#[pymodule]` and
-its explicit `add_class` list is the extension's whole surface.
+`run.rs`, and `runtime.rs` compose them. `bindings/python/src/lib.rs:52` is the `#[pymodule]`: `VERSION`, four
+pyfunctions (`:54`), the explicit `add_class` list (`:62`) and
+`funcs::register` (`:107`) are the extension's whole surface.
 
 ### Boot
 
@@ -151,7 +155,7 @@ construction per turn.
 **Park the exception.** A framework callback type cannot carry a `PyErr`
 (`Fn(&Agent) -> String` has nowhere to put one), so a raising Python callable is
 parked and re-raised at the pyclass boundary rather than read as an empty
-answer: `park`/`unpark` in `bindings/python/src/runtime.rs:47`, `:60`, and
+answer: `park`/`unpark` in `bindings/python/src/runtime.rs:47`, `:57`, and
 `PyChannel::parked` (`bindings/python/src/channel.rs:71`), drained by `Session.run`, `Session.start`,
 and `SessionRun.step`. Tool, context-source, preflight, and event-sink callbacks
 instead use `Catch`, and the Rust runtime retains the converted error in its
@@ -189,7 +193,7 @@ pricing=None, event_sink=None, result_validation="strict", binding_version="")`
 configuration or execution through that object raises `SessionError` naming the
 existing run handle (`prepared`, `:263`). Invalid Python argument conversion is
 rejected before transfer; a Rust preparation failure consumes the configuration,
-matching the Rust API. `Session.run()` (`:678`) keeps its blocking interface and
+matching the Rust API. `Session.run()` (`:678`) blocks until the run ends and
 leaves the session available afterward.
 
 `SessionRun.step(input=None)` (`bindings/python/src/run.rs:189`) deserialises a
@@ -211,8 +215,8 @@ recovery, or budget policy lives in Python.
 
 `Session.add_tool_spec(spec)` preserves `ToolSpec.takes_actor`.
 `add_contextual_tool(name, description, parameters, handler, *,
-preflight=None)` (`bindings/python/src/session.rs:556`) is additive: legacy
-`handler(arguments)` remains unchanged, while a contextual handler receives
+preflight=None)` (`bindings/python/src/session.rs:556`) sits beside `add_tool`: a plain
+handler receives `(arguments)`, and a contextual handler receives
 `(arguments, context)` (`PyContextHandler::call`, `bindings/python/src/run.rs:70`).
 An optional preflight receives `(arguments, identity_dict)` and returns `None`
 or the Rust action shape — `{"kind": "confirm", "description": "..."}` or
@@ -242,16 +246,17 @@ even if Python retains the object; identity remains readable. Test:
   values; `test_the_constants_carry_the_frameworks_values`
   (`bindings/python/tests/test_provider.py:841`) and the root's constants table
   hold them.
-- The wheel carries only the package. `pyproject.toml`'s `module-name` is
+- The wheel carries the package and distribution metadata. `pyproject.toml`'s `module-name` is
   `kerness._core` and `python-source = "."`, so `tests/` and `examples/` beside
   the package do not ship; `exclude` drops stray `__pycache__` so a local build
   cannot embed interpreter-specific bytecode in an `abi3` wheel. The `LICENSE`
   and `README.md` symlinks in `bindings/python/` are load-bearing because
   `readme` and `license-files` reject a `..` path
   ([testing.md](testing.md)).
-- `kerness.__version__` equals the workspace version; a stale extension in
-  `site-packages` fails `test_the_package_reports_the_workspace_version`
-  (`bindings/python/tests/test_packaging.py:35`).
+- `kerness.__version__` equals the workspace version;
+  `test_the_package_reports_the_workspace_version`
+  (`bindings/python/tests/test_packaging.py:35`) detects a version mismatch.
+  It cannot detect source changes within the same version.
 
 ## Key Types and Entry Points
 
@@ -259,9 +264,9 @@ even if Python retains the object; identity remains readable. Test:
   assets_root)` — called once from `bindings/python/kerness/__init__.py:12`;
   registers the exception classes and the dialect enum, sets the assets root,
   installs the four seams.
-- `bindings/python/src/lib.rs:52` — `_core(module)` — the `#[pymodule]`; the
-  explicit `add_class` list is the extension's whole surface, followed by
-  `funcs::register`.
+- `bindings/python/src/lib.rs:52` — `_core(module)` — the `#[pymodule]`:
+  `VERSION`, the four pyfunctions at `:54`, the explicit `add_class` list at
+  `:62`, then `funcs::register` at `:107`.
 - `bindings/python/src/convert.rs:59` — `value_from_py(object)` — Python to
   `Value`, order preserved; `value_to_py` at `:15` is the inverse;
   `chat_message_to_py` at `:113` owns the shared `{role, content}` dictionary
@@ -284,7 +289,7 @@ even if Python retains the object; identity remains readable. Test:
   `allow_threads`, `control`, `checkpoint`, `drain_events`, `outcome`, `usage`;
   `PyToolContext` at `:105` carries invocation capabilities; `PyContextHandler`
   at `:40` and `PyEventSink` at `:88` translate the callbacks.
-- `bindings/python/src/runtime.rs:48` — `park` / `:60` `unpark` — the
+- `bindings/python/src/runtime.rs:47` — `park` / `:57` `unpark` — the
   parked-exception helpers behind `PromptAssembler` and `AgentRunner`;
   `PyChannel::parked` (`bindings/python/src/channel.rs:71`) is the channel's
   copy of the same idea.
@@ -329,7 +334,7 @@ cargo clippy --workspace --all-targets -- -D warnings           # pass = exit 0
 
 - Rebuild with `maturin develop` after any Rust change; the Python suite tests
   the installed extension, and `bindings/python/tests/test_packaging.py:35`
-  fails on a stale one.
+  detects version mismatches only; rebuilds within a version remain necessary.
 - `bindings/python/tests/test_packaging.py:74` and `:83` — every public module
   declares `__all__` and every name in it resolves, which is what catches a
   renamed Rust symbol behind a shim.

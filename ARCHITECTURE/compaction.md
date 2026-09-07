@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Compaction
@@ -8,7 +8,9 @@ eatmycode_version: "1.1.0"
 
 A long session outgrows the model's context window. Compaction is the answer:
 estimate how large the turn history is, and when it crosses the ceiling, replace
-the oldest half with a single summary turn and keep the rest verbatim.
+older turns with a summary, preserving the topic and a recent suffix verbatim.
+The suffix targets half the token allowance, not half the number of turns
+(`crates/kerness/src/compaction.rs:104`).
 
 The estimate is deliberately crude — characters divided by four — because the
 alternative is a tokenizer per model family, and the ceiling exists to stay
@@ -76,7 +78,7 @@ turn's first provider operation. In an owned run, compaction is a separate step
 so a single step cannot buy both a summary and an agent response
 (`crates/kerness/src/session/run.rs:733`). It works out two figures:
 
-- The **ceiling** (`context_ceiling`, `session.rs:1736`) is the smaller of
+- The **ceiling** (`context_ceiling`, `session.rs:1738`) is the smaller of
   `max_context_tokens` — what the caller is willing to spend — and the
   provider's own window for that agent's model
   ([`Provider::context_window`](provider.md)). A mixed-provider session has one

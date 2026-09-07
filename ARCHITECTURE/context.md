@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Context
@@ -27,7 +27,7 @@ belong to the session, the harness, and the prompt assembler respectively.
 
 `done` — `cargo test -p kerness context` passes 10 tests,
 `cargo test -p kerness --test harness_contract` passes 16, and
-`bindings/python/tests/test_session.py` passes 122, including the three
+`bindings/python/tests/test_session.py` passes 122, including the four
 `TestContextSources` cases.
 
 ## Code Structure
@@ -121,8 +121,9 @@ Enforced by `every_context_block_arrives_under_its_own_name`
 
 - **Names are required and unique.** `add_context` refuses an empty name and a
   duplicate (`crates/kerness/src/session.rs:848`), because the name becomes the
-  `###` subheading and the key a gameplan narrows by. No test drives the
-  duplicate refusal directly.
+  `###` subheading and the key a gameplan narrows by. Tested from Python only
+  (`test_a_name_must_be_given_and_must_be_unique`,
+  `bindings/python/tests/test_session.py:1004`).
 - **A blank answer costs no prompt.** Dropped in `resolve_context`
   (`session.rs:1503`) and again in `context_block`
   (`crates/kerness/src/prompting.rs:110`), so the cache holds what an agent
@@ -211,8 +212,8 @@ cargo test -p kerness --test harness_contract                       # pass = 16 
   once per agent and landing under its name (`:949`), a declared source nobody
   registered stopping the run with no provider call (`:975`), and a raising
   source stopping the run before any provider call (`:987`).
-- Gap: `add_context`'s duplicate-name refusal has no owning test on either
-  side.
+- Gap: `add_context`'s duplicate-name refusal has no Rust unit test; only
+  `bindings/python/tests/test_session.py:1004` drives it.
 
 ## Review and Refactor Guide
 
@@ -243,9 +244,10 @@ cargo test -p kerness --test harness_contract                       # pass = 16 
 
 Improvement candidates, as proposals:
 
-- Add a test for `add_context`'s duplicate-name refusal. Success check: a
-  Rust unit test in `session.rs` or a Python case in `TestContextSources`
-  asserts `SessionError` naming the duplicate.
+- Add a Rust unit test for `add_context`'s duplicate-name refusal beside the
+  `add_tool` one (`crates/kerness/src/session.rs:2641`). Success check: the
+  test asserts `Error::Session` naming the duplicate without the Python
+  surface installed.
 - A per-source character budget would let the session refuse an oversized
   block before compaction counts it as overhead. Success check: a source
   returning more than the budget is refused at preparation with the figure.

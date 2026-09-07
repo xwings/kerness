@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Role
@@ -57,7 +57,7 @@ facts:
 - `Position` is a closed `Copy` enum with `#[default] Participant`
   (`crates/kerness/src/role.rs:31`); it crosses the boundary as the string
   `"participant"` or `"orchestrator"` (`PyRoleConfig.position`,
-  `bindings/python/src/types.rs:1091`; `PyAgent.position`, `:791`), the same
+  `bindings/python/src/types.rs:1095`; `PyAgent.position`, `:791`), the same
   way `ReasoningEffort` does, and `PyRoleConfig.__new__` parses it so an
   unseatable value fails at construction (`:1122`).
 - Frontmatter is read through `assets::split_frontmatter`

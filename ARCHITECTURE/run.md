@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Owned run engine
@@ -8,7 +8,7 @@ eatmycode_version: "1.1.0"
 
 Own execution independently of mutable configuration, expose host control at
 safe boundaries, enforce scoped tools and approvals, persist suspended state,
-and return typed outcomes with usage. This is the M1–M3 runtime: `SessionRun`
+and return typed outcomes with usage. This is the runtime: `SessionRun`
 is the one state machine both `Session::run` and `Session::start` drive, and
 the Python API forwards to it without making an execution decision of its own.
 
@@ -52,8 +52,9 @@ facts:
 
 - Every continuation and checkpoint type is `#[serde(deny_unknown_fields)]`:
   eight sites in `crates/kerness/src/session/run.rs` (`:92`, `:101`, `:151`,
-  `:204`, `:213`, `:225`, `:232`, `:240`) and two in
-  `crates/kerness/src/session/capabilities.rs` (`:19`, `:45`). A field added to
+  `:204`, `:213`, `:225`, `:232`, `:240`), two in
+  `crates/kerness/src/session/capabilities.rs` (`:19`, `:45`) and one in
+  `crates/kerness/src/session/outcome.rs` (`:30`). A field added to
   a saved shape is a schema change, not a silent default. Enforced by serde at
   restore.
 - Wire enums use `#[serde(tag = "kind", rename_all = "snake_case")]`
@@ -120,7 +121,8 @@ Preflight must be side-effect-free and freezes the request, arguments, actor and
 action identity (`ApprovalRequest`, `:93`; `tool_step`, `:837`). A command
 approval grants the exact command and resolved working directory once
 (`ToolContext::run_command`, `crates/kerness/src/session/capabilities.rs:209`,
-consuming the grant at `:226`) and cannot override hard path or host denials,
+matched at `:226` and consumed at `:236`) and cannot override hard path or
+host denials,
 which `preflight` (`crates/kerness/src/session/run.rs:966`) checks before any
 request is exposed. Stale or mismatched decisions are recoverable input errors
 (`apply_input`, `:438`). An arbitrary callback cannot suspend its stack for
@@ -134,8 +136,9 @@ call.
 Events are ordered observations, delivered at most once to the sink. When a
 session file is configured, state is checkpointed before delivery (`emit`,
 `crates/kerness/src/session/run.rs:1227`); a sink failure becomes a failed
-outcome without replaying the completed provider or tool action. Channels retain
-their existing message contract. `drain_events()` exposes buffered run events.
+outcome without replaying the completed provider or tool action. Channels keep
+the message contract in [channel.md](channel.md). `drain_events()` exposes
+buffered run events.
 Sinks must not re-enter `step`; control decisions use inputs or the independent
 cancel handle (`RunControl`, `:45`). The engine commits completed provider
 replies before cancellation, a subsequent budget stop or delivery failure, so
@@ -148,7 +151,7 @@ counters and native tool positions before execution (`restore`, `:1276`).
 
 ### Continuation and recovery
 
-The schema-2 runtime lives under the existing snapshot's `loop.runtime`; the
+The schema-2 runtime lives under the snapshot's `loop.runtime`; the
 scheduler lives under `loop.scheduler` (`checkpoint`, `:360`). Continuation
 includes agent scratch, pending calls and results, approval and decision, action
 intent, IDs, loaded skills, context cache, usage and incremental maintenance
@@ -160,7 +163,8 @@ re-registered; `binding_version` is the host's version for implementations the
 engine cannot serialize. Valid v1 snapshots migrate only at turn boundaries.
 
 With `session_file` configured, intent is persisted before a tool's side effect
-and completion afterward (`ActionIntent`, `:226`; the write at `:942`). Without
+and completion afterward (`ActionIntent`, `:226`, set at `:905` and written by
+`emit`'s checkpoint at `:1239` before the handler runs at `:932`). Without
 it, execution state is in memory and `checkpoint()` is a no-op. A restored
 intent without completion waits for a matching `Reconcile` result or
 cancellation; it never automatically reruns the tool (`advance`, `:523`).
@@ -184,7 +188,7 @@ becomes terminal.
 Usage aggregates by actor, provider and operation and preserves unknown token
 counts and prices. Provider and tool operation limits prevent the next admitted
 operation (`usage.check_next()` before each dispatch; `begin_tool()` at
-`:934`). Hard token/cost limits are rejected because no per-operation upper
+`:904`). Hard token/cost limits are rejected because no per-operation upper
 bound is available; `MeasuredThreshold` may overshoot by the admitted operation.
 Elapsed limits and cancellation are cooperative: provider calls and user
 callbacks can block until they return. POSIX command polling observes
@@ -324,7 +328,8 @@ develop`) before the Python commands after a Rust change.
   (`crates/kerness/src/session/run.rs:241`),
   `snapshot` (`:1249`) and `restore` (`:1276`); every new field needs a restore
   validation rule and a case in `crates/kerness/tests/resume.rs`. A change to
-  what `contract` (`:1400`) renders invalidates every saved file, so treat it
+  what `contract` (`crates/kerness/src/session/run.rs:1400`) renders
+  invalidates every saved file, so treat it
   as a schema bump in [sessionfile.md](sessionfile.md).
 - Changing approval or capability rules → inspect `tool_step`
   (`crates/kerness/src/session/run.rs:837`),

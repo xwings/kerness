@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Memory
@@ -8,14 +8,13 @@ eatmycode_version: "1.1.0"
 
 What the agents in a session remember, and where it is kept. It is the only
 state that outlives a turn without being in the conversation, and what an agent
-writes there goes into the next agent's prompt verbatim. M3 supplies metered,
-per-scope maintenance and cleanup without paid provider work.
+writes there goes into the next agent's prompt verbatim. Maintenance is
+metered per scope, and cleanup makes no provider call.
 
 Memory is a slot. A session holds one `MemoryStore` and addresses it by *scope*
 — a name whose meaning is the store's to decide. The default store, `FileMemory`,
 reads a scope as a path and keeps free-form Markdown prose there rather than a
-key-value structure. Two bundled stores bound what a scope may grow to, and they
-differ in *who* does the bounding:
+key-value structure. Two other bundled stores manage growth differently:
 
 - `SummarizingMemory` keeps the most recent entries word for word and folds the
   rest into a running summary through one provider operation per overflowing
@@ -77,7 +76,7 @@ rules apply; local facts:
   returns `Result`, and the two infallible metadata methods (`age`, `path`)
   and `budget` return `Option`.
 - Each bundled store keeps a `Mutex<HashMap<..>>` and reaches it through a
-  private `with` closure (`crates/kerness/src/memory.rs:307`, `:785`); the
+  private `with` closure (`crates/kerness/src/memory.rs:307`, `:575`, `:786`); the
   guard is recovered from poisoning with `unwrap_or_else(|err| err.into_inner())`
   rather than `expect`, because a store outlives a tool handler that unwound.
   `Mutex` rather than `RwLock` because a read of an unloaded scope loads it
@@ -91,9 +90,9 @@ rules apply; local facts:
   the three bundled stores are `frozen, subclass` pyclasses registered as
   virtual subclasses (`:137`), so `isinstance` holds without inheritance.
 - Unit tests are inline: `crate::testing::TempDir`
-  (`crates/kerness/src/memory.rs:969`), an `Ephemeral` store that exercises
-  every trait default (`:1088`), and a `StubProvider` built on `ProviderBase`
-  (`:1134`) that records what it was asked. The
+  (`crates/kerness/src/memory.rs:970`), an `Ephemeral` store that exercises
+  every trait default (`:1089`), and a `StubProvider` built on `ProviderBase`
+  (`:1135`) that records what it was asked. The
   Python tests use the conftest `MockProvider` and `Test<Store>` classes.
 
 ## Design and Invariants
@@ -125,106 +124,12 @@ calls the store with the lock released — `store_for`
 arbitrary code, including code that re-enters the session; holding the
 session's lock across that call is how it would deadlock.
 
-### SummarizingMemory
+### Store maintenance and curation
 
-The second bundled store, and the reason the slot is worth having: notes that
-only ever grow eventually cost more of every prompt than they are worth. It
-keeps one JSON file per scope under a root (`Scope`,
-`crates/kerness/src/memory.rs:486`), holding a running
-summary and the entries written since that summary was last rewritten. `read`
-renders the summary — labelled `CONSOLIDATED_PREFIX` (`:447`), so an agent can
-tell a framework-written recap from a note somebody wrote — and then the
-entries (`:526`). `append` writes through on every note (`:634`), so a crash
-mid-run loses nothing that was committed.
-
-The run asks `maintenance_scopes()` (`crates/kerness/src/memory.rs:666`) for
-sorted overflowing scopes
-after a successful result (`crates/kerness/src/session/run.rs:1150`).
-`maintain_scope(scope)` (`crates/kerness/src/memory.rs:681`) consolidates exactly one scope per runtime
-step: one logical provider operation carrying the running summary and entries
-beyond `with_keep(entries)` (`:563`). The call goes through
-`observe_provider_call` (`:602`), so it participates in
-[provider.md](provider.md)'s run ledger and budget checks, including default
-retries or an explicitly opaque custom override. A cancelled, failed, or
-abandoned run skips this paid maintenance and keeps its written notes.
-Standalone `close()` (`:659`) drives the same per-scope methods to completion.
-
-Cleanup calls `close_run()` (`crates/kerness/src/memory.rs:225`). Its default
-delegates to `close()`; `SummarizingMemory` overrides it with no work (`:704`)
-because each append and
-completed consolidation is already saved. Custom cleanup must only flush and
-release resources. The engine rejects observed framework provider calls
-during cleanup, even without an accounting scope, and does not charge those
-refused calls (`without_provider_calls`, `crates/kerness/src/usage.rs:522`,
-applied at `crates/kerness/src/session/run.rs:1223` and `:295`). The guard
-restores on unwind and reports an attempted forbidden call even if a callback
-catches it. Arbitrary custom I/O or provider overrides that bypass framework
-dispatch cannot be preempted or metered; those remain the store author's
-responsibility.
-
-The scope list and overflow are read under the store mutex, which is released
-before calling a provider (`crates/kerness/src/memory.rs:681`). A provider can
-read memory during its callback; notes appended during consolidation remain
-after the summarized prefix (`:695`).
-
-Two decisions are worth naming:
-
-- **The provider is required at construction**
-  (`crates/kerness/src/memory.rs:543`). A store built
-  without one would keep every entry forever, which is what `FileMemory`
-  already does, and it would do it silently.
-- **An ordinary provider failure preserves the notes**
-  (`crates/kerness/src/memory.rs:618`). The call
-  returns `None` and the scope is left exactly as its agents wrote it. A run
-  budget refusal remains terminal even when it interrupts consolidation
-  retries (`crates/kerness/src/session/run.rs:1174`). This is
-  [compaction.md](compaction.md)'s rule inverted: there, a failed summary
-  means keeping turns that would have been dropped; here it means keeping
-  notes that would have been rewritten. Both preserve what was actually
-  written, and losing a run's notes to a network error is the worse of the
-  two outcomes by a distance.
-
-### CuratedMemory
-
-The third bundled store, and the other answer to the same problem: a scope is
-held to `budget()` characters — `DEFAULT_MEMORY_BUDGET`
-(`crates/kerness/src/memory.rs:715`) is 2,200,
-roughly 550 tokens at [compaction.md](compaction.md)'s `CHARS_PER_TOKEN` — and
-the agents are the ones who keep it under. One Markdown file per scope under a
-root, entries joined by `ENTRY_SEPARATOR` (`:724`) on lines of their own, so a
-scope stays a file somebody can read and hand-edit.
-
-Four decisions carry the design:
-
-- **It does not compact.** An append that would cross the ceiling is an
-  `Error::Value` (`full`, `crates/kerness/src/memory.rs:837`) carrying the figure it would have reached
-  and the entries as they stand, telling the writer to merge or remove and
-  write again. The agent is mid-turn and has the tool to do it, and the
-  alternative — dropping the oldest note to make room — discards the caller's
-  material on a guess about which note mattered least.
-- **An entry is addressed by a fragment of itself.** `revise`
-  (`crates/kerness/src/memory.rs:921`) takes
-  any substring appearing in exactly one entry; `locate` (`:854`) refuses a
-  fragment matching none or several and names which, because rewriting a
-  guess is the one failure the writer cannot detect. The replacement replaces
-  the whole entry, not the fragment, so a revision is never a blind splice.
-- **`read` leads with the usage line** (`crates/kerness/src/memory.rs:885`)
-  — characters used, the
-  ceiling, and the entry count — because an agent that cannot see how full
-  the scope is cannot be asked to make room in it. An empty scope reads as
-  the empty string, so `memory_block` renders nothing at all rather than
-  `0 of 2,200`.
-- **An exact duplicate is accepted and not stored twice**
-  (`crates/kerness/src/memory.rs:900`). A model
-  re-writing a note it already wrote has made no mistake worth an error, and
-  spending the ceiling on a second copy is the outcome nobody wants.
-
-Answering `budget()` (`crates/kerness/src/memory.rs:961`) is also what makes
-the session offer the `edit_memory` tool
-(`crates/kerness/src/session.rs:2160`). The gate is deliberate: a store that
-keeps notes append-only takes the trait's `revise` default, which refuses
-(`crates/kerness/src/memory.rs:265`), and advertising a tool whose every call would
-be refused is worse than not offering it.
+`SummarizingMemory` compacts a scope with a provider call the session meters,
+and `CuratedMemory` holds a scope to a character budget the agents keep under
+with `edit_memory`. Both designs, their decisions and their cited code are in
+[memory-stores.md](memory-stores.md).
 
 ### A scope is a key, not a path
 
@@ -237,8 +142,8 @@ and no `.` in the name, so a scope reading like `../../elsewhere` names a file
 `path(scope)`, so whatever they name is confined by the workspace as well; the
 encoding is what makes them correct on their own rather than only correct
 because something above them checked. Enforced by
-`a_scope_is_a_key_and_never_a_path_out_of_the_root` (`:1360`) and its curated
-twin (`:1599`).
+`a_scope_is_a_key_and_never_a_path_out_of_the_root` (`:1361`) and its curated
+twin (`:1600`).
 
 ### Age, read from the filesystem
 
@@ -349,7 +254,7 @@ listing has no error return.
 - A scope under a root never names a file outside it
   (`crates/kerness/src/memory.rs:89`).
 - A failed consolidation or a refused revision leaves the scope exactly as
-  written (`crates/kerness/src/memory.rs:618`, `:921`).
+  written (`crates/kerness/src/memory.rs:618`, `:922`).
 - The maintenance cursor is checkpointed only after the budget check
   (`crates/kerness/src/session/run.rs:1174`), and a restored checkpoint with
   an inconsistent cursor is refused (`:1302`).
@@ -424,12 +329,12 @@ rebuilding anything.
   `age`; usable alone by a caller who wants one file and no session.
 - `crates/kerness/src/memory.rs:475` — `SummarizingMemory` — `new(root,
   provider, model)` (`:543`), `with_keep` (`:563`); `maintenance_scopes`
-  (`:666`) lists overflowing scopes sorted, `maintain_scope` (`:681`) spends
-  one provider operation on one of them, `close_run` (`:704`) does nothing.
-- `crates/kerness/src/memory.rs:749` — `CuratedMemory` — `new(root)` (`:761`),
-  `with_budget` (`:774`); `append` (`:900`) refuses past the ceiling with
-  `Error::Value`, `revise` (`:921`) addresses one entry by fragment, `budget`
-  (`:961`) answers `Some`.
+  (`:667`) lists overflowing scopes sorted, `maintain_scope` (`:682`) spends
+  one provider operation on one of them, `close_run` (`:705`) does nothing.
+- `crates/kerness/src/memory.rs:750` — `CuratedMemory` — `new(root)` (`:762`),
+  `with_budget` (`:775`); `append` (`:901`) refuses past the ceiling with
+  `Error::Value`, `revise` (`:922`) addresses one entry by fragment, `budget`
+  (`:962`) answers `Some`.
 - `crates/kerness/src/memory.rs:277` — `REVISE_UNSUPPORTED` — the refusal the
   trait default and the Python ABC both raise.
 - `crates/kerness/src/session.rs:230` — `Memories` — the store plus the
@@ -494,35 +399,35 @@ develop`) before running the Python suites after a Rust change.
 
 - The file primitive and the default store:
   `loading_an_absent_file_reads_empty_and_creates_nothing`
-  (`crates/kerness/src/memory.rs:972`),
-  `entries_are_separated_by_a_blank_line_and_nothing_else_is_added` (`:983`),
-  `the_default_store_keeps_one_file_per_scope` (`:1045`),
-  `the_default_store_reports_its_path_and_the_age_of_the_file` (`:1076`);
+  (`crates/kerness/src/memory.rs:973`),
+  `entries_are_separated_by_a_blank_line_and_nothing_else_is_added` (`:984`),
+  `the_default_store_keeps_one_file_per_scope` (`:1046`),
+  `the_default_store_reports_its_path_and_the_age_of_the_file` (`:1077`);
   from Python, `TestMemory` (`bindings/python/tests/test_memory.py:23`
   onward).
 - Every trait default, from a store that keeps nothing:
   `a_store_writing_no_file_answers_the_defaults_and_leaves_no_trace`
-  (`crates/kerness/src/memory.rs:1105`) and `test_the_base_class_answers_for_a_store_that_keeps_no_file`
+  (`crates/kerness/src/memory.rs:1106`) and `test_the_base_class_answers_for_a_store_that_keeps_no_file`
   (`bindings/python/tests/test_memory.py:119`).
 - SummarizingMemory: `entries_read_back_verbatim_until_something_consolidates_them`
-  (`crates/kerness/src/memory.rs:1197`), `closing_folds_everything_past_the_kept_entries_into_one_summary`
-  (`:1214`) — standalone consolidation, sorted scopes, one operation per
+  (`crates/kerness/src/memory.rs:1198`), `closing_folds_everything_past_the_kept_entries_into_one_summary`
+  (`:1215`) — standalone consolidation, sorted scopes, one operation per
   maintenance call, budget refusal, and cleanup without paid calls —
-  `a_second_consolidation_is_given_the_first_one_to_build_on` (`:1308`),
-  `a_failed_consolidation_keeps_the_notes_as_they_were_written` (`:1328`),
-  `a_scope_is_a_key_and_never_a_path_out_of_the_root` (`:1360`); from
+  `a_second_consolidation_is_given_the_first_one_to_build_on` (`:1309`),
+  `a_failed_consolidation_keeps_the_notes_as_they_were_written` (`:1329`),
+  `a_scope_is_a_key_and_never_a_path_out_of_the_root` (`:1361`); from
   Python, `TestSummarizingMemory` (`bindings/python/tests/test_memory.py:217`
   onward), including a subclassed store handed to a session (`:262`).
 - CuratedMemory: `a_store_with_no_ceiling_refuses_to_revise_and_says_so`
-  (`crates/kerness/src/memory.rs:1395`), `entries_read_back_behind_a_line_saying_how_full_the_scope_is`
-  (`:1410`), `a_note_already_stored_word_for_word_is_accepted_and_not_stored_twice`
-  (`:1435`), `an_append_past_the_ceiling_is_refused_and_says_what_is_stored`
-  (`:1448`), `revising_replaces_the_whole_entry_a_fragment_addresses`
-  (`:1471`), `revising_to_nothing_removes_the_entry` (`:1492`),
+  (`crates/kerness/src/memory.rs:1396`), `entries_read_back_behind_a_line_saying_how_full_the_scope_is`
+  (`:1411`), `a_note_already_stored_word_for_word_is_accepted_and_not_stored_twice`
+  (`:1436`), `an_append_past_the_ceiling_is_refused_and_says_what_is_stored`
+  (`:1449`), `revising_replaces_the_whole_entry_a_fragment_addresses`
+  (`:1472`), `revising_to_nothing_removes_the_entry` (`:1493`),
   `a_fragment_matching_none_or_several_changes_nothing_and_names_which`
-  (`:1507`), `a_revision_past_the_ceiling_is_refused_and_the_entry_survives`
-  (`:1542`), `a_hand_edited_file_loads_as_the_entries_it_visibly_holds`
-  (`:1577`); from Python, `TestCuratedMemory`
+  (`:1508`), `a_revision_past_the_ceiling_is_refused_and_the_entry_survives`
+  (`:1543`), `a_hand_edited_file_loads_as_the_entries_it_visibly_holds`
+  (`:1578`); from Python, `TestCuratedMemory`
   (`bindings/python/tests/test_memory.py:292` onward), including
   `test_a_store_written_in_python_is_asked_for_its_ceiling` (`:325`).
 - The cleanup guard: `scopes_restore_on_return_and_unwind_without_cross_run_attribution`
@@ -574,7 +479,7 @@ develop`) before running the Python suites after a Rust change.
   `bindings/python/tests/test_session.py:2586`. Both write paths must keep
   calling the same function.
 - **Changing a refusal message** → `full`
-  (`crates/kerness/src/memory.rs:837`), `locate` (`:854`),
+  (`crates/kerness/src/memory.rs:838`), `locate` (`:855`),
   `REVISE_UNSUPPORTED` (`:277`); the Python memory tests match on wording and
   `REVISE_UNSUPPORTED` is imported, not respelled, on the Python side.
 - **Changing the memory tools** → `default_tools`
@@ -587,7 +492,7 @@ develop`) before running the Python suites after a Rust change.
   `access`; a store that reaches the session's lock is the deadlock
   `store_for` exists to prevent.
 - Compatibility: `DEFAULT_KEEP_ENTRIES`, `DEFAULT_MEMORY_BUDGET`, and
-  `ENTRY_SEPARATOR` are in the root's well-known constants table and asserted
+  `ENTRY_SEPARATOR` are in [runtime.md](runtime.md)'s well-known constants table and asserted
   by `crates/kerness/tests/public_api.rs`; the Python constructor keyword
   names are public.
 
@@ -598,7 +503,7 @@ Improvement candidates (proposals, not accepted work):
   Python store's `revise` is called with the fragment and replacement the
   model sent.
 - A `pyo3` `multiple-pymethods`-free way to share the forwarding block across
-  the three pyclasses does not exist today; revisit if a fourth bundled store
+  the three pyclasses does not exist; revisit if a fourth bundled store
   arrives.
 
 ## Open Gaps / Roadmap
@@ -611,9 +516,11 @@ Improvement candidates (proposals, not accepted work):
 - No size ceiling in the default store. A file large enough to fill the
   context window is a named error from `fit_conversation` rather than a
   silent degradation, but `FileMemory` will not trim the file to avoid it:
-  which notes are worth keeping is the caller's judgement. `SummarizingMemory`
-  and `CuratedMemory` are where that judgement is made — each bounds its own
-  `read()` by construction — and a caller who wants a bound takes one.
+  which notes are worth keeping is the caller's judgement. `CuratedMemory`
+  caps accepted note characters. `SummarizingMemory` consolidates older entries
+  during maintenance but caps neither individual entries nor the provider's
+  summary, so its `read()` has no hard character or token bound
+  (`crates/kerness/src/memory.rs:526`, `:614`, `:634`).
 - The three bundled stores are three pyclasses forwarding one-line trait
   methods (`bindings/python/src/memory.rs`). A macro was considered and
   declined: pyo3 0.23 needs the `multiple-pymethods` feature to split a

@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Utils
@@ -50,7 +50,7 @@ rules apply. Local facts:
   `split_lines_keepends` (`:143`). Observed convention, stated in the module
   doc.
 - `pyfmt`'s `expect` messages name the impossibility
-  (`"writing to a Vec cannot fail"`, `crates/kerness/src/pyfmt.rs:17`), matching
+  (`"writing to a Vec cannot fail"`, `crates/kerness/src/pyfmt.rs:21`), matching
   the crate idiom for infallible-by-construction calls.
 - The `retry` pyfunction releases the GIL for its sleeps
   (`bindings/python/src/funcs.rs:90`) and reacquires it to call the Python

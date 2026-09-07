@@ -281,7 +281,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kerness"
-version = "0.1.1-dev"
+version = "0.1.2-dev"
 dependencies = [
  "fancy-regex",
  "libc",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "kerness-py"
-version = "0.1.1-dev"
+version = "0.1.2-dev"
 dependencies = [
  "kerness",
  "pyo3",

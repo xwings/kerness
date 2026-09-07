@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Gameplan
@@ -158,7 +158,7 @@ exists inside the executable cannot be granted, listed, or read
 - `bindings/python/src/funcs.rs:326` — `load_gameplan` / `:334`
   `list_builtin_gameplans` — the pyfunctions; the config crosses as a frozen
   `GameplanConfig` with `harness`, `body`, `raw_text`, `path`, `directory`,
-  `requires_orchestrator`, and `max_rounds` getters.
+  `name`, `requires_orchestrator`, and `max_rounds` getters.
 
 ## Interactions
 

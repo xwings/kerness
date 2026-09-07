@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Agent
@@ -25,8 +25,7 @@ prompt, a different loop, and the authority to address participants by name. See
 
 This module does not own inheritance *timing*, workspace confinement, or tool
 narrowing: it supplies `inherit` and the tri-state lists, and
-[session.md](session.md) decides when to apply them and against what. No
-milestone is attached.
+[session.md](session.md) decides when to apply them and against what.
 
 ## Status
 
@@ -41,7 +40,7 @@ seating, tool narrowing — pass in `crates/kerness/tests/session_run.rs` and
 | File | Role |
 | ---- | ---- |
 | `crates/kerness/src/agent.rs` | `Agent`, `AgentDefaults`, system prompt and message assembly, `inherit` |
-| `bindings/python/src/types.rs:645` | `PyAgent`, the pyclass callers construct; getters and setters for every field |
+| `bindings/python/src/types.rs:645` | `PyAgent`, the pyclass callers construct; getters for every field and setters for all but `position` |
 | `bindings/python/kerness/agent.py` | re-export shim |
 
 ## Language and Conventions
@@ -57,8 +56,9 @@ rules apply. Local facts:
 - **Hand-written `Debug`** (`crates/kerness/src/agent.rs:325`) because the
   provider is a trait object with no useful representation; it prints identity
   and the inheritable options and omits skills, tools, memory, and workspace.
-- **`Cow` in prompt decoration** (`crates/kerness/src/agent.rs:157`): a prompt with no placeholders and no
-  decorations is returned without a copy; each addition promotes to `Owned`.
+- **`Cow` in prompt decoration** (`crates/kerness/src/agent.rs:157`): a prompt
+  is copied once, at the end (`:194`), rather than once per placeholder or
+  decoration; each addition promotes to `Owned`.
 - **The pyclass constructor carries `#[allow(clippy::too_many_arguments)]`**
   (`bindings/python/src/types.rs:685`) — twelve keyword parameters in
   `#[pyo3(signature = ...)]` order, every one optional but `name`. `position`
@@ -164,7 +164,7 @@ in one place is what stops participant and orchestrator prompts drifting apart.
   and one `if self.x.is_none()` arm in `inherit`; a new decoration is one
   `Cow::Owned` step in `decorate_system_prompt`.
 - A placeholder is one entry in the substitution table at `crates/kerness/src/agent.rs:185`; the three
-  today are `{bot_id}`, `{bot_name}`, `{model}`.
+  are `{bot_id}`, `{bot_name}`, `{model}`.
 
 ## Key Types and Entry Points
 
@@ -295,7 +295,7 @@ cargo test -p kerness --test tools_e2e                            # pass = 18 pa
   naming every field.
 - Validate a model name against the provider at `inherit` time where the
   backend can answer; success: a session with a misspelled model fails before
-  the first turn in a new `session_run.rs` case. Today the first call is the
+  the first turn in a new `session_run.rs` case. The first call is the
   only check (see Open Gaps).
 
 ## Open Gaps / Roadmap

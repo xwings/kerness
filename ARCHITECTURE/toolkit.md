@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Toolkit
@@ -58,7 +58,8 @@ rules apply. Local facts:
   `crate::error::Result<String>` (`crates/kerness/src/tooling.rs:32`).
 - `PyToolCall`, `PyToolHandler`, `PyToolSpec` and `PyToolResult` are `frozen`
   pyclasses; `PyToolResult` is `get_all` (`bindings/python/src/types.rs:294`).
-- Tests are inline with no fixtures beyond a `spec_named` helper; the Python
+- Tests are inline with no fixtures beyond a `spec_named` helper in
+  `toolkit.rs` and an `arguments` helper in `tooling.rs`; the Python
   tests group by outcome (`TestSuccess`, `TestFailuresBecomeResults`,
   `TestResolve`).
 
@@ -100,8 +101,11 @@ Tests: `every_failure_is_a_result_the_model_can_read` (`:168`),
 
 **The actor reaches only handlers that asked for it.** `takes_actor`
 (`crates/kerness/src/tooling.rs:61`) is set by the built-in `cmd`, `read_file`
-and `list_dir` tools because access prompts and the command log name the actor;
-a handler that did not opt in receives `""` (`crates/kerness/src/toolkit.rs:92`).
+and `list_dir` tools because access prompts and the command log name the actor,
+by the three memory tools (`crates/kerness/src/session.rs:2120`, `:2157`,
+`:2213`) because a scope belongs to an agent, and by every
+`add_contextual_tool` registration (`:830`); a handler that did not opt in
+receives `""` (`crates/kerness/src/toolkit.rs:92`).
 Tests: `the_actor_reaches_only_handlers_that_asked_for_it` (`:145`) and
 `bindings/python/tests/test_toolkit.py:38`.
 
@@ -177,7 +181,7 @@ the access policy's `allowed_commands` ([access.md](access.md)) for what
 - Narrowed by [skills.md](skills.md)'s `apply_gate` and widened by its
   `admit_required`, both after `resolve`; the `Skill` tool is itself a
   `ToolSpec`.
-- The built-in `run_command`, `read_file` and `list_dir` handlers go through
+- The built-in `cmd`, `read_file` and `list_dir` handlers go through
   [access.md](access.md) and set `takes_actor`.
 - [harness.md](harness.md) resolves a gameplan's `tools:` against the
   registered names; `RESERVED_TOOL_NAMES` keeps `Skill` off the registry.
@@ -259,8 +263,10 @@ Improvement candidates (proposals, not accepted work):
 
 ## Open Gaps / Roadmap
 
-- `parse_tool_calls` recognises the framework's fenced-block convention only. A
-  model that invents a different format produces no calls, not an error.
+- `parse_tool_calls` recognises the framework's `tool_calls` shape in supported
+  fences or a bare JSON object (`crates/kerness/src/tooling.rs:161`). Other
+  formats can produce no calls; malformed recognized candidates produce an
+  invalid-call result.
 - Tool results are strings. A tool returning structured data has to serialise
   it, and the model has to parse it back.
 - No per-tool timeout; only `run_command` bounds its own execution

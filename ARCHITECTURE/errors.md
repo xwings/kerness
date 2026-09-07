@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Errors
@@ -70,7 +70,7 @@ facts:
 ## Design and Invariants
 
 One flat enum, which the bindings fan out into an exception class per variant.
-The hierarchy is two levels deep and callers branch on exactly one relationship
+The hierarchy is two levels below the base and callers branch on exactly one relationship
 — "is this a provider error?" — so `is_provider` carries what a nested enum
 would have cost a type to express. `Display` is the message a caller reads in
 either language; `ProviderHttp` and `ProviderNetwork` format their fields into
@@ -86,7 +86,7 @@ body. The status must still be 400 or 413 (`crates/kerness/src/error.rs:87`),
 so a 500 whose body mentions context length is an outage, not a request to
 shorten. A phrase list is wrong when a vendor rewrites its message, and it is
 wrong in the safe direction — an unrecognised refusal stays an ordinary provider
-failure, which is what a session does with it today. The phrases live once, in
+failure, which is what a session does with it. The phrases live once, in
 Rust; the Python property `ProviderHTTPError.is_context_overflow`
 (`bindings/python/kerness/exceptions.py:31`) reads them through the pyfunction
 at `bindings/python/src/funcs.rs:472` rather than restating them.
@@ -104,12 +104,15 @@ are reported through tool results or the owned run's typed terminal outcome.
 
 ### Invariants
 
-- **The map is total in both directions.** `to_py` matches every variant
-  (`bindings/python/src/errors.rs:58`) and `from_py` recognises every class
-  the map produces (`:108` onward), so an exception that crosses twice comes
-  back as the variant it started as. `ProviderHttp` keeps `status_code`,
-  `url`, and `body` across the round trip (`:64`, `:109`). Enforced by the
-  class-specific Python tests named under **How to Test**; no test drives a
+- **The map is total outward and nearly total back.** `to_py` matches every
+  variant (`bindings/python/src/errors.rs:58`); `from_py` recognises every
+  framework class plus `FileNotFoundError` and `ValueError` (`:108` onward),
+  so those cross twice and come back as the variant they started as. `Io`
+  does not: it leaves as `OSError` (`:77`) and there is no `OSError` arm, so
+  it returns as `Session` (`:141`). `ProviderHttp` carries `status_code`,
+  `url`, and `body` both ways (`:64`, `:109`); the Python-to-Rust direction is
+  exercised for `status_code` and `body` by the tests named under **How to
+  Test**, the Rust-to-Python attributes are unasserted, and no test drives a
   full Rust-to-Python-to-Rust round trip.
 - **An overflow is still a provider error.** The retry and dialect-fallback
   paths must keep seeing it as one (`crates/kerness/src/error.rs:56`). Enforced
@@ -192,8 +195,8 @@ cargo test -p kerness error                                  # pass = 14 passed,
   the property from Python, parametrised over the same phrases; `:771`
   `test_the_status_has_to_agree_with_the_body`.
 - The map is proved class by class where each variant is raised:
-  `ProviderHTTPError` attributes at `bindings/python/tests/test_provider.py:507`
-  onward, `ProviderError` at `:383`, `AccessDeniedError` at
+  `ProviderHTTPError` crossing into Rust (`status_code` and `body`) at
+  `bindings/python/tests/test_provider.py:507` onward, `ProviderError` at `:383`, `AccessDeniedError` at
   `bindings/python/tests/test_access.py:36`, `GameplanLoadError` at
   `bindings/python/tests/test_gameplan_loader.py:29`, `FileNotFoundError` at
   `bindings/python/tests/test_agent.py:75` and
@@ -251,4 +254,6 @@ Improvement candidates, as proposals:
   filesystem error has to parse the message.
 - `from_py`'s fallback to `Error::Session` is coarse. Callbacks whose contract
   preserves an original Python exception need explicit parking; typed Rust
-  outcomes retain the converted framework error.
+  outcomes retain the converted framework error. An `OSError` arm mapping back
+  to `Error::Io` would close the one gap in the round trip; success check: a
+  Python callback raising `OSError` surfaces as `Error::Io` in Rust.

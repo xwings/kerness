@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Access
@@ -39,8 +39,7 @@ empty.
 This module does not own *when* a check runs, who the actor is, or what a
 refusal becomes: [session.md](session.md) decides the first, [run.md](run.md)
 assigns the second, and [toolkit.md](toolkit.md) turns the third into a tool
-result. No milestone is attached; the boundary is infrastructure every
-milestone consumes.
+result.
 
 ## Status
 
@@ -76,11 +75,13 @@ rules apply. Local facts:
   (`bindings/python/tests/test_access.py:280`) pins the snapshot. Every
   decision stays in Rust.
 - **The only `unsafe` in the crate** is here: `crates/kerness/src/exec.rs:159`,
-  `:163` (`fcntl` descriptor flags) and `:200` (`kill` on a negative PID), each
-  under a `// SAFETY:` comment and a `#[cfg(unix)]` guard. `libc` supplies only
-  those two operations; spawning and reads use the standard library.
+  `:163` (`fcntl` descriptor flags) and `:200` (`kill` on a negative PID) in
+  non-test code, and `:370`, where the deadline test forks a child; each is
+  under a `// SAFETY:` comment and a `#[cfg(unix)]` guard. Outside tests
+  `libc` supplies only those two operations; spawning and reads use the
+  standard library.
 - **Platform split by `cfg`.** `capture_output` has a POSIX body at
-  `crates/kerness/src/exec.rs:102` and a thread-per-pipe fallback at `:214`;
+  `crates/kerness/src/exec.rs:103` and a thread-per-pipe fallback at `:214`;
   `process_group(0)` at `:74` is unix-only. The unit test at `:364` carries its
   own `#[cfg(unix)]` arms.
 - **Global seam.** `ConsolePrompt` (`crates/kerness/src/access.rs:69`) lives in
@@ -122,9 +123,10 @@ path, and it writes back to the policy so a rebuilt manager keeps the grant
 
 ### Invariants a change must preserve
 
-- **Default deny, and the refusal names the way back in.** A bare policy
-  allows nothing; an unlisted command with no approver is an `AccessDenied`
-  that names `approve_prompt=prompt_on_console` (`prompt_or_deny`,
+- **Unlisted commands require approval.** With a bare policy, workspace paths
+  are allowed (`crates/kerness/src/access.rs:487`) and an empty host list adds
+  no restriction (`:452`). An unlisted command with no approver is an
+  `AccessDenied` that names `approve_prompt=prompt_on_console` (`prompt_or_deny`,
   `crates/kerness/src/access.rs:517`). Tests:
   `no_prompt_at_all_still_denies_and_names_the_way_back_in` (`:793`),
   `a_bare_policy_allows_nothing_but_trusts_skill_bundles` (`:1410`),
@@ -202,7 +204,7 @@ path, and it writes back to the policy so a rebuilt manager keeps the grant
 - **`AccessPolicy::new()` and `Default` disagree on `trust_skill_bundles`.**
   `new()` (`crates/kerness/src/access.rs:286`) sets it true; the derived
   `Default` leaves it false. `Session::new` uses `new()`
-  (`crates/kerness/src/session.rs:557`) so a session that named no policy still
+  (`crates/kerness/src/session.rs:561`) so a session that named no policy still
   grants bundle paths. No test asserts the `Default` side directly; the
   Python default is pinned by `test_skill_bundles_are_trusted_by_default`
   (`bindings/python/tests/test_access.py:306`).
@@ -401,8 +403,8 @@ cargo test -p kerness --test access_e2e                            # pass = 17 p
 - **Changing command execution** → `run_command_cancellable`, `capture_output`,
   `stop_group` (`crates/kerness/src/exec.rs:43`, `:103`, `:197`); both `cfg`
   arms; the scoped-context caller at
-  `crates/kerness/src/session/capabilities.rs:240`; the deadline tests at
-  `crates/kerness/src/exec.rs:364` and `:435`.
+  `crates/kerness/src/session/capabilities.rs:240`; the deadline test at
+  `crates/kerness/src/exec.rs:364` and the pipe-drain test at `:435`.
 - **Safe extension points**: a custom `ApprovePrompt`, a custom `ConsolePrompt`,
   and a new `exec`-style tool that takes `&AccessManager`. Reuse `check_path`'s
   returned path rather than re-resolving.
@@ -410,8 +412,9 @@ cargo test -p kerness --test access_e2e                            # pass = 17 p
   `AccessManager`; no tool may open a path it did not receive from `check_path`;
   no per-agent allowlist — the workspace is the only per-actor dimension (see
   Open Gaps for why).
-- **Compatibility checks**: `AccessPolicy`'s Python constructor is keyword-only
-  with the field order at `bindings/python/kerness/access.py:35`; `AccessRequest`
+- **Compatibility checks**: `AccessPolicy`'s Python constructor is a plain
+  dataclass, so positional callers depend on the field order at
+  `bindings/python/kerness/access.py:35`; `AccessRequest`
   is `frozen, get_all` with four string fields (`bindings/python/src/access.rs:27`);
   `DEFAULT_TIMEOUT` is asserted by `crates/kerness/tests/public_api.rs` and the
   root's constants table.
@@ -423,7 +426,7 @@ cargo test -p kerness --test access_e2e                            # pass = 17 p
   `bindings/python/kerness/access.py:36`, and `cargo doc` renders it.
 - Confine the session's own write paths by the *resolved* path `check_path`
   returned rather than the configured string kept at
-  `crates/kerness/src/session.rs:576`; success: a parent directory replaced by a
+  `crates/kerness/src/session.rs:659`; success: a parent directory replaced by a
   symlink after `Session::new` is refused at write time by a new
   `access_e2e.rs` case.
 
@@ -459,7 +462,7 @@ cargo test -p kerness --test access_e2e                            # pass = 17 p
   glob — and `command_approval` consults it first among them, at `:427`. The
   field a caller is least warned about is the one that admits the most.
 - `check_path` returns a resolved path, but `Session::new` keeps the original
-  configured write paths (`crates/kerness/src/session.rs:576`) and `save`
+  configured write paths (`crates/kerness/src/session.rs:659`) and `save`
   opens its path later (`crates/kerness/src/session.rs:1680`). Changes to parent
   directories after validation are not confined by an OS sandbox. Snapshot
   temporary-file creation is guarded separately by

@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Channel
@@ -18,8 +18,7 @@ the caller so a Python process can route them into `logging`.
 This module owns the `Channel` trait, the four bundled channels, the two
 delivery seams, and the timestamp rendering. It does not decide *what* is
 delivered or *when*: [session.md](session.md) and [run.md](run.md) write to it,
-and [access.md](access.md) confines the paths it declares. No milestone is
-attached.
+and [access.md](access.md) confines the paths it declares.
 
 ## Status
 
@@ -79,8 +78,9 @@ rules apply. Local facts:
 
 `channel` depends on `error`, `logging`, and `pyfmt`; `logging` depends on
 nothing in the crate. Above them, the session writes through
-`Shared.channel: Arc<dyn Channel>` — `say` and `note` in
-`crates/kerness/src/session.rs:1631`, `:1641`; the owned run at
+`Shared.channel: Arc<dyn Channel>` — `record_and_emit` and `emit_system` in
+`crates/kerness/src/session.rs:1623`, `:1639`, with the channel calls at
+`:1631` and `:1641`; the owned run at
 `crates/kerness/src/session/run.rs:627`, `:636`, `:1062` — and `log_command`
 (`crates/kerness/src/session.rs:1988`) reports every command verdict as a
 system notice. Diagnostics are raised from `agent_runtime`, `provider`,
@@ -318,7 +318,10 @@ cargo test -p kerness channel                                       # pass = 10 
 
 - Delivery is synchronous and inline. A slow channel slows the session; there is
   no buffering or drop policy.
-- `LogChannel` writes one file per day per directory and never rotates or prunes.
+- `LogChannel` selects one pathname per construction using a second-resolution
+  stamp (`crates/kerness/src/channel.rs:195`), opens it for append on delivery
+  (`:212`), and never rotates or prunes. Instances constructed in the same
+  second under one directory share that pathname.
 - `LogChannel` creates its log directory in its constructor
   (`crates/kerness/src/channel.rs:191`), so a directory outside the workspace
   exists by the time the session refuses it.

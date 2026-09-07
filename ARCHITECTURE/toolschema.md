@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "1.1.0"
+eatmycode_version: "1.2.0"
 ---
 
 # Tool Schema
@@ -42,11 +42,11 @@ rules apply. Local facts:
 
 - `ToolDialect` derives `Serialize`/`Deserialize` with
   `rename_all = "snake_case"` (`crates/kerness/src/toolschema.rs:35`), so its
-  wire name, its gameplan spelling, `as_str` (`:44`) and `parse` (`:53`) all
-  agree; `Default` is `Text`.
+  checkpoint spelling, `as_str` (`:44`) and `parse` (`:53`) agree; `Default`
+  is `Text`. Providers choose the dialect; harness frontmatter has no dialect key.
 - The module doc carries the dialect comparison table
-  (`crates/kerness/src/toolschema.rs:1`); the Python shim's docstring restates
-  it. Observed convention: a wire-shape fact is documented at the converter.
+  (`crates/kerness/src/toolschema.rs:1`); the Python shim's docstring
+  summarises it in prose. Observed convention: a wire-shape fact is documented at the converter.
 - `ToolDialect` is declared in Python (`bindings/python/kerness/_enums.py:14`)
   rather than as a pyclass because callers compare members with `is`, which
   requires genuine enum member identity. The extension is handed the class at
@@ -54,8 +54,8 @@ rules apply. Local facts:
   `dialect_to_py` calls the enum with the wire string
   (`bindings/python/src/types.rs:47`), and `dialect_from_py` accepts a member or
   its bare value (`:55`).
-- All conversion functions are pure and return `Value` or `Vec<ToolCall>`,
-  never `Result`; a malformed input is preserved, not refused. Tests are inline
+- All conversion functions are pure and return `Value`, `Option<Vec<Value>>`
+  or `Vec<ToolCall>`, never `Result`; a malformed input is preserved, not refused. Tests are inline
   with a single `spec()` helper; the Python tests group by direction
   (`TestConversion`, `TestParsingOpenAI`, `TestRenderingResults`).
 
@@ -129,7 +129,7 @@ rather than a reconstructed value.
 ## Key Types and Entry Points
 
 - `crates/kerness/src/toolschema.rs:35` — `ToolDialect` — `Text | Openai |
-  Anthropic`, `Text` by default; `as_str()` at `:44` is the wire and gameplan
+  Anthropic`, `Text` by default; `as_str()` at `:44` is the serialized
   name, `parse(value)` at `:53` returns `Option` because an unknown string is
   "not this one", not an error.
 - `crates/kerness/src/toolschema.rs:70` — `to_openai_tool(spec)` / `:82`
@@ -165,8 +165,10 @@ rather than a reconstructed value.
   `ToolCall`s it dispatches; renders the `ToolResult` it returns. Both parsers
   use `tooling::wrap_raw`; native and text-fence argument decoding keep their
   distinct rules.
-- Schemas are made strict by [jsonschema.md](jsonschema.md) before a backend
-  attaches them.
+- Tool schemas retain `ToolSpec.parameters` unchanged when attached to a
+  request (`crates/kerness/src/toolschema.rs:70`, `:82`). Strict rewriting by
+  [jsonschema.md](jsonschema.md) applies to OpenAI structured output schemas
+  (`crates/kerness/src/provider/openai.rs:88`), a separate request contract.
 - [agent-runtime.md](agent-runtime.md) appends the two rendered messages to the
   turn's private history; under a native dialect the batch reaches the next
   request whole.
@@ -214,7 +216,7 @@ cargo test -p kerness toolschema                                       # pass = 
   `tool_schemas`, `render_assistant_turn` and `render_tool_result`, a parser,
   the Python enum member in `_enums.py`, and the backend that selects it in
   [provider.md](provider.md). The `_` arm in `tool_schemas`
-  (`crates/kerness/src/toolschema.rs:100`) currently
+  (`crates/kerness/src/toolschema.rs:100`)
   treats any non-Anthropic native dialect as OpenAI-shaped; a fourth shape must
   not fall into it.
 - Changing argument decoding → keep the native and text-fence decoders
@@ -224,9 +226,9 @@ cargo test -p kerness toolschema                                       # pass = 
   calls them directly. Do not add a dialect-aware branch above this module.
 - Forbidden coupling: this module must not import `session` or `agent_runtime`;
   those call down.
-- Compatibility: `ToolDialect`'s serialized name appears in gameplan
-  frontmatter and in the run checkpoint (`AgentTurn` stores the dialect); a
-  rename is a schema change for [sessionfile.md](sessionfile.md).
+- Compatibility: `ToolDialect` is provider configuration and its serialized
+  name appears in the run checkpoint (`AgentTurn` stores the dialect); a
+  rename affects the public enum and [sessionfile.md](sessionfile.md)'s schema.
 
 Improvement candidates (proposals, not accepted work):
 
