@@ -1,9 +1,16 @@
+---
+eatmycode_version: "1.2.0"
+---
+
 # Testing
 
 ## Goal
 
 Three suites, each proving something the other two cannot, and a CI that runs
-all of them on every push.
+all of them on every push. This module owns the test doubles, the scratch
+directories, the suite boundaries, and the commands that gate a change. It does
+not own any behaviour under test; each subsystem doc maps its own invariants to
+the tests that hold them.
 
 The framework ships as two artifacts, so it can fail in three distinct ways: the
 logic can be wrong, the Rust surface can be unusable, or the boundary to Python
@@ -15,88 +22,151 @@ can be broken. A suite that catches one of those says nothing about the others.
 | Integration | `crates/kerness/tests/` | A session that cannot be *assembled* — a missing re-export, a type a dependent cannot name, a run whose parts are each right and whose whole is not. |
 | Python | `bindings/python/tests/` | Anything about the boundary: a value that crosses wrong, a subclass the extension will not accept, an asset the wheel did not install. |
 
-The Python column is a boundary, not a second opinion. A Python test earns its
-place when the binding does work — a callable crossing as a handler or a context
-source, a subclass answering by Python method resolution, an exception or an
-`Option` arriving as the right Python thing, a constant spelled in both
-languages. Restating a crate rule through a pass-through binding is not a
-boundary test: it cannot fail unless the crate test fails first, and two suites
-asserting one rule drift apart in exactly the place nobody rereads. Where a
-value is plain data the crate validates — `allowed_hosts`, an agent's `tools` —
-one case proves it crossed, and the semantics are asserted where they are
-decided.
-
-The integration suite is the one that was missing. Before it, every claim about
-how a session actually runs — the orchestrator loop, resume, compaction, the
-access boundary, the tool dialects — was proved only by driving the framework
-through PyO3 from Python, which is a strange way to test a Rust crate and leaves
-the pure-Rust caller the crate exists for unrepresented.
-
 ## Status
 
-`done` — final Rust gate: 407 unit tests, 118 integration tests, and one
-doctest; final rebuilt Python gate: 502 tests. All passed.
+`done` — `cargo test --workspace -q` passes 407 unit tests, 118 integration
+tests and one doctest; `.venv/bin/python -m pytest bindings/python/tests -q`
+passes 502; format, clippy, rustdoc, the example build, the three offline
+examples, self-check and ruff all exit 0. Both `--locked` commands pass with
+the current lockfile. A fresh source copy passes the Rust suite on 1.88.0 and
+the Python suite after installation into a new virtualenv. The CI MSRV pin
+still disagrees with the manifest — see **Open Gaps / Roadmap**.
 
 ## Code Structure
 
 | File | Role |
 | ---- | ---- |
-| `crates/kerness/tests/common/mod.rs` | the doubles all eight files share |
+| `crates/kerness/tests/common/mod.rs` | the doubles all eight integration files share |
 | `crates/kerness/tests/*.rs` | one file per behaviour cluster, 118 tests |
-| `bindings/python/tests/conftest.py` | the Python suite's equivalent doubles |
+| `crates/kerness/src/testing.rs` | the unit suite's `TempDir`, behind `#[cfg(test)]` |
+| `bindings/python/tests/conftest.py` | the Python suite's doubles and fixtures |
 | `bindings/python/tests/test_*.py` | 26 modules, 502 tests |
-| `crates/kerness/examples/*.rs` | 10 examples, compiled by CI |
-| `bindings/python/examples/` | Python examples, walked by `bindings/python/tests/test_examples.py` |
+| `bindings/python/tests/test_examples.py` | walks `bindings/python/examples/` by AST and asserts every name it reaches for exists |
+| `crates/kerness/examples/*.rs` | 10 examples, compiled by CI; `support/mod.rs` holds the offline fixtures the two host-control examples share |
 | `.github/workflows/ci.yml` | what runs on push and pull request |
-| `.github/workflows/release.yml` | wheels, sdist, the clean-interpreter check, and the PyPI upload it gates |
+| `.github/workflows/release.yml` | wheels, sdist, and the clean-interpreter install check |
 
-No test dependency was added. `common/mod.rs` carries its own temp directory
-rather than pulling in `tempfile`, which keeps the "no runtime deps beyond the
-Cargo dependencies" posture true of the test build as well.
+## Language and Conventions
 
-The unit tests have the same need and cannot see that file — an integration test
-is a separate crate, and `common/mod.rs` is compiled into it rather than into
-the library. `crates/kerness/src/testing.rs` is the library-side copy, behind
-`#[cfg(test)]` so it never reaches the public surface, and the eleven modules
-that want a scratch directory share it rather than each writing one. Two copies
-is the floor the crate boundary sets; eleven was drift, and it showed as one
-module canonicalizing its path and another not.
+Rust integration tests and inline unit tests, plus pytest; the root's
+[Coding Style and Code Design](../ARCHITECTURE.md#coding-style-and-code-design)
+rules apply. Local facts:
 
-The four seams in the control center's table are process-wide slots, and the
-unit suite runs concurrently in one process — so a test that installs a double
-is sharing that slot with whatever else is running. Two answers, picked by what
-the test needs to read back. A test that only checks its double was reached can
-tolerate a neighbour writing through the same slot, and asserts with `contains`
-rather than equality — `crates/kerness/src/channel.rs:443`. A test that reads
-back the exact question *its own* double recorded cannot, because a neighbour
-installing over the slot mid-body takes that recording away; those installs take
-turns on a static mutex — `crates/kerness/src/access.rs:1125`. Neither is
-optional. Skipping the second is not a flaky test but a race, and it fails as an
-index out of bounds on an empty recording, which names the assertion rather than
-the seam.
+- Test names are sentences in snake_case in both languages
+  (`a_session_assembles_from_the_public_api_alone`,
+  `test_a_bare_policy_allows_nothing`); Python groups cases in `Test<Behaviour>`
+  classes. Observed, not enforced.
+- `crates/kerness/tests/common/mod.rs:15` carries `#![allow(dead_code)]`: each
+  test binary compiles the module and uses part of it.
+- Provider doubles are built on `ProviderBase::new(0, 0.0, None)`
+  (`crates/kerness/tests/common/mod.rs:113`): zero extra attempts, so one
+  scripted reply means exactly one call and a failure surfaces instead of being
+  slept over. `conftest.py` does the same with `retries=0, backoff_sec=0`
+  (`bindings/python/tests/conftest.py:9`).
+- Scratch directories are hand-rolled, not `tempfile`: the crate's claim is that
+  it needs nothing beyond what `Cargo.toml` lists, and that holds for the test
+  build as well. `crates/kerness/src/testing.rs:16` is the unit-suite copy, used
+  by eleven modules; `crates/kerness/tests/common/mod.rs:422` is the
+  integration copy, because an integration test is a separate crate and cannot
+  see anything behind `cfg(test)`. Two copies is the floor the crate boundary
+  sets.
+- Python: `ruff` with `select = ["E4", "E7", "E9", "F"]` from
+  `bindings/python/pyproject.toml`; pytest is configured by no file (observed);
+  no type checker is configured.
+- The Python column is a boundary, not a second opinion. A Python test earns its
+  place when the binding does work — a callable crossing as a handler, a
+  subclass answering by Python method resolution, an exception arriving as the
+  right class, a constant spelled in both languages. Restating a crate rule
+  through a pass-through binding cannot fail unless the crate test fails first,
+  and two suites asserting one rule drift apart. Where a value is plain data the
+  crate validates — `allowed_hosts`, an agent's `tools` — one case proves it
+  crossed, and the semantics are asserted where they are decided.
+
+## Design and Invariants
+
+**The integration suite compiles as a dependent does.** Everything in
+`crates/kerness/tests/` reaches the crate only through `kerness::…`
+(`crates/kerness/tests/public_api.rs:1`), so a `pub` item that only the unit
+tests exercise can be removed without a test failing — and the break lands on
+whoever depended on it. `public_api.rs` exists to make that break land here.
+
+**Process-wide seams are shared by concurrent tests.** The four seams in the
+root's table are `OnceLock<RwLock<Arc<dyn Trait>>>` slots, and the unit suite
+runs concurrently in one process, so a test that installs a double shares that
+slot with whatever else is running. Two answers, picked by what the test needs to
+read back:
+
+- A test that only checks its double was reached tolerates a neighbour writing
+  through the same slot, and asserts with `contains` rather than equality —
+  `crates/kerness/src/channel.rs:440`.
+- A test that reads back the exact question *its own* double recorded cannot,
+  because a neighbour installing over the slot mid-body takes that recording
+  away; those installs take turns on a static mutex —
+  `crates/kerness/src/access.rs:1125`.
+
+Neither is optional. Skipping the second is not a flaky test but a race, and it
+fails as an index out of bounds on an empty recording, which names the assertion
+rather than the seam.
+
+**Nothing reaches the network.** Every provider in every suite is a double; the
+four backends are proved down to the request they build and the response they
+parse. `offline_debate` drives a real gameplan to completion the same way, which
+is why CI runs it as the smoke test (`.github/workflows/ci.yml:48`).
+
+**Examples are compiled, not read.** `cargo build -p kerness --examples` fails
+on an example that no longer matches the API. Live-provider Python examples
+need credentials; `host_control.py` runs offline. The static checks in
+`bindings/python/tests/test_examples.py:132` parse each script and
+assert every `kerness.X` attribute, `Session` method and `SessionResult`
+attribute it names still exists; `:148` loads every gameplan shipped beside an
+example under the current schema.
+
+**Two asset copies, one guard.** `crates/kerness/assets/` and
+`bindings/python/kerness/{gameplans,roles,personas,skills}/` must stay
+byte-identical, and nothing in the build keeps them so;
+`bindings/python/tests/test_packaging.py:42` is the only check, and it needs the
+Python surface installed.
+
+**The sdist installs from clean.** `release.yml`'s `verify-sdist` job
+(`.github/workflows/release.yml:87`) installs the source distribution into an
+interpreter with no checkout beside it (`:92`) and runs `kerness.selfcheck`, so
+an asset the package failed to include cannot be masked by the working tree. It
+is also the only check on the `LICENSE` and `README.md` symlinks in
+`bindings/python/`: `license-files` and `readme` resolve against that directory,
+and if they resolve to nothing the build succeeds and ships less.
 
 ## Key Types and Entry Points
 
 - `crates/kerness/tests/common/mod.rs:36` — `Call` — one request a double
   received. `system()`, `text()` and `last()` are the three questions tests ask
   of it; `purpose` is how a test tells an orchestrator turn from a participant's.
-- `:97` — `ScriptedProvider` — replies written in advance, keyed by purpose
-  substring in declaration order, each key owning a sequence with its own cursor
-  and a last entry that repeats. Built on `ProviderBase::new(0, 0.0, None)`: zero
-  extra attempts, so a scripted reply means exactly one call and a failure
-  surfaces instead of being slept over.
-- `:272` — `ToolProvider` — emits native tool calls under a chosen
-  `ToolDialect`, which is how the OpenAI and Anthropic wire shapes are exercised
-  without a network.
-- `:366` — `RecordingChannel` — what was delivered, as against what the
-  transcript holds. The two differ, and the difference is a tested behaviour.
-- `:422` — `TempDir` — `env::temp_dir()/kerness-test-{pid}-{counter}`, removed on
-  `Drop`.
-- `:500` — `refusal<T>(Result<T>) -> String` — `Session` does not implement
-  `Debug`, so `expect_err` is unusable; this is how a test reads a rejection.
-- `:526` — `config(gameplan, topic, provider)` — a `SessionConfig` with
-  `turn_delay: Duration::ZERO`, because the default one-second pause between
-  turns is for humans reading a console.
+- `crates/kerness/tests/common/mod.rs:97` — `ScriptedProvider` — replies written
+  in advance, keyed by purpose substring in declaration order, each key owning a
+  sequence with its own cursor and a last entry that repeats.
+- `crates/kerness/tests/common/mod.rs:272` — `ToolProvider` — emits native tool
+  calls under a chosen `ToolDialect`, which is how the OpenAI and Anthropic wire
+  shapes are exercised without a network.
+- `crates/kerness/tests/common/mod.rs:366` — `RecordingChannel` — what was
+  delivered, as against what the transcript holds. The two differ, and the
+  difference is a tested behaviour.
+- `crates/kerness/tests/common/mod.rs:422` — `TempDir` —
+  `env::temp_dir()/kerness-test-{pid}-{tag}-{counter}`, removed on `Drop`.
+- `crates/kerness/tests/common/mod.rs:500` — `refusal<T>(Result<T>) -> String` —
+  `Session` does not implement `Debug`, so `expect_err` is unusable; this is how
+  a test reads a rejection.
+- `crates/kerness/tests/common/mod.rs:515` — `confine(settings, temp)` — sets
+  the workspace and memory path into the scratch directory; an unset workspace
+  is the process's current directory, which a temp directory is not inside.
+- `crates/kerness/tests/common/mod.rs:526` — `config(gameplan, topic, provider)`
+  — a `SessionConfig` with `turn_delay: Duration::ZERO`, because the default
+  one-second pause between turns is for humans reading a console.
+- `crates/kerness/src/testing.rs:16` — `TempDir(pub PathBuf)` — the unit suite's
+  copy; `resolved()` canonicalizes for tests that compare a path the access
+  policy resolved.
+- `bindings/python/tests/conftest.py:9` — `MockProvider`, with
+  `PurposeMockProvider`, `SequenceMockProvider` and `CaptureChannel` (`:83`) —
+  the Python equivalents, exposed as the `mock_provider` and `capture_channel`
+  fixtures.
 
 The eight integration files:
 
@@ -107,82 +177,133 @@ The eight integration files:
 | `tools_e2e.rs` | 18 | The tool loop inside a real turn, in all three dialects; unknown tool, schema violation and failing handler each answered as text rather than raised; `MAX_INVALID_CALLS`; `max_tool_iterations`; `tool_results_in_history` both ways; an agent's own `tools` narrowing what it is offered, an empty list leaving it none, a tool it gave up refused at dispatch too, and one the session withheld refused before the run |
 | `access_e2e.rs` | 17 | Default-deny; each allow rule; an allowed command still held to the hosts it names; `set_exec` rebuilding the manager; reads outside `allowed_dirs`; `..` denied after resolution; symlink escape; a root confining a read, a write and a command's working directory; an agent root narrowing the session's, and a wider one refused by name |
 | `skills_e2e.rs` | 13 | Only name and description reach the prompt; the body arrives for one turn; a repeat load says so; `allowed-tools` narrowing and unioning; `requires-tools` adding back past a gameplan's own list, and refused before the run when nobody registered it |
-| `resume.rs` | 12 | A snapshot every turn; a second `run()` continuing; identity mismatch naming the field; bad JSON, wrong version and missing file each handled |
+| `resume.rs` | 12 | A snapshot every turn; a second `run()` continuing; identity mismatch naming the field; bad JSON, wrong version and missing file each handled; captured tool intents requiring reconciliation |
 | `compaction_e2e.rs` | 8 | A small ceiling compacting, the anchor turn kept, the count recorded, and history untouched when the summarizer returns nothing |
-| `public_api.rs` | 10 | The well-known constants, the shared request defaults, the crate version, the `lib.rs` re-exports, and every built-in asset loading — gameplans, personas, skills, and every role carrying a position and a prompt — the Rust half of what the self-check proves for Python; also that a session assembles from the public API alone, that a provider written outside the crate is a `Provider`, and that a reasoning effort round-trips as its name |
+| `public_api.rs` | 10 | The well-known constants, the shared request defaults, the crate version, the `lib.rs` re-exports, and every built-in asset loading — the Rust half of what the self-check proves for Python; also that a session assembles from the public API alone, that a provider written outside the crate is a `Provider`, and that a reasoning effort round-trips as its name |
 
 ## Interactions
 
 - The integration suite compiles against the crate as a dependent does, so it
-  transitively covers [session.md](session.md), [loop.md](loop.md),
-  [agent-runtime.md](agent-runtime.md), [toolkit.md](toolkit.md),
-  [access.md](access.md), [skills.md](skills.md),
+  transitively covers [session.md](session.md), [run.md](run.md),
+  [loop.md](loop.md), [agent-runtime.md](agent-runtime.md),
+  [toolkit.md](toolkit.md), [access.md](access.md), [skills.md](skills.md),
   [sessionfile.md](sessionfile.md) and [compaction.md](compaction.md) through
   their public surfaces only.
 - `crates/kerness/examples/offline_debate.rs` drives a real `debate` gameplan to
   completion against a scripted provider: no key, no network. CI runs it as a
-  smoke test, and it is what a clean clone can run first.
+  smoke test, and it is what a clean clone can run first. `host_control.rs` and
+  `resume_approval.rs` are the offline owners of [run.md](run.md)'s host-driven
+  and suspended-approval contracts.
 - The Python suite and [selfcheck.md](selfcheck.md) cover
   [bindings.md](bindings.md), which nothing on the Rust side can reach.
-- `release.yml`'s `verify-sdist` job installs the source distribution into a
-  clean interpreter *with no checkout beside it*, so an asset the wheel failed to
-  include cannot be masked by the working tree. It is also the only check on the
-  `LICENSE` and `README.md` symlinks in `bindings/python/`: `license-files` and
-  `readme` resolve against that directory, and if they resolve to nothing the
-  build still succeeds and simply ships less. `publish-pypi` needs it, so a
-  distribution that cannot install from clean is never uploaded.
-- Release wheels use Linux x86-64/ARM64, macOS Intel (`macos-15-intel`) and
-  Apple Silicon (`macos-15`), and Windows x64 runners. Every matrix job must
-  succeed before publishing, so a retired runner blocks the entire release.
-  A `v*` tag triggers publication through the `pypi` environment, which must
-  permit `v*` tags. PyPI trusts `xwings/kerness`, workflow `release.yml`, and
-  environment `pypi`; [the release guide](../README.md#releasing) owns the
-  one-time pending-publisher setup and version/tag procedure.
+- `crates/kerness/tests/public_api.rs:43` and
+  `bindings/python/tests/test_provider.py` each assert [runtime.md](runtime.md)'s well-known
+  constants and the shared request defaults; a constant changed in one language
+  fails here before it drifts.
+- `release.yml`'s `verify-sdist` job is the only check that the installed
+  package, not the working tree, carries every asset and the licence text.
 
 ## How to Test
 
+The whole gate, from the repository root:
+
 ```sh
-cargo fmt --all -- --check                            # pass = exit 0
-cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
-cargo test --workspace -q                             # pass = 407 unit + 118 integration + 1 doctest
-cargo build -p kerness --examples                     # pass = all 10 compile
-cargo run -p kerness --example offline_debate         # pass = completes with no key
-.venv/bin/python -m pytest bindings/python/tests -q   # pass = 502 passed
+cargo fmt --all -- --check                             # pass = exit 0
+cargo clippy --workspace --all-targets -- -D warnings  # pass = exit 0
+cargo test --workspace -q                              # pass = 407 unit + 118 integration + 1 doctest
+cargo test --workspace -q --locked                     # pass = exit 0 with the current lockfile
+cargo build -p kerness --examples                      # pass = all 10 compile
+cargo run -p kerness --example offline_debate          # pass = completes with no key, exit 0
+cargo run -p kerness --example host_control            # pass = validated host result, exit 0
+cargo run -p kerness --example resume_approval         # pass = restored approval, each tool once, exit 0
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p kerness   # pass = exit 0
+cargo +1.88.0 check --workspace --all-targets --locked # pass = exit 0 with the current lockfile
+.venv/bin/python -m pytest bindings/python/tests -q    # pass = 502 passed
+.venv/bin/python -m kerness.selfcheck                  # pass = "OK: all core checks passed", exit 0
+.venv/bin/ruff check bindings/python                   # pass = "All checks passed!"
 ```
 
 The wheel is built from `bindings/python/`, where `pyproject.toml` lives:
 
 ```sh
-cd bindings/python && ../../.venv/bin/maturin develop # pass = installed workspace version
+cd bindings/python && ../../.venv/bin/maturin develop  # pass = installed workspace version
 ```
 
-CI runs those, plus `cargo doc --no-deps -p kerness` under `RUSTDOCFLAGS=-D
-warnings`, `cargo check --workspace --all-targets --locked` on the MSRV
-toolchain, and `ruff check` over the Python tree.
+For installation prerequisites and the fresh-virtualenv commands, use the
+[root verification support](verification.md#local-prerequisites). Rebuild
+before testing Python; a matching package version cannot prove source freshness.
 
-For release workflow edits, run `actionlint .github/workflows/release.yml`
-(exit 0). A manual **Release → Run workflow** on a branch builds all platform
-wheels and verifies the sdist; both publishing jobs are skipped. A `v*` tag run
-also proves PyPI's OIDC exchange and upload, which local checks cannot exercise.
+`.github/workflows/ci.yml` runs format, clippy, `cargo test --workspace`
+(without `--locked`, `.github/workflows/ci.yml:39`), the example build,
+`offline_debate`, rustdoc, the MSRV check with `--locked`
+(`.github/workflows/ci.yml:70`), then on Python 3.10 and 3.13 the pytest
+suite, self-check and ruff. Rebuild the extension with `maturin develop` before
+running the Python suite after a Rust change; `test_packaging.py` detects
+version mismatches but cannot detect stale builds within a version.
 
-The MSRV job passes `--locked` deliberately. The MSRV is a claim about the
-committed resolution; without the flag a dependency raising its own MSRV fails
-the job on a commit that changed nothing here, and the failure names a crate the
-project does not own.
+- Suite-level invariants and their owners: the seam-contention rule at
+  `crates/kerness/src/channel.rs:440` and `crates/kerness/src/access.rs:1125`;
+  the dependent-compiles rule by every file under `crates/kerness/tests/`; the
+  example-rot rule by `bindings/python/tests/test_examples.py:132`; the asset
+  pair by `bindings/python/tests/test_packaging.py:42`; the Python module
+  inventory by `bindings/python/tests/test_selfcheck.py:18`.
+- Gaps: the provider backends are proved only down to the request they build;
+  macOS and Windows wheels are built at release time and never tested there.
+
+## Review and Refactor Guide
+
+- Adding a test → the file that already owns the behaviour, chosen by the table
+  above; a new integration file is justified only for a new behaviour cluster,
+  and it must `mod common;` rather than grow its own doubles.
+- Adding a double → `crates/kerness/tests/common/mod.rs` for Rust and
+  `bindings/python/tests/conftest.py` for Python. Keep the zero-retry
+  construction; a double that retries hides a failure behind a sleep.
+- Changing a well-known constant or request default → the crate, the Python
+  constructor signature, `crates/kerness/tests/public_api.rs:43` and
+  `bindings/python/tests/test_provider.py` in one change.
+- Adding a Python module → `_CORE_MODULES` in `bindings/python/kerness/selfcheck.py`,
+  or `bindings/python/tests/test_selfcheck.py:18` fails; it must also declare
+  `__all__` (`test_packaging.py`).
+- Adding a built-in asset → both copies, or
+  `bindings/python/tests/test_packaging.py:42` fails; the
+  Rust half is `public_api.rs`'s enumeration.
+- Adding an example → a Rust example is compiled by CI with no registration; a
+  Python example is picked up by `test_examples.py`'s walk, and any gameplan it
+  ships must declare `terminate_on`.
+- Editing CI → the `msrv` job's toolchain ref must be a released Rust version
+  and must match the `rust-version` in `Cargo.toml`; the `--locked` flag there
+  is deliberate (the MSRV is a claim about the committed resolution) and must
+  stay.
+- Forbidden: a test dependency. `tempfile`, `mockall` and the like would break
+  the "nothing beyond `Cargo.toml`" posture the two `TempDir` copies exist to
+  keep.
+
+Improvement candidates (proposals, not accepted work):
+
+- A Rust-side check that `crates/kerness/assets/` and the package copy are
+  byte-identical, so the guard does not depend on the Python surface being
+  installed; success check: a `public_api.rs` case that fails when one copy is
+  edited.
+- Pin the `msrv` job's toolchain to `rust-version` from `Cargo.toml` by reading
+  the manifest in the workflow, or add a dependabot `ignore` for that action,
+  so a version bump cannot name a toolchain that does not exist; success check:
+  the job passes on `main`.
 
 ## Open Gaps / Roadmap
 
+- **CI defect:** `.github/workflows/ci.yml:62` pins `dtolnay/rust-toolchain@1.120.0`
+  despite the declared 1.88 minimum. The proposed correction and success check
+  are in the [root roadmap](roadmap.md#repository-defects-evidence-backed-not-yet-fixed).
 - The integration tests never reach the network, so the four provider backends
   are proved only down to the request they build. Nothing here catches an
   endpoint changing its response shape.
-- The offline Rust examples `offline_debate`, `host_control`, and
-  `resume_approval` were run at the final gate, together with the Python
-  `host_control.py` example. Examples requiring live provider credentials are
-  compiled/imported without sending requests; external endpoint behavior stays
-  outside the offline suite.
+- Examples requiring live provider credentials are compiled (Rust) or parsed
+  (Python) without sending requests; external endpoint behaviour stays outside
+  the offline suite.
 - CI runs on Linux only. The wheels for macOS and Windows are built at release
   time and their tests are not run there, so a platform-specific break arrives
   as a bad wheel rather than a red build.
-- Nothing checks that `crates/kerness/assets/` and `bindings/python/kerness/` hold the
-  same asset bytes from the Rust side; `bindings/python/tests/test_packaging.py:42` is the only
-  guard, and it needs the Python surface installed to run.
+- Nothing checks that `crates/kerness/assets/` and `bindings/python/kerness/`
+  hold the same asset bytes from the Rust side;
+  `bindings/python/tests/test_packaging.py:42` is the only guard, and it needs
+  the Python surface installed to run.

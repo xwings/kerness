@@ -1,6 +1,10 @@
+---
+eatmycode_version: "1.2.0"
+---
+
 # Kerness
 
-## Mission
+## Mission and Constraints
 
 Kerness is a framework for building **multi-agent harnesses**: sessions in which
 several language models hold a structured conversation, call tools, consult a
@@ -17,441 +21,444 @@ Two properties follow from that and shape every decision below:
 
 - **The contract is total.** Every key the frontmatter parser accepts is
   validated, rendered into a prompt, or enforced at runtime. A key that parses
-  and then does nothing is a bug, not a reserved word.
+  and then does nothing is a bug, not a reserved word
+  ([harness.md](ARCHITECTURE/harness.md)).
 - **Everything is synchronous.** There is no executor, no async runtime, and no
   hidden concurrency. A session runs on the calling thread, and a stack trace
-  from inside a tool handler reaches the calling `SessionRun::step` or `Session::run`.
+  from inside a tool handler reaches the calling `SessionRun::step` or
+  `Session::run` ([run.md](ARCHITECTURE/run.md)).
+
+### Two artifacts, one implementation
 
 Kerness ships as two artifacts from one repository: a **Rust crate** for callers
 who want the framework in a Rust program, and a **Python extension** for callers
 who want to subclass `Provider`, pass a lambda as a tool handler, and hand a
-`pydantic` model in for structured output. Both are first-class surfaces;
-neither is a wrapper around the other's use case.
+`pydantic` model in for structured output. Both are supported.
 
-What is not symmetrical is where the code lives. **A feature is written in
-Rust.** The crate implements it, the extension exposes it, and the installed
-Python package does one of five things and nothing else: declares a class
-callers subclass (`Provider`, `Channel`, `MemoryStore`), declares one the
-extension cannot
-(the exception hierarchy's structured constructors, `ToolDialect` as a real
-`enum.Enum`, `AccessPolicy` as a dataclass whose contract is written in Python
-list semantics), reads a signature with `inspect`, validates with `pydantic`,
-or re-exports a name. Every other `.py` in the package is a shim.
+**A runtime feature is written in Rust.** The crate implements it, the extension
+exposes it, and the installed Python runtime surface supplies five kinds of glue:
+declares a class callers subclass (`Provider`, `Channel`, `MemoryStore`),
+declares one the extension cannot (the exception hierarchy, `ToolDialect` as an
+`enum.Enum`, `AccessPolicy` as a dataclass), reads a signature with `inspect`,
+validates with `pydantic`, or re-exports a name. A capability that exists only
+in Python is a defect ([bindings.md](ARCHITECTURE/bindings.md)). The Python
+[self-check](ARCHITECTURE/selfcheck.md) owns installed-package diagnostics.
 
 Where a feature needs something only the interpreter has — `sys.stdout`, a
 logger, `input`, an HTTP client under a caller's `mock.patch` — the crate names
-the need as a trait, ships a default that works from Rust alone, and the
-binding installs a replacement at `bootstrap`. The behaviour stays in one place
-and only its delivery crosses:
+the need as a trait (`HttpTransport`, `Logger`, `ConsoleWriter`,
+`ConsolePrompt`), ships a default that works from Rust alone, and the binding
+installs a replacement at `bootstrap`. The four seams, their defaults and what
+the binding installs are tabulated in [design.md](ARCHITECTURE/design.md#process-wide-seams).
 
-| Seam | Crate default | What the binding installs |
-| --- | --- | --- |
-| `HttpTransport` (`http.rs:24`) | `ureq` + `rustls` | `kerness.provider.http_post_json`, resolved per call so `mock.patch` reaches it |
-| `Logger` (`logging.rs:28`) | warnings and errors to stderr | `logging.getLogger("kerness")`, so `caplog` sees them |
-| `ConsoleWriter` (`channel.rs:54`) | this process's stdout | `builtins.print`, so `capsys` and a `StringIO` see it |
-| `ConsolePrompt` (`access.rs:69`) | `std::io::stdin` | `sys.stdin` / `builtins.input` |
-
-## Target Environment
+### Supported platforms and observable limits
 
 | | |
 | --- | --- |
-| Rust | MSRV **1.88**; stable toolchain; 2021 edition |
-| Python | **3.10+**, CPython, via the stable ABI (`abi3-py310`) |
-| Bindings | `pyo3` 0.23 with `extension-module` |
-| Build | `cargo` for the crate, `maturin` for the wheel |
-| Platform | Linux and macOS; developed on Linux x86-64. `ureq` + `rustls` reach further, but path confinement resolves every path from `/` — `crates/kerness/src/access.rs:713` — so the access boundary assumes POSIX paths |
-| Network | Outbound HTTPS only, to provider endpoints the caller names |
-| Runtime deps | None beyond the crate's Cargo dependencies; `pydantic` is optional and only for structured output |
+| Platform | Linux and macOS; developed on Linux x86-64. Path confinement resolves every path from `/` (`crates/kerness/src/access.rs:713`), so the access boundary assumes POSIX paths; command process groups and deadlines are `#[cfg(unix)]` (`crates/kerness/src/exec.rs:14`). |
+| Network | Blocking HTTP(S) to host-selected provider URLs; bundled defaults use HTTPS (`crates/kerness/src/http.rs:45`). Provider transport is outside `AccessManager`; `allowed_hosts` narrows explicit URLs in allowed commands ([access.md](ARCHITECTURE/access.md)). |
+| Process | No daemon, no database, no listening socket, no background thread. |
+| Filesystem | Writes are confined to paths the caller opts into: memory scopes, the session file, channel logs, and access-policy directories. |
+| Runtime deps | None beyond the crate's Cargo dependencies; `pydantic` is optional and only for structured output. |
 
-There is no daemon, no database, no listening socket, and no background thread.
-Filesystem writes are confined to paths the caller opts into: whatever the
-memory store names for a scope, the session file, channel logs, and directories
-added to the access policy.
+### Code-scope non-goals
 
-A built wheel is tagged `kerness-<version>-cp310-abi3-<platform>` — one wheel
-per platform covers every supported Python, and `<version>` is whatever the root
-`Cargo.toml` says.
+These are decisions, each recorded with its reason in the owning module doc:
 
-## Workspace Layout
+- No streaming; a response is one request and one reply ([provider.md](ARCHITECTURE/provider.md)).
+- No parallel agent execution; the synchronous invariant is load-bearing ([run.md](ARCHITECTURE/run.md)).
+- No embedded table of model context windows or prices; the caller supplies both ([provider.md](ARCHITECTURE/provider.md)).
+- No per-model tokenizer; `CHARS_PER_TOKEN` plus a reactive retry ([compaction.md](ARCHITECTURE/compaction.md)).
+- No MCP client, workflow adapter, or subagent scheduler yet (M4, [Roadmap](#roadmap)).
+- No domain-specific bundled assets; `assets/` stays framework-generic ([gameplan.md](ARCHITECTURE/gameplan.md)).
+- No hard token or cost budget; only measured thresholds ([provider.md](ARCHITECTURE/provider.md)).
 
-One artifact per top-level directory: `crates/` is the crate, `bindings/` is
-everything the wheel is made of. Neither reaches into the other's tests, and the
-root carries one manifest — `Cargo.toml`. A Python build starts from
-`bindings/python/`, not from here.
+### Compatibility
 
-```
-Cargo.toml                  workspace root, shared dependency versions
-crates/
-  kerness/                  the framework — pure Rust, links no Python
-    src/                    31 top-level modules plus provider/, skill/, and session/,
-                            documented by subsystem in the Index
-    assets/                 built-in gameplans, roles, personas, skills
-    tests/                  integration tests over the crate's public surface
-    examples/               10 harnesses driven from Rust alone
-bindings/
-  python/                   everything the wheel is built from
-    pyproject.toml          the wheel's manifest; `pip install .` runs here
-    Cargo.toml              the `kerness-py` crate, a workspace member
-    LICENSE  README.md      symlinks to the root copies
-    src/                    13 modules, one per boundary concern
-    kerness/                the installed Python package
-      __init__.py           bootstrap + public surface
-      *.py                  per-subsystem re-export shims
-      provider.py           the subclassable ABC (see ARCHITECTURE/provider.md)
-      access.py             the AccessPolicy dataclass
-      channel.py            the subclassable ABC
-      memory.py             the subclassable ABC (see ARCHITECTURE/memory.md)
-      exceptions.py         the exception hierarchy
-      _enums.py             ToolDialect
-      selfcheck.py          import health
-      gameplans/ roles/ personas/ skills/   the same assets, installed
-    tests/                  26 pytest modules over the Python surface
-    examples/               runnable harnesses, walked by test_examples.py above
-.github/workflows/          CI on every push; release builds wheels and an sdist,
-                            then uploads them to PyPI from a `v*` tag
-assets/                     project marks: logo.svg, logo-mark.svg
-README.md                   the public introduction
-LICENSE                     MIT
-ARCHITECTURE.md             this file
-ARCHITECTURE/               one file per subsystem
-```
+Compatibility is additive. Existing `ToolSpec`, `ToolHandler`, `Provider` and
+`SessionSnapshot` public shapes remain usable; `Session::run` keeps result
+coercion, provider-error placeholders and synchronous approval callbacks
+(`RunOptions::legacy`), while `Session::start` is strict by default. Session
+files are written at `SCHEMA_VERSION` 2 and valid version-1 turn boundaries
+still load ([sessionfile.md](ARCHITECTURE/sessionfile.md)). The version is
+declared once, as `[workspace.package] version` in the root `Cargo.toml`, and
+reaches Python as `kerness.__version__` through `env!("CARGO_PKG_VERSION")`
+(`bindings/python/src/funcs.rs:677`).
 
-The two symlinks are load-bearing. `readme` and `license-files` in
-`pyproject.toml` resolve against the directory holding it and reject a `..`
-path, so without a local `LICENSE` and `README.md` the wheel builds and ships
-neither the licence text nor the long description, with nothing on stderr to say
-so.
+## Languages and Toolchain
 
-Nothing under `bindings/python/` other than the package reaches the wheel —
-maturin packages only the directory matching `module-name`, so `tests/` and
-`examples/` sit beside it without shipping in it. The sdist is wider: maturin
-roots it at the Cargo workspace, so it carries `crates/` as well, which is what
-lets it build from source with no wheel available.
+| Area | Language | Declared support | Evidence |
+| --- | --- | --- | --- |
+| `crates/kerness/` | Rust, edition 2021 | MSRV **1.88**; stable toolchain | `Cargo.toml` `[workspace.package] rust-version = "1.88"`; CI `rust` job on `dtolnay/rust-toolchain@stable` |
+| `bindings/python/src/` | Rust, `pyo3` 0.23 with `extension-module` + `abi3-py310` | same MSRV; `cdylib` named `_core` | `bindings/python/Cargo.toml` |
+| `bindings/python/kerness/` | Python | **3.10+**, CPython, stable ABI | `pyproject.toml` `requires-python = ">=3.10"`; classifiers 3.10–3.13; CI matrix 3.10 and 3.13 |
+| Build | `cargo` for the crate; `maturin` for the wheel | `maturin>=1.7,<2.0` | `pyproject.toml` `[build-system]` |
+| Lint | `rustfmt` (defaults; no `rustfmt.toml`), `clippy -D warnings`, `rustdoc -D warnings`; `ruff` with `select = ["E4","E7","E9","F"]` and `target-version = "py310"` | `ruff>=0.16,<0.17` | `.github/workflows/ci.yml`; `pyproject.toml` `[tool.ruff]` |
+| Test | `cargo test`; `pytest` with `pydantic` under the `dev` extra | `pytest>=7.0`, `pydantic>=2,<3` | `pyproject.toml` `[project.optional-dependencies]` |
 
-The version is declared once, as `[workspace.package] version` in the root
-`Cargo.toml`. `pyproject.toml` is `dynamic = ["version"]`, the extension exposes
-`env!("CARGO_PKG_VERSION")` as `_core.__version__`, and the package re-exports
-that as `kerness.__version__`. A release bumps one number.
+Direct crate dependency requirements (`Cargo.toml`; resolved versions in `Cargo.lock`): `fancy-regex` 0.14, `libc`
+0.2 (unix only), `regex` 1.11, `serde` 1 (derive), `serde_json` 1
+(`preserve_order`), `shell-words` 1.1, `ureq` 2.12 (`json`, `tls`, no gzip),
+`yaml-rust2` 0.11 (event API, no `Value` deserializer); the reasons for the
+last two are comments on `[workspace.dependencies]` in `Cargo.toml`. The
+binding adds `pyo3` and `serde_json` only. No Python type checker is
+configured.
 
-The release workflow publishes Python artifacts from `v*` tags through the
-GitHub `pypi` environment and PyPI Trusted Publishing. The setup and release
-procedure live in [README.md](README.md#releasing); build and verification
-ownership lives in [testing.md](ARCHITECTURE/testing.md).
+Locally observed (2026-09-07, not a claim of support): `cargo` 1.89 nightly
+and `cargo +1.88.0`, Python 3.13.5 in `.venv`, `ruff` 0.16.5, `maturin` 1.15.0,
+`pytest` 9.1.1, `pydantic` 2.13.5. `maturin` and `python` are not on `PATH` in
+this workspace; invoke them from `.venv/bin/`.
 
-`crates/kerness/assets/` and
-`bindings/python/kerness/{gameplans,roles,personas,skills}/` hold byte-identical
-copies. Both must exist: the crate cannot read the package's copy when used from
-Rust alone, and the wheel cannot ship the crate's. Nothing in the build keeps
-them in step, so `bindings/python/tests/test_packaging.py:42` asserts it
-directly.
+The CI MSRV job pins `dtolnay/rust-toolchain@1.120.0` despite declaring a
+1.88 floor (`.github/workflows/ci.yml:62`); this remains a configuration gap
+([Roadmap](#roadmap)). The current `Cargo.lock` agrees with the workspace's
+`0.1.2-dev` version and passes the explicit Rust 1.88 locked check.
 
-## Boot and Entry Flow
+## System Design
 
-### From Python
+The Rust crate separates contract loading, provider/tool I/O, agent turns,
+access checks, scheduling, persistence and session composition. `session` and
+`session/run` coordinate these modules; lower-level modules do not import
+`crate::session`. Peer dependencies exist: providers use tool schemas and usage
+accounting, which also reference provider response types. The binding depends
+on the crate; Python imports `_core`, sibling shims and interpreter support.
+The dependency map, state ownership, process-wide seams and evidence-backed
+decisions are in [design.md](ARCHITECTURE/design.md).
 
-1. `import kerness` runs `bindings/python/kerness/__init__.py`.
-2. Line 12 calls `_core.bootstrap(exceptions, _enums.ToolDialect, <package dir>)`.
-   The extension cannot declare three things itself, so they are handed down:
-   the exception classes (structured constructors a `create_exception!` cannot
-   express), the `ToolDialect` enum (callers compare members with `is`, so it
-   must be a real `enum.Enum`), and the assets root (only the package knows where
-   pip put it). `bootstrap` then installs all four seams — transport, console
-   writer, logger, console prompt — at `bindings/python/src/lib.rs:36`, which is
-   why an import is enough and no caller wires anything.
-3. The remaining imports pull the public names out of the per-subsystem shims.
-4. The caller builds a `Session(...)`, registers agents, tools, and skills,
-   and calls `run()` or consumes the configuration with `start()` to step it.
+Project rules and their current evidence:
 
-### From Rust
+- Keep session orchestration out of lower-level modules; this is observed in
+  crate imports, with no dedicated dependency-graph test.
+- The crate never links Python. `crates/kerness/tests/public_api.rs:134`
+  assembles a session from the public API alone.
+- Runtime policy belongs in Rust; the permitted Python glue is described
+  above. `bindings/python/tests/test_packaging.py:74` and `:83` check `__all__`
+  declarations and export resolution, not implementation shape.
+- Bundled assets exist twice, byte-identical, and nothing in the build keeps them
+  in step; `bindings/python/tests/test_packaging.py:42` is the only guard.
 
-1. The caller sets `kerness::assets::set_root(...)` if the built-in gameplans are
-   wanted from outside the crate directory, otherwise `$KERNESS_ASSETS` or
-   `$CARGO_MANIFEST_DIR/assets` resolves it — `crates/kerness/src/assets.rs:38`.
-2. `SessionConfig { .. }` → `Session::new` → registration → `start` / `run`.
+### Trust boundaries
 
-### Preparation and execution
+- **Model output is untrusted.** Tool calls are parsed defensively and validated
+  against a schema before dispatch; a malformed or refused call is text returned
+  to the model, never a raised error ([toolkit.md](ARCHITECTURE/toolkit.md)).
+  Memory notes pass a caller `MemoryFilter` on the way in and are fenced with a
+  caveat on the way out ([memory.md](ARCHITECTURE/memory.md)). Routing is a
+  boundary scan for a registered name, and a role's position comes from
+  frontmatter, never from prose ([role.md](ARCHITECTURE/role.md)).
+- **Built-in command and file tools go through `AccessManager`.** Unlisted
+  commands require approval; paths inside the workspace are allowed, with
+  paths resolved before comparison. An agent workspace can only narrow the session's
+  ([access.md](ARCHITECTURE/access.md)). Tool identity is assigned by the engine
+  and never read from model arguments (`crates/kerness/src/session/capabilities.rs:19`).
+- **The host program is trusted.** Context sources, tool handlers, providers,
+  channels and stores are the caller's code; the framework meters and scopes
+  them but cannot undo their effects ([run.md](ARCHITECTURE/run.md)).
+- **Skill bundles are trusted only when the policy says so**
+  (`trust_skill_bundles`, [skills.md](ARCHITECTURE/skills.md)).
+- **Checkpoints are private files** written with `create_new` and owner-only
+  permissions on Unix, then renamed into place
+  ([sessionfile.md](ARCHITECTURE/sessionfile.md)); they carry prompts and tool
+  arguments, so storage and retention are the host's.
 
-`Session::start` (`crates/kerness/src/session.rs:914`) consumes configuration,
-resolves and validates the roster, prompts, skills, tools, context and access,
-opens the memory scopes, and returns an owned `SessionRun`. Live agent turns
-remain typed Rust values; serialization belongs to checkpoints. Its state
-machine advances synchronous provider calls, individual tools, scheduler effects,
-and memory maintenance through `step`. Host-driven mode accepts explicit agent
-selection and validated results; automatic mode follows the gameplan and requires
-an orchestrator. An explicit harness role requirement applies in both modes.
+### Cross-cutting invariants
 
-`Session::run` (`crates/kerness/src/session.rs:900`) drives this same engine with
-legacy result coercion, provider error placeholders and synchronous approval
-callbacks. The additive `start` API uses strict outcomes and external approvals
-by default. Python forwards to these Rust entry points.
+- Synchronous everywhere; cancellation is a cooperative `RunControl` flag
+  (`crates/kerness/src/session/run.rs:45`) checked between steps and inside
+  POSIX command polling.
+- Anything that touches IO returns `crate::error::Result`; the enum is flat and
+  the binding fans it into one exception class per variant
+  ([errors.md](ARCHITECTURE/errors.md)).
+- A step dispatches at most one provider operation, one tool invocation, one
+  compaction, or one maintenance scope; usage is accounted per actor and
+  operation and budgets are admitted before the operation
+  ([run.md](ARCHITECTURE/run.md), [provider.md](ARCHITECTURE/provider.md)).
+- Intent is persisted before a tool's side effect and completion after it;
+  restored intent without completion waits for reconciliation and is never
+  replayed ([sessionfile.md](ARCHITECTURE/sessionfile.md)).
+- Frontmatter is YAML 1.1 read as events, so `no` is a boolean and `"no"` is a
+  string ([harness.md](ARCHITECTURE/harness.md)).
+- Values render the way CPython renders them on both sides of the boundary
+  (`crates/kerness/src/pyfmt.rs`, [utils.md](ARCHITECTURE/utils.md)).
+- Resources that `'static` callbacks need live in `Arc<Shared>`
+  (`crates/kerness/src/session.rs:338`) with separate resource mutexes.
+  Callback paths clone handles and release locks before calling host code
+  (`store_for`, `:323`).
 
-[run.md](ARCHITECTURE/run.md) owns live state, events, capabilities, cancellation,
-approvals, outcomes and recovery. [session.md](ARCHITECTURE/session.md) owns
-configuration and preparation. [loop.md](ARCHITECTURE/loop.md) and
-[agent-runtime.md](ARCHITECTURE/agent-runtime.md) own scheduling and agent turns.
-[sessionfile.md](ARCHITECTURE/sessionfile.md) owns schema validation and atomic
-checkpoint publication; [access.md](ARCHITECTURE/access.md) owns POSIX command
-deadlines, process-group cleanup and output draining.
+## Runtime and Data Flow
 
-## Well-Known Constants
+**From Python**, `import kerness` runs `bindings/python/kerness/__init__.py`,
+whose line 12 calls `_core.bootstrap(...)` with the exception classes, the
+`ToolDialect` enum and the assets root; `bootstrap`
+(`bindings/python/src/lib.rs:36`) installs the four seams. **From Rust**, the
+caller optionally sets `kerness::assets::set_root(...)`, then `SessionConfig`
+→ `Session::new` → `add_agent` / `add_tool` / `add_skill` / `add_context` →
+`start` or `run`; `crates/kerness/src/lib.rs:52` onward is the re-export list.
 
-Values callers see in output or depend on in tests. Each is exported from the
-Python package as well as the crate.
+`Session::new` (`crates/kerness/src/session.rs:549`) loads and validates the
+gameplan and confines the session's own write paths. `Session::start`
+(`:914`) consumes the configuration, resolves roster, defaults, permitted
+tools and context, personas, skills and prompts, opens every memory scope, and
+returns an owned `SessionRun`; `Session::run` (`:900`) drives the same engine
+blocking. `SessionRun::step`
+(`crates/kerness/src/session/run.rs:382`) applies host input, advances one
+unit of work and returns `Progress`, `Waiting` or `Finished`. One agent turn is
+an `AgentRunner` advancing an `AgentTurn`: assemble messages, call
+`Provider::chat_with_retries` once, dispatch each tool call through
+`ToolDispatcher` under `AccessManager`, feed results back, repeat until the
+turn's reason is known.
 
-| Constant | Value | Owner |
-| --- | --- | --- |
-| `SCHEMA_VERSION` | `2` | `crates/kerness/src/sessionfile.rs:36` |
-| `DEFAULT_MAX_CONTEXT_TOKENS` | `256_000` | `crates/kerness/src/session.rs:66` |
-| `CHARS_PER_TOKEN` | `4` | `crates/kerness/src/compaction.rs:33` |
-| `COMPACT_TO_FRACTION` | `0.5` | `crates/kerness/src/compaction.rs:40` |
-| `OVERFLOW_RETRY_FRACTION` | `0.5` | `crates/kerness/src/session.rs:77` |
-| `MAX_INVALID_CALLS` | `3` | `crates/kerness/src/agent_runtime.rs:30` |
-| `MAX_REPEATED_FAILURES` | `3` | `crates/kerness/src/agent_runtime.rs:34` |
-| `MEMORY_STALE_AFTER_DAYS` | `1` | `crates/kerness/src/prompting.rs:50` |
-| `DEFAULT_KEEP_ENTRIES` | `20` | `crates/kerness/src/memory.rs:440` |
-| `DEFAULT_MEMORY_BUDGET` | `2_200` | `crates/kerness/src/memory.rs:715` |
-| `ENTRY_SEPARATOR` | `§` | `crates/kerness/src/memory.rs:724` |
-| `DEFAULT_ROLE_FILE` | `participant.md` | `crates/kerness/src/role.rs:66` |
-| `DEFAULT_TERMINATORS` | `CONSENSUS_REACHED`, `END_SESSION` | `crates/kerness/src/utils.rs:12` |
-| `RESERVED_TOOL_NAMES` | `["Skill"]` | `crates/kerness/src/harness.rs:25` |
-| `DEFAULT_TIMEOUT` | 60s | `crates/kerness/src/exec.rs:21` |
-| `ReasoningEffort::default()` | `high` | `crates/kerness/src/provider/mod.rs:64` |
-| `DEFAULT_REQUEST_TIMEOUT_SEC` | `60` | `crates/kerness/src/provider/mod.rs:40` |
-| `DEFAULT_RETRIES` | `2` | `crates/kerness/src/provider/mod.rs:42` |
-| `DEFAULT_BACKOFF_SEC` | `2.0` | `crates/kerness/src/provider/mod.rs:44` |
-| `DEFAULT_TEMPERATURE` | `1.0` | `crates/kerness/src/provider/mod.rs:46` |
-| `DEFAULT_TOP_P` | `1.0` | `crates/kerness/src/provider/mod.rs:48` |
-| `DEFAULT_CLAUDE_MAX_TOKENS` | `4096` | `crates/kerness/src/provider/claude.rs:26` |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | `crates/kerness/src/provider/openai.rs:18` |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | `crates/kerness/src/provider/openrouter.rs:15` |
-| `CLAUDE_BASE_URL` | `https://api.anthropic.com/v1` | `crates/kerness/src/provider/claude.rs:16` |
+Every data path with the functions it passes through, the configuration
+contracts and where each is enforced, failure and recovery, the concurrency
+and resource invariants, and the well-known constants both suites assert are
+tabulated in [runtime.md](ARCHITECTURE/runtime.md). The short form:
 
-The request defaults below `ReasoningEffort` are declared once and named twice:
-the crate's four backends build their `Default` impls from them, and the Python
-constructors write the same constants into their own signatures. A value spelled
-out in both languages drifts silently; one both sides import cannot.
-`crates/kerness/tests/public_api.rs` and
-`bindings/python/tests/test_provider.py` each assert them.
+- Provider errors retry with backoff; a rejected native-tools or reasoning
+  body flips a one-way degrade latch ([provider.md](ARCHITECTURE/provider.md)).
+- A context-overflow refusal schedules one compaction to
+  `OVERFLOW_RETRY_FRACTION` and retries once ([compaction.md](ARCHITECTURE/compaction.md)).
+- A failing, unknown, malformed or schema-violating tool call is answered as
+  text; `MAX_INVALID_CALLS` and `MAX_REPEATED_FAILURES` end the turn
+  ([agent-runtime.md](ARCHITECTURE/agent-runtime.md)).
+- Strict results report `InvalidResult` diagnostics; budgets stop the next
+  admitted operation with `BudgetExceeded`; a sink failure is terminal without
+  replaying the completed action ([run.md](ARCHITECTURE/run.md)).
+- A restored run validates counters, identities and the contract before
+  executing; captured intent with no completion waits for `Reconcile` or
+  cancellation ([sessionfile.md](ARCHITECTURE/sessionfile.md)).
+- On supported POSIX platforms execution stays on the calling thread. The
+  binding releases the GIL around `step`, contextual `run_command` and
+  the HTTP transport so another Python thread can call `RunControl.cancel()`;
+  every command runs in its own process group with a deadline; memory scopes
+  close exactly once ([session.md](ARCHITECTURE/session.md)).
 
-## Roadmap
+## Workspace Map
 
-The M1–M3 core upgrade is implemented in Rust. Python exposes the required
-capabilities through API bindings. Execution remains synchronous, with no hidden
-executor or concurrent agent scheduling.
+One artifact per top-level directory: `crates/kerness/` is the crate (`src/`
+with 31 top-level modules plus `provider/`, `skill/` and `session/`; `assets/`;
+`tests/` with 8 integration files and `common/mod.rs`; `examples/` with 10),
+and `bindings/python/` is everything the wheel is made of (`pyproject.toml`,
+the `kerness-py` crate in `src/` with 13 PyO3 modules, the installed package
+in `kerness/`, 26 pytest modules, 8 example scripts). The root carries one
+manifest, `Cargo.toml`, and one lock. `.github/workflows/` holds `ci.yml` and
+`release.yml`; `.venv/`, `target/` and the caches are gitignored. The full
+tree with each path's role is in [workspace.md](ARCHITECTURE/workspace.md).
 
-| Milestone | Status | Delivered behavior and evidence |
-| --- | --- | --- |
-| **M1 — Runtime ownership and tool capabilities** | done | Owned `SessionRun`, complete `ToolSpec` registration, contextual handlers with immutable identity and scoped capabilities. Registration, capability lifetime and resource lifecycle tests pass. |
-| **M2 — Host-driven execution** | done | Shared run/step engine, typed input/events/control, external approval, single-agent host mode, schema-2 continuation, v1 boundary migration and explicit reconciliation. Equivalence, suspended approval, denial, cancellation and interrupted-action tests pass. |
-| **M3 — Outcomes and budgets** | done | Strict result diagnostics, typed terminal and turn reasons, retained committed history, normalized usage and operation/tool/time admission. Token/cost limits require explicit measured-threshold mode. Retry, compaction, maintenance and nested provider accounting tests pass. |
-| **M4 — Adapters and richer sessions** | deferred | Native streaming, workflow adapters, session-store listing/forking, typed content parts, MCP and sequential subagents need separately justified changes. Parallel execution requires revising the synchronous invariant. |
+Edit restrictions, each with its check on that page: the bundled assets exist
+twice and both copies change together (`bindings/python/tests/test_packaging.py:42`);
+the `LICENSE` and `README.md` symlinks in `bindings/python/` are load-bearing
+for the wheel; `_core.abi3.so` is a built artifact to regenerate with
+`maturin develop` after any Rust change (`test_packaging.py:35` checks version
+agreement but cannot detect stale builds within a version); the wheel carries
+the package and distribution metadata; there is no generated
+source, no build script and no `.pyi` stub.
 
-The public contracts and their practical limits belong to
-[run.md](ARCHITECTURE/run.md). Rust examples
-[`host_control`](crates/kerness/examples/host_control.rs) and
-[`resume_approval`](crates/kerness/examples/resume_approval.rs), plus the
-[Python host example](bindings/python/examples/host_control.py), run offline.
+## Coding Style and Code Design
 
-Compatibility is additive: existing `ToolSpec`, `ToolHandler`, `Provider` and
-`SessionSnapshot` public shapes remain usable. Host callbacks and providers are
-re-registered on resume; configuration is checked against the saved contract,
-and `binding_version` identifies host implementation changes the engine cannot
-serialize. Arbitrary external effects have no exactly-once guarantee. Restored
-tool intent without a completion record requires reconciliation or cancellation.
+Enforced, each with its command under [Verification and Review Map](#verification-and-review-map):
+`rustfmt` defaults, `clippy -D warnings` on every target, `rustdoc -D warnings`,
+`rust-version = "1.88"`, `ruff` (`E4, E7, E9, F`, `py310`; `E402` ignored in
+`kerness/__init__.py` because `bootstrap` must run first), package exports
+(`bindings/python/tests/test_packaging.py:74`, `:83`,
+`bindings/python/tests/test_selfcheck.py:18`), and the well-known constants and
+request defaults agreeing across the boundary
+(`crates/kerness/tests/public_api.rs:43`, `:70`; `bindings/python/tests/test_provider.py`).
 
-Cancellation is cooperative, and a synchronous provider or custom handler may
-block until it returns. Hard token/cost caps are rejected because the provider
-contract supplies no enforceable upper bound per operation; measured thresholds
-may overshoot by the admitted operation. Missing usage stays unknown. See
-[provider.md](ARCHITECTURE/provider.md) for metering details.
+Observed conventions to copy, with the sites and counts behind each in
+[conventions.md](ARCHITECTURE/conventions.md):
 
-M4 adapters must consume these contracts. Streaming needs a transport seam for
-partial output and explicit retry semantics; richer content needs a schema and
-context-accounting change. Workflow and MCP adapters reuse the existing
-execution, access, approval and budget boundaries. Custom tools needing several
-resumable effects require a continuation protocol; synchronous callbacks cannot
-be unwound and replayed for approval.
+- Every `.rs` file opens with a `//!` doc; public items carry `///` docs;
+  rationale lives in those comments, never in changelog prose.
+- Errors are `crate::error::{Error, Result}` wherever IO or a provider is
+  touched. Process-wide lock slots use `expect("... lock poisoned")`;
+  session, memory and usage mutexes recover poisoned guards. The only bare
+  `.unwrap()` calls in non-test code are 13 state-machine invariants in
+  `crates/kerness/src/session/run.rs`.
+- `#[allow]` is local and rare; `unsafe` appears only in
+  `crates/kerness/src/exec.rs` under `#[cfg(unix)]`; no `println!` or
+  `eprintln!` outside the default sink in `crates/kerness/src/logging.rs`.
+- Checkpoint and continuation types carry `#[serde(deny_unknown_fields)]`;
+  tagged enums use `#[serde(tag = "...", rename_all = "snake_case")]`.
+- Process-wide seams share one shape: a private slot accessor over a
+  `OnceLock<RwLock<...>>`, a `set_*` installer, and a Rust default.
+- Supplied provider behaviour lives in free functions generic over
+  `P: Provider + ?Sized` so a Python override wins.
+- Tests are sentences in `snake_case`; unit tests sit inline in 30 of the 42
+  crate files; integration tests share `crates/kerness/tests/common/mod.rs`
+  and add no test dependency.
+- A Python shim is a docstring, `from kerness._core import ...`, and `__all__`;
+  subclassable bases are `abc.ABC`, bundled crate types are `ABC.register`ed;
+  pytest groups `class Test<Behaviour>` with `test_<sentence>` functions and
+  patches the transport at `kerness.provider.http_post_json`.
 
-## Verification
+Unenforced: no Python type checker runs; `auto_approve_prefixes` has no doc
+comment on either surface (`crates/kerness/src/access.rs:188`,
+`bindings/python/kerness/access.py:36`); the `file:line` references in these
+docs are checked by review, not CI.
 
-The commands that gate a change. Each module file names the subset that proves
-its own status.
+## Verification and Review Map
+
+Run from the repository root. Install Rust and a Python 3.10+ development
+environment, then follow the fresh-environment commands in
+[verification.md](ARCHITECTURE/verification.md#local-prerequisites).
 
 ```sh
 cargo fmt --all -- --check                            # pass = exit 0
-cargo test --workspace -q --locked                    # pass = 407 unit + 118 integration + 1 doctest
+cargo test --workspace -q                             # pass = 407 unit + 118 integration + 1 doctest (526)
 cargo clippy --workspace --all-targets -- -D warnings # pass = exit 0
 cargo build -p kerness --examples                     # pass = all 10 compile
 cargo run -p kerness --example offline_debate         # pass = completes with no key, no network
 cargo run -p kerness --example host_control           # pass = validated host result
 cargo run -p kerness --example resume_approval        # pass = restored approval, each tool once
-RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p kerness
-cargo +1.88.0 check --workspace --all-targets --locked # pass = supported MSRV
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p kerness   # pass = exit 0
+cargo +1.88.0 check --workspace --all-targets --locked      # pass = exit 0
+(cd bindings/python && ../../.venv/bin/maturin develop --extras dev) # pass = installed workspace version
 .venv/bin/python -m pytest bindings/python/tests -q   # pass = 502 passed
 .venv/bin/python -m kerness.selfcheck                 # pass = "OK: all core checks passed", exit 0
 .venv/bin/ruff check bindings/python                  # pass = "All checks passed!"
+.venv/bin/python bindings/python/examples/host_control.py  # pass = validated result, exit 0
 ```
 
-The wheel is built from `bindings/python/`, because that is where
-`pyproject.toml` is:
+Verified on 2026-09-07 against the current source and lockfile: all commands
+above pass with the locally observed toolchains listed above. A separate source
+copy without generated artifacts also builds and passes both suites using Rust
+1.88 and a fresh virtualenv. These local results do not certify the configured
+CI MSRV job or untested platforms.
 
-```sh
-cd bindings/python && ../../.venv/bin/maturin develop   # pass = installed workspace version
-```
+`.github/workflows/ci.yml` runs `rust` (fmt, clippy, test, examples,
+`offline_debate`, rustdoc on stable), `msrv` (`cargo check --locked` on a
+pinned toolchain that disagrees with the declared floor; see [Roadmap](#roadmap)) and `python` (3.10
+and 3.13: `maturin develop --extras dev`, pytest, selfcheck, ruff).
+`release.yml`'s `verify-sdist` job is the only check on the two symlinks and on
+asset packaging. The job steps, the change-to-test map (which tests to run
+first for each kind of change, and the review constraint the owner enforces)
+and the coverage gaps are in [verification.md](ARCHITECTURE/verification.md);
+[testing.md](ARCHITECTURE/testing.md) owns the suites themselves.
 
-`.github/workflows/ci.yml` runs the format, test, lint, example-build,
-`offline_debate`, self-check, rustdoc and MSRV checks. The two control/approval
-examples also run locally as upgrade smoke checks. See
-[testing.md](ARCHITECTURE/testing.md).
+Coverage gaps: no test reaches the network; CI runs on Linux only;
+`PyStore::revise` is the one binding crossing no test drives; nothing checks
+the assets pair from the Rust side.
 
-`maturin` and `python` are not on `PATH` in this workspace; invoke them from
-`.venv/bin/`. `maturin` resolves the virtualenv from its own path, so it does
-not matter that the venv is at the root and the command runs two levels down.
+## Roadmap
+
+M1 (runtime ownership and tool capabilities), M2 (host-driven execution) and
+M3 (outcomes and budgets) are done in Rust and exposed through the binding;
+M4 (streaming, workflow and MCP adapters, session-store listing, typed content
+parts, sequential subagents) is deferred, and each part needs a separately
+justified change that consumes the M1–M3 contracts. The milestone table with
+its evidence, the M4 constraints, and every improvement candidate with its
+owner and success check are in [roadmap.md](ARCHITECTURE/roadmap.md).
+
+The CI `msrv` pin is an open configuration defect (`.github/workflows/ci.yml:62`).
+Its proposed correction and success check are in
+[roadmap.md](ARCHITECTURE/roadmap.md#repository-defects-evidence-backed-not-yet-fixed),
+alongside unaccepted improvement candidates linked to their owners. The current
+source and lockfile pass the declared Rust 1.88 check locally.
 
 ## Development Loop
 
-Coding Discipline governs writing; Review Checks govern review. This
-loop connects them and defines when work is ready to release.
+Frame → Write → Prove → Review → Gate. Findings return to Write;
+uncertainty that changes the plan returns to Frame.
 
-```text
-Frame → Write → Prove → Review → Gate
-          ▲          findings      │
-          └────────────────────────┘
-```
+Use one subagent per role when available, otherwise distinct labeled
+passes. Tester and Verifier report findings and never edit; Coder repairs.
+
+| Role | Stages | Handoff |
+| ---- | ------ | ------- |
+| Planner | Frame | Goal, observable checks, assumptions, affected files/owners, and plan. |
+| Coder | Write | Planned changes or repairs to named findings. |
+| Tester | Prove | Commands, results, and behavioral/structural evidence. |
+| Verifier | Review + Gate | Evidence-backed findings or verified completion. |
 
 ### The loop
 
-**1. Frame.** Convert the request into a goal with an observable check.
-Inspect the request, code, docs, and repository conventions; record the
-narrowest supported assumptions. Ask one focused question only when a
-required decision cannot be discovered or safely inferred and guessing
-would materially change the result. Once framed, continue without an
-approval pause.
+1. **Frame:** Inspect the request, code, docs, and conventions before
+   planning. Give the goal and each plan step an observable check. When
+   using eatmycode, run its Version and Freshness Gate before trusting
+   architecture; include versions, migration scope, Index/agent-file
+   changes, and verification commands in architecture plans. Resolve
+   uncertainty from evidence and record the narrowest supported assumptions.
+   Only Planner may ask one focused question, when a required decision
+   cannot be discovered or safely inferred and guessing changes the result.
+2. **Write:** Apply Coding Discipline. Make the planned change; for a
+   repair, address only named findings. Update affected architecture with
+   changes to its documented contracts.
+3. **Prove:** Run relevant tests and structural checks, retaining observable
+   evidence. For architecture work under eatmycode, apply its Architecture
+   Verification. Failures and missing, duplicate, or obsolete coverage
+   become Coder findings. Re-run affected checks after repairs; never send
+   a red result to Review.
+4. **Review:** Apply every Review Check as a separate pass over full affected
+   files. Use an independent agent or isolated pass for Fit, Dependencies,
+   and Security when available. Return findings to Coder, then re-prove
+   and re-review the repairs.
+5. **Gate:** Confirm completion only when the Definition of Done passes.
+   Return unmet criteria to the responsible stage; continue until resolved.
+   If an external constraint prevents verification, state the missing
+   evidence and remaining work without claiming completion or readiness.
 
-**2. Write.** Make the smallest change that reaches the goal. Add no
-unrequested features or abstractions, match local style, touch only
-in-scope code, and remove only orphans created by the change.
-
-**3. Prove.** Run relevant tests and retain observable evidence.
-
-*Survey the suite before touching it.* Before adding, changing, merging,
-or deleting any test, inventory the whole suite: enumerate every test
-file and case name, then read in full each test whose subject, fixtures,
-or assertions touch this change. Use a subagent for broad inventory when
-supported. From that inventory decide the complete set of test edits at
-once — what to change, what to add, what to merge, what to remove — each
-backed by `file:line`, then execute only that plan. Never write a test
-before the survey, and never discover existing coverage afterward.
-
-The plan obeys four rules:
-
-- **Reuse or extend first.** Add a case to the test that already owns
-  the behavior or shares its setup, fixtures, and subject. A new test
-  function or file is justified only when the survey found no existing
-  test owning the behavior, or when merging would hide which case
-  failed.
-- **Add only what the goal needs.** A bug fix needs a reproducing
-  regression test; a new capability needs a test of its claimed
-  behavior. Nothing further.
-- **Retire what this change made obsolete.** Delete tests whose behavior
-  no longer exists, and merge tests this change turned into duplicates,
-  citing the surviving test. Leave unrelated pre-existing tests alone;
-  record suspected redundancy under **Open Gaps / Roadmap**.
-- **Never delete to reach green.** A failing test is a finding for
-  Write. Removal requires evidence that its behavior is gone or is still
-  covered elsewhere, cited by `file:line`.
-
-Coverage of claimed behavior must not decrease. A failure returns
-directly to Write, never forward to Review.
-
-**4. Review.** Walk all seven Review Checks as separate passes. Read
-whole affected files, not only the diff. Every finding needs `file:line`
-evidence. Use an independent agent or isolated pass for Fit,
-Dependencies, and Security when available.
-
-**5. Gate.** Apply the Definition of Done. Any unticked criterion,
-`blocker`, or unresolved `major` returns its evidence to Write. All
-criteria passing means the change is ready for public or production
-release. There is no separate approval or reporting phase.
+Handoffs are automatic. Continue without pauses for plan approval,
+permission to continue, or review/reporting ceremonies. Finish with the
+harness's normal concise completion handoff.
 
 ### Definition of Done
 
-**Correctness**
-
-- The framed goal and its named check pass.
-- Tests cover claimed behavior and pass; a bug fix has a regression test.
-- The suite was surveyed before any test was written, changed, or
-  deleted; no added test duplicates coverage another test owns, and no
-  removal left claimed behavior uncovered.
-- The owning module's **How to Test** command passes with evidence.
-- The project builds and tests from a fresh clone without local-only
-  dependencies.
-
-**Review**
-
-- All seven Review Checks ran; none was skipped or assumed.
-- No `blocker` or unresolved `major` remains.
-- Nits were applied or consciously declined.
-
-**Legibility and contract**
-
-- A new maintainer can build, test, run, and understand public behavior
-  from the docs.
-- Every changed line serves the goal; no drive-by formatting, debugging
-  remnants, commented-out code, secrets, tokens, or local paths remain.
-- Public names, signatures, errors, and recovery are intelligible.
-- Architecture docs and `file:line` references are current.
-- Breaking changes, deprecations, dependencies, licenses, and attribution
-  are handled; commit or PR text explains why.
+- **Correctness:** The goal and named checks pass. Tests cover claimed
+  behavior; bug fixes have a reproducing regression test. The project
+  builds and tests from a fresh clone without local-only dependencies.
+  Owning modules' **How to Test** commands pass with evidence.
+- **Review:** Every Review Check ran and its completion threshold passes.
+- **Contract:** Docs reflect source and let an agent locate owners,
+  constraints, and verification commands. When using eatmycode, architecture
+  satisfies its Output Contract, verification, and version rules. Public
+  names, signatures, errors, and recovery are intelligible. Breaking
+  changes, deprecations, dependencies, licenses, and attribution are handled;
+  commit or PR text, when present, explains why.
+- **Scope:** Changed lines serve the goal and follow Coding Discipline;
+  no debugging remnants, commented-out code, secrets, tokens, or local paths
+  remain. Test edits follow the inventory and coverage rules below.
 
 ### Iterating without thrashing
 
-- Every pass closes a named finding and touches only what it names.
-- Nits alone do not trigger another pass.
-- Re-run Prove after every fix.
-- Two no-change passes force Gate re-evaluation: release if Done passes;
-  otherwise return the surviving evidence to Frame.
-- Three passes on one finding return automatically to Frame for a new
-  approach.
-- Never widen scope to satisfy a finding. Record out-of-scope work under
-  **Open Gaps / Roadmap**.
+- Each repair pass targets a named finding; nits alone do not trigger one.
+- Two no-change passes force Gate re-evaluation. If Done still fails,
+  return the surviving evidence to Frame.
+- Three passes against the same finding return to Frame for a new approach.
+- Never widen scope to satisfy a finding. Record coding follow-ups under
+  **Open Gaps / Roadmap** and keep non-coding work outside architecture.
 
 ## Coding Discipline
 
-### 1. Think Before Coding
-
-- Understand the request, code, goal, and repository conventions first.
-- Record assumptions and choose the narrowest evidence-backed reading.
-- Prefer the simpler approach when it reaches the same verified goal.
-- Ask only during planning and only for a required answer that cannot be
-  discovered or safely inferred.
-
-### 2. Simplicity First
-
-- Implement only what was requested.
-- Do not add single-use abstractions, speculative flexibility, or checks
-  for impossible conditions.
-- If the implementation is materially larger than the problem, simplify
-  it.
-
-### 3. Surgical Changes
-
-- Do not refactor, reformat, or clean up unrelated code.
-- Match the surrounding style.
-- Remove imports, variables, and functions made unused by this change;
+- Implement only the goal. Prefer the simplest approach that passes its
+  checks; simplify code materially larger than the problem.
+- Match local style. Avoid speculative features, flexibility, single-use
+  abstractions, and checks for impossible conditions.
+- Keep edits surgical: no unrelated refactoring, reformatting, or cleanup.
+  Remove imports, variables, and functions made unused by this change;
   leave pre-existing dead code alone unless requested.
-- Every changed line must trace to the stated goal.
+- Make success concrete: validation rejects invalid input in a named test;
+  a regression test fails before a bug fix and passes after; behavior tests
+  pass before and after a refactor.
 
-### 4. Goal-Driven Execution
+### Before editing tests
 
-Turn work into verifiable outcomes, then loop until they pass:
+Before any test edit, including during Write, inventory the whole suite:
+enumerate every test file and case name, then read in full tests whose
+subject, fixtures, or assertions touch the change. Use a subagent for broad
+inventory when supported. Plan all additions, changes, merges, and removals
+from that evidence, citing `file:line`, before executing the test edits.
 
-- Add validation → invalid inputs are rejected by a named passing test.
-- Fix a bug → a regression test fails before the fix and passes after.
-- Refactor → behavior tests pass before and after.
-
-Give every plan step its own check. Strengthen vague criteria from
-repository evidence before implementation.
+- **Reuse first:** Extend the test owning the behavior or sharing its
+  setup, fixtures, and subject. Add a function/file only if no existing
+  owner fits or merging would obscure which case failed.
+- **Add only required coverage:** A bug fix needs its regression test;
+  a capability needs a test of its claimed behavior. Avoid duplicates.
+- **Retire only what changed:** Remove tests of deleted behavior and merge
+  new duplicates, citing surviving coverage. Record unrelated suspected
+  redundancy under **Open Gaps / Roadmap**.
+- **Preserve coverage:** Never delete or weaken tests to turn red green.
+  Removal needs evidence that behavior is gone or covered elsewhere;
+  coverage of claimed behavior must not decrease.
 
 ### Project-Specific Deviations
 
@@ -477,111 +484,81 @@ repository evidence before implementation.
 
 ## Review Checks
 
-Run every check against every change before merge. Keep checks separate.
+Run every check against every change before confirming a code edit is
+complete, even when no commit or merge is requested. Keep checks separate.
 
-Four rules bind all checks:
+- **Evidence or no finding:** Cite `file:line` for every finding.
+- **Repository authority:** Demand only conventions supported by the tree.
+- **Full context:** Read affected files, not only hunks; context can expose
+  unreachable code, unused parameters, or hidden duplication.
+- **Code and impact:** Review the change, never the author or how it was made.
 
-- **Evidence or no finding.** Every finding cites `file:line`.
-- **The repository is authoritative.** Demand only conventions visible
-  in the tree.
-- **Read files, not only hunks.** Context can invalidate a finding or
-  reveal unreachable code, unused parameters, and hidden duplication.
-- **Review the change, never the author.** Describe code and impact, not
-  how or by whom it was produced.
+### 1. Style and Naming
 
-### 1. Style
+Check indentation and local conventions; leave machine-checkable formatting
+to existing formatters/linters and never demand unrelated reformatting.
+Mixed indentation is `major`; a consistent new file with the wrong local
+indent is `nit`. Compare names with nearby precedents. If the repository
+is inconsistent, demand nothing. A local naming mismatch is `nit`; an
+inconsistent public name is `major`.
 
-Check indentation and local file conventions. Mixed indentation is
-`major`; a consistent new file using the wrong local indent is `nit`.
-Leave machine-checkable formatting to existing formatters and linters;
-never demand unrelated reformatting.
+### 2. Duplication
 
-### 2. Naming
+Search distinctive constants, errors, fields, and call sequences, beyond
+symbol names, for the same job. Cite both sites and a remedy. Cross-layer
+duplication is `major`; small local repetition is `nit`. Similar code with
+meaningfully different branches is not duplication.
 
-Compare new names with nearby precedents before filing a finding. If the
-repository is inconsistent, demand nothing. A local mismatch is `nit`;
-an inconsistent public name is `major`.
-
-### 3. Duplication
-
-Search distinctive constants, errors, fields, and call sequences—not
-only symbol names—for code performing the same job. Cite both sites and
-the remedy. Cross-layer duplication is `major`; small local repetition
-is `nit`. Similar code with meaningfully different branches is not
-duplication.
-
-### 4. Quality
+### 3. Quality
 
 Require followable control flow, errors handled where they occur, and
-abstractions proportional to the problem. Swallowed errors,
-inappropriate prints, unexplained magic values, and dead branches are
-`major`. Remove unrequested configurability, one-caller wrappers, filler
-comments, debugging remnants, and unrelated formatting. Missing tests
-belong to Prove, not this check.
+proportionate abstractions. Swallowed errors, inappropriate prints,
+unexplained magic values, and dead branches are `major`. Remove unrequested
+configurability, one-caller wrappers, filler comments, debugging remnants,
+and unrelated formatting. Missing tests belong to Prove.
 
-### 5. Fit
+### 4. Fit
 
-Read `ARCHITECTURE.md` and the owning module doc before the diff. Check
-scope, layering, ownership, public-API growth, and performance claims. A
-layering violation or unjustified public API is `major`. Architectural or
-public-behavior changes must update the relevant docs in the same change.
+Read the root architecture and owning module before the diff. Check
+language/toolchain constraints, conventions, scope, layering, ownership,
+invariants, public-API growth, compatibility, and performance claims against
+source. A layering violation or unjustified public API is `major`.
+Architectural/public-behavior changes need matching docs in the same change.
 
-### 6. Dependencies
+### 5. Dependencies
 
-Check manifests and imports, maintenance, supply-chain risk, advisories,
-install-time behavior, license, transitive cost, and whether the standard
-library is sufficient. An unjustified top-level dependency is `major`;
-a live advisory or abandoned upstream is `blocker`. Incomplete evidence
-does not pass.
+Check manifests/imports, maintenance, supply-chain risk, advisories,
+install-time behavior, license, transitive cost, and standard-library
+alternatives. An unjustified top-level dependency is `major`; a live
+advisory or abandoned upstream is `blocker`. Incomplete evidence does not pass.
 
-### 7. Security
+### 6. Security
 
-Check both defects and widened exposure: unsafe memory access, unchecked
-sizes or offsets, integer overflow, path traversal, unsafe
-deserialization, command construction, committed secrets, and unbounded
-untrusted input. Trace input to impact; without a reachable path there is
-no finding. A real defect is `major`; a trust-boundary break is `blocker`.
-Describe the fix without publishing exploit steps.
+Check defects and widened exposure: unsafe memory access, unchecked sizes
+or offsets, integer overflow, traversal, unsafe deserialization, command
+construction, committed secrets, and unbounded untrusted input. Trace input
+to impact; without a reachable path there is no finding. A real defect is
+`major`; a trust-boundary break is `blocker`. Describe fixes without exploit
+steps.
 
-### Severity and the merge threshold
+### Severity and the completion threshold
 
 | Severity | Effect |
 | -------- | ------ |
-| `blocker` | Must not merge. |
-| `major` | Must be resolved before merge. |
+| `blocker` | Must not confirm completion or merge. |
+| `major` | Must be resolved before confirming completion or merging. |
 | `nit` | Apply or consciously decline. |
 | `info` | Context or a question; no action implied. |
 
-Merge only with no `blocker` and no unresolved `major`. A check that did
-not run does not pass. Findings feed Write and Gate directly; they do not
-create a reporting phase.
+Confirm completion or merge only with no `blocker` or unresolved `major`.
+A check that did not run does not pass; explain evidence-backed
+inapplicability. Findings feed Write and Gate directly.
 
 ## Index
 
-- [access.md](ARCHITECTURE/access.md) — the permission boundary for commands, paths, and directories.
-- [agent.md](ARCHITECTURE/agent.md) — a participant or orchestrator, and its system prompt.
-- [agent-runtime.md](ARCHITECTURE/agent-runtime.md) — one agent turn: call, tool-call, feed results, repeat.
-- [bindings.md](ARCHITECTURE/bindings.md) — the Rust/Python boundary and the installed package.
-- [channel.md](ARCHITECTURE/channel.md) — where a session's messages are delivered.
-- [compaction.md](ARCHITECTURE/compaction.md) — the context ceiling and the summarize-the-prefix rewrite.
-- [context.md](ARCHITECTURE/context.md) — standing facts a source computes once per run.
-- [conversation.md](ARCHITECTURE/conversation.md) — turns, transcript, and what a provider actually sees.
-- [errors.md](ARCHITECTURE/errors.md) — the error enum and its Python exception hierarchy.
-- [gameplan.md](ARCHITECTURE/gameplan.md) — loading a Markdown gameplan and resolving built-in assets.
-- [harness.md](ARCHITECTURE/harness.md) — the frontmatter contract: parse, validate, resolve.
-- [jsonschema.md](ARCHITECTURE/jsonschema.md) — strict-mode schemas and argument validation.
-- [loop.md](ARCHITECTURE/loop.md) — the orchestrator loop, phases, and end reasons.
-- [memory.md](ARCHITECTURE/memory.md) — what agents remember, and the store slot that keeps it.
-- [persona.md](ARCHITECTURE/persona.md) — loading a persona file into prompt text.
-- [prompting.md](ARCHITECTURE/prompting.md) — assembling a system prompt from its parts.
-- [provider.md](ARCHITECTURE/provider.md) — talking to a model, and the four built-in backends.
-- [role.md](ARCHITECTURE/role.md) — what an agent is in a session, and the chair it takes.
-- [selfcheck.md](ARCHITECTURE/selfcheck.md) — `python -m kerness.selfcheck`, the installation health check.
-- [session.md](ARCHITECTURE/session.md) — configuration, preparation and the blocking compatibility API.
-- [run.md](ARCHITECTURE/run.md) — owned execution, scoped tools, approvals, outcomes and recovery.
-- [sessionfile.md](ARCHITECTURE/sessionfile.md) — saving and resuming a run.
-- [skills.md](ARCHITECTURE/skills.md) — loading skill bundles and the `Skill` tool.
-- [testing.md](ARCHITECTURE/testing.md) — the three suites, the examples, CI, and release publishing.
-- [toolkit.md](ARCHITECTURE/toolkit.md) — tool specs, parsing calls out of text, dispatching them.
-- [toolschema.md](ARCHITECTURE/toolschema.md) — native tool dialects and their wire shapes.
-- [utils.md](ARCHITECTURE/utils.md) — text scanning, retry, and Python-compatible formatting.
+Run the freshness gate and read the root's cross-cutting rules, then use the
+[Module index](ARCHITECTURE/index.md#owners) to select the owning subsystem by
+source path or change trigger. Its 27 entries list responsibilities and
+integration partners; read the selected owner, relevant partners, and cited
+source and tests. The [supporting-page index](ARCHITECTURE/index.md#supporting-pages)
+routes expanded root guidance and memory store implementation detail.

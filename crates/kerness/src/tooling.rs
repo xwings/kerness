@@ -55,9 +55,9 @@ pub struct ToolSpec {
     pub handler: Arc<dyn ToolHandler>,
     /// Whether the handler needs to know which agent is calling.
     ///
-    /// The built-in `cmd`/`read_file`/`list_dir` tools set this because
-    /// access-control prompts and the command log name the actor; tools
-    /// registered through `Session::add_tool` do not.
+    /// Set by the built-in `cmd`/`read_file`/`list_dir` tools (access prompts
+    /// and the command log name the actor), the memory tools, and every
+    /// contextual tool; tools registered through `Session::add_tool` do not.
     pub takes_actor: bool,
 }
 

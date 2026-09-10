@@ -655,7 +655,8 @@ impl MemoryStore for SummarizingMemory {
         Some(self.file(scope))
     }
 
-    /// Preserve the standalone store's historical whole-store close behavior.
+    /// Maintain every overflowing scope; the per-scope `close_run` below is
+    /// what a metered session run calls instead.
     fn close(&self) -> Result<()> {
         for scope in self.maintenance_scopes() {
             self.maintain_scope(&scope)?;
