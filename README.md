@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>Kerness — Kernel for Harness.</strong><br>
-  The framework an AI harness sits on, assembled from plug-and-play components.<br>
+  A multi-agent harness framework assembled from plug-and-play components.<br>
   A Rust crate, with Python bindings over the same kernel.
 </p>
 
@@ -19,8 +19,8 @@
 
 ## What Kerness is
 
-A **harness** is everything wrapped around a language model that turns it into a
-working system: who speaks and in what order, which tools are reachable, what
+A **multi-agent harness** coordinates several language models as a working
+system: who speaks and in what order, which tools are reachable, what
 counts as finished, what gets remembered, and what the run finally returns. A
 debate between three agents is a harness. A research pipeline is a harness. A
 code-review bot, a negotiation simulator, a poker table with three seats — all
@@ -33,8 +33,8 @@ control on anything that touches the filesystem. Memory. Context compaction.
 Crash-resumable state. That substrate is where the weeks go, and none of it is
 the harness you actually wanted to build.
 
-**Kerness is that substrate — the kernel.** It owns every piece listed above and
-exposes them as components you plug together. What is left for you is the part
+**Kerness is a multi-agent harness framework.** It owns every piece listed above
+and exposes them as components you plug together. What is left for you is the part
 that is genuinely yours: a Markdown file declaring how your harness behaves, and
 whatever tools you want to hand the agents.
 
