@@ -423,7 +423,7 @@ engine through `session.start(mode="host_driven")` and `run.step(...)`.
 Inputs are dictionaries such as
 `{"kind": "select_agent", "agent": "Advisor", "instruction": "Recommend a policy."}`;
 outcomes carry `status: "progress"`, `"waiting"`, or `"finished"`.
-[`ARCHITECTURE/bindings.md`](ARCHITECTURE/bindings.md#owned-execution-and-contextual-tools)
+[`ARCHITECTURE/modules/python-bindings.md`](ARCHITECTURE/modules/python-bindings.md#contracts-and-invariants)
 documents the thin API, callback signatures, and handle lifetimes.
 
 ## What the kernel does while it runs
@@ -458,7 +458,7 @@ bindings/python/ # everything the wheel is built from
   kerness/       #   the Python package: the subclassable classes, shims, assets
   tests/         #   pytest suite, over the binding
   examples/      #   runnable Python harnesses
-ARCHITECTURE/    # one document per subsystem
+ARCHITECTURE/    # shared agent rules, subsystem modules, conditional topics
 ```
 
 The bundled `debate`, `discussion`, and `research` gameplans are worked examples
@@ -488,10 +488,10 @@ Python 3.10 and 3.13.
 
 ## Documentation
 
-[`ARCHITECTURE.md`](https://github.com/xwings/kerness/blob/main/ARCHITECTURE.md) is the entry point: mission, workspace
-layout, boot flow, well-known constants, and an index of one document per
-subsystem under [`ARCHITECTURE/`](https://github.com/xwings/kerness/tree/main/ARCHITECTURE). Each carries live `file:line`
-references and the commands that prove it works.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) is the entry point for project constraints,
+shared [agent rules](ARCHITECTURE/AGENT_RULES.md), and task routing. Subsystem
+modules under [`ARCHITECTURE/`](ARCHITECTURE/) describe contracts, source evidence,
+and verification commands; conditional topics expand the relevant checks.
 
 ## License
 
