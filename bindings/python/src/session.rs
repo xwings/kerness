@@ -675,8 +675,9 @@ impl PySession {
     }
 
     /// Execute the session, blocking until the loop terminates.
-    fn run(&mut self) -> PyResult<PySessionResult> {
-        let finished = self.prepared_mut()?.run();
+    fn run(&mut self, py: Python<'_>) -> PyResult<PySessionResult> {
+        let prepared = self.prepared_mut()?;
+        let finished = py.allow_threads(|| prepared.run());
         if let Some(raised) = self.channel.as_ref().and_then(|channel| channel.parked()) {
             return Err(raised);
         }

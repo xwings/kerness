@@ -5,6 +5,7 @@ import pytest
 from kerness.exceptions import GameplanLoadError, SessionError
 from kerness.harness import (
     HarnessSpec,
+    LoopSpec,
     Permitted,
     PhaseSpec,
     parse_harness,
@@ -56,10 +57,16 @@ class TestParseLoop:
         loop = parse({}).loop
         assert loop.terminate_on == ("END_SESSION",)
         assert loop.max_rounds == 3
+        assert loop.max_concurrent_agents == 1
+        assert LoopSpec().max_concurrent_agents == 1
         assert loop.phases == ()
         assert loop.verdict_rethink is True
 
         assert parse({"loop": {"verdict_rethink": False}}).loop.verdict_rethink is False
+        configured = parse({"loop": {"max_concurrent_agents": 3}}).loop
+        assert configured.max_concurrent_agents == 3
+        assert configured == LoopSpec(max_concurrent_agents=3)
+        assert "max_concurrent_agents=3" in repr(configured)
 
     def test_a_single_terminator_is_wrapped_and_none_at_all_is_refused(self):
         """A harness that declares no usable keyword could not end, so the
@@ -84,6 +91,13 @@ class TestParseLoop:
             parse({"loop": {"max_rounds": "many"}})
         with pytest.raises(GameplanLoadError, match="must be an integer"):
             parse({"loop": {"max_rounds": True}})
+        for invalid in (True, "many", 1.5):
+            with pytest.raises(GameplanLoadError, match="must be an integer"):
+                parse({"loop": {"max_concurrent_agents": invalid}})
+        with pytest.raises(GameplanLoadError, match=">= 1"):
+            parse({"loop": {"max_concurrent_agents": 0}})
+        with pytest.raises(ValueError, match="at least 1"):
+            LoopSpec(max_concurrent_agents=0)
         with pytest.raises(GameplanLoadError, match="must be a boolean"):
             parse({"loop": {"verdict_rethink": "false"}})
 

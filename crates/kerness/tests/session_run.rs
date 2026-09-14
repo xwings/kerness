@@ -253,6 +253,751 @@ fn until_input(run: &mut SessionRun) {
     panic!("did not reach input boundary");
 }
 
+#[derive(Default)]
+struct BatchCalls {
+    active: usize,
+    peak: usize,
+    started: Vec<String>,
+    finished: Vec<String>,
+}
+
+struct BatchProvider {
+    scripted: ScriptedProvider,
+    synchronize: bool,
+    fail_alice: bool,
+    cancel: std::sync::Mutex<Option<kerness::RunControl>>,
+    calls: std::sync::Mutex<BatchCalls>,
+    changed: std::sync::Condvar,
+}
+
+impl BatchProvider {
+    fn new(synchronize: bool, fail_alice: bool) -> Arc<Self> {
+        Arc::new(Self {
+            scripted: ScriptedProvider::new()
+                .on(
+                    "orchestrator turn",
+                    &[
+                        "```kerness\n{\"parallel\":[{\"agent\":\"Alice\",\"instruction\":\"task for Alice\"},{\"agent\":\"Bob\",\"instruction\":\"task for Bob\"},{\"agent\":\"Cara\",\"instruction\":\"task for Cara\"}]}\n```",
+                        "DONE",
+                    ],
+                )
+                .on("final summary", &["```json\n{\"ok\":true}\n```"]),
+            synchronize,
+            fail_alice,
+            cancel: std::sync::Mutex::new(None),
+            calls: std::sync::Mutex::new(BatchCalls::default()),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+}
+
+impl Provider for BatchProvider {
+    fn name(&self) -> &str {
+        self.scripted.name()
+    }
+
+    fn base(&self) -> &kerness::provider::ProviderBase {
+        self.scripted.base()
+    }
+
+    fn chat(
+        &self,
+        model: &str,
+        messages: &[serde_json::Value],
+        tools: Option<&[kerness::ToolSpec]>,
+        effort: ReasoningEffort,
+    ) -> kerness::Result<kerness::provider::ProviderResponse> {
+        self.chat_with_retries(model, messages, "", tools, effort)
+    }
+
+    fn chat_with_retries(
+        &self,
+        model: &str,
+        messages: &[serde_json::Value],
+        purpose: &str,
+        tools: Option<&[kerness::ToolSpec]>,
+        effort: ReasoningEffort,
+    ) -> kerness::Result<kerness::provider::ProviderResponse> {
+        let response = self
+            .scripted
+            .chat_with_retries(model, messages, purpose, tools, effort)?;
+        if model == "Mod" {
+            return Ok(response);
+        }
+        let mut calls = self.calls.lock().unwrap();
+        calls.active += 1;
+        calls.peak = calls.peak.max(calls.active);
+        calls.started.push(model.into());
+        self.changed.notify_all();
+        if self.synchronize && matches!(model, "Alice" | "Bob") {
+            let (waiting, timeout) = self
+                .changed
+                .wait_timeout_while(calls, std::time::Duration::from_secs(5), |calls| {
+                    if model == "Alice" {
+                        !calls.finished.iter().any(|name| name == "Bob")
+                    } else {
+                        !calls.started.iter().any(|name| name == "Alice")
+                    }
+                })
+                .unwrap();
+            calls = waiting;
+            if timeout.timed_out() {
+                return Err(kerness::Error::session("batch providers did not overlap"));
+            }
+        }
+        if self.synchronize && model == "Cara" && calls.finished.len() != 2 {
+            return Err(kerness::Error::session(
+                "third provider exceeded the wave limit",
+            ));
+        }
+        calls.active -= 1;
+        calls.finished.push(model.into());
+        self.changed.notify_all();
+        drop(calls);
+        if model == "Alice" {
+            if let Some(control) = self.cancel.lock().unwrap().as_ref() {
+                control.cancel();
+            }
+            if self.fail_alice {
+                return Err(kerness::Error::ProviderNetwork {
+                    url: "https://example.test".into(),
+                    cause: "Alice failed".into(),
+                });
+            }
+        }
+        Ok(kerness::provider::ProviderResponse::text(format!(
+            "result for {model}"
+        )))
+    }
+}
+
+fn batch_session(
+    temp: &common::TempDir,
+    provider: Arc<dyn Provider>,
+    concurrency: Option<usize>,
+    automatic: bool,
+    session_file: Option<&str>,
+    memory_store: Option<Arc<dyn kerness::memory::MemoryStore>>,
+) -> Session {
+    let concurrency = concurrency
+        .map(|limit| format!("  max_concurrent_agents: {limit}\n"))
+        .unwrap_or_default();
+    let path = temp.write(
+        "batch.md",
+        &format!(
+            "---\nname: batch\nagents:\n  orchestrator: {automatic}\n  participants: {{min: 3}}\nloop:\n  max_rounds: 3\n  max_turns: 20\n  terminate_on: [DONE]\n{concurrency}result:\n  ok: bool\n---\nComplete independent assignments.\n"
+        ),
+    );
+    let mut settings = config(&path.to_string_lossy(), "Shared batch context", provider);
+    settings.channel = Some(RecordingChannel::new());
+    settings.memory_store = memory_store;
+    if let Some(file) = session_file {
+        settings.session_file = Some(temp.str_join(file));
+        common::confine(&mut settings, temp);
+    }
+    let mut session = Session::new(settings).unwrap();
+    for name in ["Alice", "Bob", "Cara"] {
+        session
+            .add_agent(Agent::new(name).with_model(name))
+            .unwrap();
+    }
+    if automatic {
+        session
+            .add_agent(
+                Agent::new("Mod")
+                    .with_model("Mod")
+                    .with_role("orchestrator"),
+            )
+            .unwrap();
+    }
+    session
+}
+
+fn select_batch() -> RunInput {
+    RunInput::SelectAgents {
+        assignments: ["Alice", "Bob", "Cara"]
+            .into_iter()
+            .map(|name| kerness::orchestrator::AgentAssignment {
+                agent: name.into(),
+                instruction: format!("task for {name}"),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn independent_batches_bound_overlap_freeze_context_and_commit_in_assignment_order() {
+    for (automatic, concurrency) in [(true, Some(2)), (false, Some(2)), (false, None)] {
+        let temp = common::TempDir::new("independent-batches");
+        let provider = BatchProvider::new(concurrency == Some(2), false);
+        let caller = std::thread::current().id();
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let delivered = observed.clone();
+        let mut run = batch_session(&temp, provider.clone(), concurrency, automatic, None, None)
+            .start(RunOptions {
+                mode: if automatic {
+                    RunMode::Automatic
+                } else {
+                    RunMode::HostDriven
+                },
+                event_sink: Some(Arc::new(move |event: &kerness::RunEvent| {
+                    assert_eq!(std::thread::current().id(), caller);
+                    delivered.lock().unwrap().push(event.clone());
+                    Ok(())
+                })),
+                ..Default::default()
+            })
+            .unwrap();
+        if !automatic {
+            until_input(&mut run);
+            run.step(select_batch()).unwrap();
+            assert!(run
+                .step(RunInput::UserMessage {
+                    text: "mid-batch".into()
+                })
+                .is_err());
+            assert!(run
+                .step(RunInput::Finish {
+                    result: json!({"ok":true})
+                })
+                .is_err());
+        }
+        let mut outcome = None;
+        for _ in 0..100 {
+            match run.step(RunInput::Continue).unwrap() {
+                StepOutcome::Finished { outcome: finished } => {
+                    outcome = Some(finished);
+                    break;
+                }
+                StepOutcome::Waiting {
+                    reason: WaitReason::Input,
+                } if !automatic => {
+                    let StepOutcome::Finished { outcome: finished } = run
+                        .step(RunInput::Finish {
+                            result: json!({"ok":true}),
+                        })
+                        .unwrap()
+                    else {
+                        panic!("host finish");
+                    };
+                    outcome = Some(finished);
+                    break;
+                }
+                StepOutcome::Progress => {}
+                other => panic!("unexpected batch step {other:?}"),
+            }
+        }
+        let outcome = outcome.expect("batch run finishes");
+        assert_eq!(outcome.reason, RunReason::Completed);
+        assert_eq!(outcome.result.fields["ok"], json!(true));
+        let calls = provider.calls.lock().unwrap();
+        assert_eq!(calls.peak, concurrency.unwrap_or(1));
+        if concurrency == Some(2) {
+            assert_eq!(calls.finished, ["Bob", "Alice", "Cara"]);
+        }
+        drop(calls);
+        let participants: Vec<_> = outcome
+            .result
+            .history
+            .iter()
+            .filter(|message| message.msg_type == "turn" && message.sender != "Mod")
+            .collect();
+        assert_eq!(
+            participants
+                .iter()
+                .map(|message| message.sender.as_str())
+                .collect::<Vec<_>>(),
+            ["Alice", "Bob", "Cara"]
+        );
+        for participant in &participants {
+            assert_eq!(
+                participant.content,
+                format!("result for {}", participant.sender)
+            );
+            let calls = provider.scripted.calls();
+            let call = calls
+                .iter()
+                .find(|call| call.model == participant.sender)
+                .unwrap();
+            assert!(call.text().contains("Shared batch context"));
+            assert!(call
+                .text()
+                .contains(&format!("task for {}", participant.sender)));
+            assert!(
+                !call.text().contains("result for "),
+                "every prompt uses the pre-batch transcript"
+            );
+        }
+        if automatic {
+            let synthesis = provider
+                .scripted
+                .last_call_for("orchestrator turn")
+                .unwrap();
+            for participant in &participants {
+                assert!(synthesis.text().contains(&participant.content));
+            }
+        }
+        let events = observed.lock().unwrap();
+        let first_commit = events
+            .iter()
+            .position(|event| {
+                matches!(&event.event, kerness::RunEventKind::TurnCommitted { actor, .. } if actor == "Alice")
+            })
+            .unwrap();
+        let settled = events[..first_commit]
+            .iter()
+            .filter(|event| {
+                matches!(&event.event, kerness::RunEventKind::ProviderFinished { actor, .. } if actor != "Mod")
+            })
+            .count();
+        assert_eq!(
+            settled, 3,
+            "all workers settle before shared conversation commits"
+        );
+        assert!(events
+            .windows(2)
+            .all(|pair| pair[1].sequence == pair[0].sequence + 1));
+        let mut turn_ids = std::collections::BTreeSet::new();
+        for name in ["Alice", "Bob", "Cara"] {
+            let ids: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.event {
+                    kerness::RunEventKind::ProviderStarted { actor, .. }
+                    | kerness::RunEventKind::ProviderFinished { actor, .. }
+                    | kerness::RunEventKind::TurnCommitted { actor, .. }
+                        if actor == name =>
+                    {
+                        Some(event.turn_id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ids.len(), 3);
+            assert!(ids.iter().all(|id| *id == ids[0]), "{name}");
+            assert!(
+                turn_ids.insert(ids[0]),
+                "each participant owns a distinct turn"
+            );
+        }
+        assert_eq!(
+            outcome.usage.totals.provider_operations as usize,
+            provider.scripted.call_count()
+        );
+    }
+}
+
+#[test]
+fn interrupted_batches_preserve_successful_peers_before_termination() {
+    let temp = common::TempDir::new("blocking-batch-failure");
+    let provider = BatchProvider::new(true, true);
+    let error = batch_session(&temp, provider.clone(), Some(2), true, None, None)
+        .run()
+        .expect_err("a failed batch member fails the blocking run");
+    assert_eq!(
+        error,
+        kerness::Error::ProviderNetwork {
+            url: "https://example.test".into(),
+            cause: "Alice failed".into(),
+        }
+    );
+    assert_eq!(provider.scripted.call_count(), 3, "opening plus first wave");
+
+    for cause in [
+        "failure",
+        "cancel",
+        "budget",
+        "started",
+        "finished",
+        "committed",
+    ] {
+        let temp = common::TempDir::new("interrupted-batch");
+        let provider = BatchProvider::new(cause != "budget", cause == "failure");
+        let rejected = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let failures = rejected.clone();
+        let mut run = batch_session(&temp, provider.clone(), Some(2), false, None, None)
+            .start(RunOptions {
+                mode: RunMode::HostDriven,
+                budget: kerness::usage::RunBudget {
+                    max_provider_operations: (cause == "budget").then_some(1),
+                    ..Default::default()
+                },
+                event_sink: Some(Arc::new(move |event: &kerness::RunEvent| {
+                    let actor = match &event.event {
+                        kerness::RunEventKind::ProviderStarted { actor, .. }
+                            if cause == "started" && actor == "Cara" =>
+                        {
+                            actor
+                        }
+                        kerness::RunEventKind::ProviderFinished { actor, .. }
+                            if cause == "finished" =>
+                        {
+                            actor
+                        }
+                        kerness::RunEventKind::TurnCommitted { actor, .. }
+                            if cause == "committed" =>
+                        {
+                            actor
+                        }
+                        _ => return Ok(()),
+                    };
+                    failures.lock().unwrap().push(actor.clone());
+                    Err(kerness::Error::Value(format!(
+                        "{cause} sink failed for {actor}"
+                    )))
+                })),
+                ..Default::default()
+            })
+            .unwrap();
+        if cause == "cancel" {
+            *provider.cancel.lock().unwrap() = Some(run.control());
+        }
+        run.step(select_batch()).unwrap();
+        let mut outcome = None;
+        for _ in 0..100 {
+            match run.step(RunInput::Continue).unwrap() {
+                StepOutcome::Finished { outcome: finished } => {
+                    outcome = Some(finished);
+                    break;
+                }
+                StepOutcome::Progress => {}
+                other => panic!("unexpected terminal batch step: {other:?}"),
+            }
+        }
+        let outcome = outcome.expect("interrupted batch finishes");
+        let completed: Vec<_> = outcome
+            .result
+            .history
+            .iter()
+            .filter(|message| message.msg_type == "turn")
+            .collect();
+        let expected = match cause {
+            "failure" | "budget" => 1,
+            "committed" => 3,
+            _ => 2,
+        };
+        assert_eq!(completed.len(), expected, "{cause}");
+        assert_eq!(outcome.result.turns_completed as usize, completed.len());
+        assert!(completed
+            .iter()
+            .all(|message| message.content == format!("result for {}", message.sender)));
+        assert!(cause == "committed" || completed.iter().all(|message| message.sender != "Cara"));
+        assert_eq!(
+            provider.scripted.call_count(),
+            if cause == "failure" { 2 } else { expected },
+            "{cause}"
+        );
+        assert_eq!(
+            outcome.usage.totals.provider_operations as usize,
+            provider.scripted.call_count()
+        );
+        match cause {
+            "failure" => {
+                assert_eq!(completed[0].sender, "Bob");
+                assert_eq!(outcome.reason, RunReason::Failed);
+                assert_eq!(
+                    outcome.error,
+                    Some(kerness::Error::ProviderNetwork {
+                        url: "https://example.test".into(),
+                        cause: "Alice failed".into()
+                    })
+                );
+            }
+            "cancel" => assert_eq!(outcome.reason, RunReason::Cancelled),
+            "budget" => assert_eq!(
+                outcome.reason,
+                RunReason::BudgetExceeded {
+                    budget: kerness::usage::BudgetExceeded::ProviderOperations
+                }
+            ),
+            _ => {
+                assert_eq!(outcome.reason, RunReason::Failed, "{cause}");
+                let actor = if cause == "started" { "Cara" } else { "Alice" };
+                assert_eq!(
+                    outcome.error,
+                    Some(kerness::Error::Value(format!(
+                        "{cause} sink failed for {actor}"
+                    )))
+                );
+                if cause == "committed" {
+                    assert_eq!(*rejected.lock().unwrap(), ["Alice", "Bob", "Cara"]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cancelled_batch_keeps_paid_replies_when_its_first_commit_checkpoint_fails() {
+    let temp = common::TempDir::new("batch-checkpoint-failure");
+    let provider = BatchProvider::new(true, false);
+    let path = temp.join("run.json");
+    let obstructed = path.clone();
+    let mut run = batch_session(&temp, provider.clone(), Some(2), false, Some("run.json"), None)
+        .start(RunOptions {
+            mode: RunMode::HostDriven,
+            event_sink: Some(Arc::new(move |event: &kerness::RunEvent| {
+                if matches!(&event.event, kerness::RunEventKind::ProviderFinished { actor, .. } if actor == "Cara") {
+                    std::fs::remove_file(&obstructed).unwrap();
+                    std::fs::create_dir(&obstructed).unwrap();
+                }
+                Ok(())
+            })),
+            ..Default::default()
+        }).unwrap();
+    run.step(select_batch()).unwrap();
+    for _ in 0..100 {
+        if provider.scripted.call_count() == 3 {
+            break;
+        }
+        assert_eq!(run.step(RunInput::Continue).unwrap(), StepOutcome::Progress);
+    }
+    assert_eq!(provider.scripted.call_count(), 3);
+    assert!(
+        path.is_dir(),
+        "last provider callback obstructed the next save"
+    );
+    run.control().cancel();
+    let error = run
+        .step(RunInput::Continue)
+        .expect_err("checkpoint destination is a directory");
+    assert!(matches!(error, kerness::Error::Io(_)));
+    let outcome = run
+        .outcome()
+        .expect("terminal remains inspectable after failed persistence")
+        .clone();
+    assert_eq!(outcome.reason, RunReason::Failed);
+    assert_eq!(outcome.error, Some(error));
+    assert_eq!(outcome.result.turns_completed, 3);
+    assert_eq!(
+        outcome
+            .result
+            .history
+            .iter()
+            .filter(|message| message.msg_type == "turn")
+            .map(|message| (message.sender.as_str(), message.content.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Alice", "result for Alice"),
+            ("Bob", "result for Bob"),
+            ("Cara", "result for Cara")
+        ],
+    );
+    assert_eq!(outcome.usage.totals.provider_operations, 3);
+    std::fs::remove_dir(&path).unwrap();
+    run.checkpoint().unwrap();
+    let saved = kerness::sessionfile::load_snapshot(&path).unwrap().unwrap();
+    assert_eq!(saved.transcript, outcome.result.history);
+    drop(run);
+    let mut restored = batch_session(
+        &temp,
+        provider.clone(),
+        Some(2),
+        false,
+        Some("run.json"),
+        None,
+    )
+    .start(RunOptions {
+        mode: RunMode::HostDriven,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        restored.step(RunInput::Continue).unwrap(),
+        StepOutcome::Finished { outcome }
+    );
+    assert_eq!(
+        provider.scripted.call_count(),
+        3,
+        "terminal restoration replays no provider"
+    );
+    assert_eq!(restored.usage().tool_calls, 0);
+}
+
+#[test]
+fn batch_prompt_memory_reads_share_the_actor_provider_budget() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct NestedRead {
+        armed: AtomicBool,
+        provider: Arc<ScriptedProvider>,
+    }
+    impl kerness::memory::MemoryStore for NestedRead {
+        fn read(&self, _: &str) -> kerness::Result<String> {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                kerness::provider::supplied_chat_with_retries(
+                    self.provider.as_ref(),
+                    "nested",
+                    &[],
+                    "memory read",
+                    None,
+                    ReasoningEffort::Medium,
+                )?;
+            }
+            Ok(String::new())
+        }
+        fn append(&self, _: &str, _: &str) -> kerness::Result<()> {
+            Ok(())
+        }
+    }
+    for prepare in [true, false] {
+        let temp = common::TempDir::new("batch-memory-usage");
+        let nested = ScriptedProvider::new().fallback(&["memory reply"]).shared();
+        let memory = Arc::new(NestedRead {
+            armed: AtomicBool::new(false),
+            provider: nested.clone(),
+        });
+        let provider = BatchProvider::new(false, false);
+        let mut run = batch_session(
+            &temp,
+            provider.clone(),
+            Some(2),
+            false,
+            None,
+            Some(memory.clone()),
+        )
+        .start(RunOptions {
+            mode: RunMode::HostDriven,
+            budget: kerness::usage::RunBudget {
+                max_provider_operations: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        until_input(&mut run);
+        memory.armed.store(prepare, Ordering::SeqCst);
+        assert_eq!(run.step(select_batch()).unwrap(), StepOutcome::Progress);
+        if !prepare {
+            memory.armed.store(true, Ordering::SeqCst);
+        }
+        let mut outcome = None;
+        for _ in 0..100 {
+            match run.step(RunInput::Continue).unwrap() {
+                StepOutcome::Finished { outcome: finished } => {
+                    outcome = Some(finished);
+                    break;
+                }
+                StepOutcome::Progress => {}
+                other => panic!("unexpected memory-budget step {other:?}"),
+            }
+        }
+        let outcome = outcome.expect("nested prompt work exhausts provider budget");
+        assert_eq!(
+            outcome.reason,
+            RunReason::BudgetExceeded {
+                budget: kerness::usage::BudgetExceeded::ProviderOperations
+            }
+        );
+        assert_eq!(nested.call_count(), 1);
+        assert_eq!(
+            provider.scripted.call_count(),
+            0,
+            "nested work uses the only provider operation"
+        );
+        assert_eq!(outcome.result.turns_completed, 0);
+        assert_eq!(outcome.usage.records.len(), 1);
+        assert_eq!(outcome.usage.records[0].actor, "Alice");
+        assert_eq!(outcome.usage.records[0].model, "nested");
+    }
+}
+
+#[test]
+fn batch_tool_exchanges_stay_private_until_optional_shared_commit() {
+    for expose in [false, true] {
+        let temp = common::TempDir::new("batch-tool-history");
+        let path = temp.write(
+            "batch.md",
+            "---\nname: batch\nagents:\n  orchestrator: true\n  participants: {min: 3}\nloop:\n  max_concurrent_agents: 2\n  max_rounds: 3\n  max_turns: 20\n  terminate_on: [DONE]\nresult:\n  ok: bool\n---\nComplete independent work.\n",
+        );
+        let moderator = BatchProvider::new(false, false);
+        let mut settings = config(
+            &path.to_string_lossy(),
+            "Independent lookups",
+            moderator.clone(),
+        );
+        settings.channel = Some(RecordingChannel::new());
+        settings.tool_results_in_history = expose;
+        let mut session = Session::new(settings).unwrap();
+        let mut providers = Vec::new();
+        for name in ["Alice", "Bob", "Cara"] {
+            let provider = common::ToolProvider::new(
+                kerness::ToolDialect::Text,
+                vec![
+                    kerness::provider::ProviderResponse::text(common::fenced_tool_call(
+                        "lookup",
+                        json!({"owner": name}),
+                    )),
+                    kerness::provider::ProviderResponse::text(format!("result for {name}")),
+                ],
+            )
+            .shared();
+            session
+                .add_agent(Agent {
+                    provider: Some(provider.clone()),
+                    ..Agent::new(name).with_model(name)
+                })
+                .unwrap();
+            providers.push((name, provider));
+        }
+        session
+            .add_agent(
+                Agent::new("Mod")
+                    .with_model("Mod")
+                    .with_role("orchestrator"),
+            )
+            .unwrap();
+        let caller = std::thread::current().id();
+        let lookups = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = lookups.clone();
+        session.add_tool(
+            "lookup", "Retrieve the assigned record.",
+            json!({"type":"object", "properties":{"owner":{"type":"string"}}, "required":["owner"]}),
+            Arc::new(move |arguments: &kerness::tooling::Arguments, _: &str| {
+                assert_eq!(std::thread::current().id(), caller);
+                let owner = arguments["owner"].as_str().unwrap().to_string();
+                observed.lock().unwrap().push(owner.clone());
+                Ok(format!("private lookup {owner}"))
+            }),
+        ).unwrap();
+        let mut run = session.start(RunOptions::default()).unwrap();
+        let mut outcome = None;
+        for _ in 0..100 {
+            match run.step(RunInput::Continue).unwrap() {
+                StepOutcome::Finished { outcome: finished } => {
+                    outcome = Some(finished);
+                    break;
+                }
+                StepOutcome::Progress => {}
+                other => panic!("unexpected batch tool step: {other:?}"),
+            }
+        }
+        let outcome = outcome.expect("batch lookups finish");
+        assert_eq!(outcome.reason, RunReason::Completed);
+        assert_eq!(*lookups.lock().unwrap(), ["Alice", "Bob", "Cara"]);
+        assert_eq!(outcome.usage.tool_calls, 3);
+        let synthesis = moderator
+            .scripted
+            .last_call_for("orchestrator turn")
+            .unwrap()
+            .text();
+        for (name, provider) in providers {
+            let marker = format!("private lookup {name}");
+            let calls = provider.calls();
+            assert_eq!(calls.len(), 2);
+            assert!(!calls[0].text().contains("private lookup "));
+            assert!(calls[1].text().contains(&marker));
+            for peer in ["Alice", "Bob", "Cara"]
+                .into_iter()
+                .filter(|peer| *peer != name)
+            {
+                assert!(!calls[1].text().contains(&format!("private lookup {peer}")));
+            }
+            assert_eq!(synthesis.matches(&marker).count(), usize::from(expose));
+            assert!(synthesis.contains(&format!("result for {name}")));
+        }
+    }
+}
+
 #[test]
 fn a_host_selects_an_agent_and_finishes_without_a_judge_call() {
     let temp = common::TempDir::new("host-runtime");
@@ -351,6 +1096,8 @@ fn terminal_failures_cancellation_and_budgets_preserve_committed_work() {
     struct Failing {
         base: ProviderBase,
         calls: AtomicUsize,
+        replies: Vec<String>,
+        error: kerness::Error,
     }
     impl Provider for Failing {
         fn name(&self) -> &str {
@@ -366,13 +1113,10 @@ fn terminal_failures_cancellation_and_budgets_preserve_committed_work() {
             _: Option<&[kerness::ToolSpec]>,
             _: ReasoningEffort,
         ) -> kerness::Result<ProviderResponse> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                Ok(ProviderResponse::text("Committed answer"))
+            if let Some(reply) = self.replies.get(self.calls.fetch_add(1, Ordering::SeqCst)) {
+                Ok(ProviderResponse::text(reply.clone()))
             } else {
-                Err(kerness::Error::ProviderNetwork {
-                    url: "https://example.test".into(),
-                    cause: "original failure".into(),
-                })
+                Err(self.error.clone())
             }
         }
         fn chat_with_retries(
@@ -386,11 +1130,75 @@ fn terminal_failures_cancellation_and_budgets_preserve_committed_work() {
             self.chat(model, messages, tools, effort)
         }
     }
+    for (phase, replies) in [
+        ("opening", vec![]),
+        ("participant", vec!["@Alice, answer.".into()]),
+        (
+            "tool followup",
+            vec![
+                "@Alice, answer.".into(),
+                common::fenced_tool_call("lookup", json!({})),
+            ],
+        ),
+        ("final summary", vec!["END_SESSION".into()]),
+    ] {
+        for owned in [true, false] {
+            let error = kerness::Error::ProviderHttp {
+                status_code: 403,
+                url: "https://example.test/v1/chat/completions".into(),
+                body:
+                    r#"{"error":{"code":"policy_denied","message":"Request rejected by policy"}}"#
+                        .into(),
+            };
+            let provider = Arc::new(Failing {
+                base: ProviderBase::new(0, 0.0, None),
+                calls: AtomicUsize::new(0),
+                replies: replies.clone(),
+                error: error.clone(),
+            });
+            let mut session = debate(provider.clone(), RecordingChannel::new());
+            let effects = Arc::new(AtomicUsize::new(0));
+            let recorded = effects.clone();
+            session
+                .add_tool(
+                    "lookup",
+                    "Look up an answer.",
+                    json!({"type":"object", "properties":{}}),
+                    Arc::new(move |_: &kerness::tooling::Arguments, _: &str| {
+                        recorded.fetch_add(1, Ordering::SeqCst);
+                        Ok("Looked up answer".into())
+                    }),
+                )
+                .unwrap();
+            if owned {
+                let outcome = finish_steps(&mut session.start(RunOptions::default()).unwrap());
+                assert_eq!(outcome.reason, RunReason::Failed, "{phase}");
+                assert_eq!(outcome.error, Some(error), "{phase}");
+            } else {
+                assert_eq!(session.run().unwrap_err(), error, "{phase}");
+            }
+            assert_eq!(
+                provider.calls.load(Ordering::SeqCst),
+                replies.len() + 1,
+                "{phase}"
+            );
+            assert_eq!(
+                effects.load(Ordering::SeqCst),
+                usize::from(phase == "tool followup"),
+                "{phase}"
+            );
+        }
+    }
     for cause in ["failure", "cancel", "budget"] {
         let temp = common::TempDir::new("terminal-runtime");
         let provider = Arc::new(Failing {
             base: ProviderBase::new(0, 0.0, None),
             calls: AtomicUsize::new(0),
+            replies: vec!["Committed answer".into()],
+            error: kerness::Error::ProviderNetwork {
+                url: "https://example.test".into(),
+                cause: "original failure".into(),
+            },
         });
         let budget = RunBudget {
             max_provider_operations: (cause == "budget").then_some(1),

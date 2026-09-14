@@ -284,6 +284,136 @@ fn allowed_tools_narrows_what_the_rest_of_the_turn_is_offered() {
     assert!(offered(&calls[2]).contains(&"read_file".to_string()));
 }
 
+#[test]
+fn batch_turns_keep_their_skills_tools_and_contextual_identity_separate() {
+    use kerness::{
+        AgentAssignment, ContextToolSpec, RunInput, RunMode, RunOptions, StepOutcome, ToolContext,
+        WaitReason,
+    };
+    use std::sync::Mutex;
+
+    let temp = TempDir::new("batch-skills");
+    let path = temp.write("batch.md", "---\nname: batch\nagents:\n  orchestrator: false\n  participants: {min: 2}\nloop:\n  max_concurrent_agents: 2\n  max_rounds: 2\n---\nIndependent tasks.\n");
+    let mut settings = config(&path.to_string_lossy(), "Separate capabilities", routing());
+    common::confine(&mut settings, &temp);
+    let mut session = Session::new(settings).unwrap();
+    let owner_thread = std::thread::current().id();
+    let contexts = Arc::new(Mutex::new(Vec::<ToolContext>::new()));
+    let mut providers = Vec::new();
+    for (name, other) in [("left", "right"), ("right", "left")] {
+        let skill = write_skill(&temp, name, Some(&format!("[{name}]")));
+        let own_path = temp.write(&format!("{name}/data.txt"), name);
+        let other_path = temp.join(&format!("{other}/data.txt"));
+        let provider = ToolProvider::new(
+            ToolDialect::Openai,
+            vec![
+                load(name, "load"),
+                tool_call_reply(other, json!({}), "forbidden"),
+                tool_call_reply(name, json!({}), "own"),
+                ProviderResponse::text(format!("{name} completed")),
+            ],
+        )
+        .shared();
+        session
+            .add_agent(Agent {
+                provider: Some(provider.clone()),
+                skills: Some(vec![skill]),
+                tools: Some(vec![name.into()]),
+                workspace: Some(temp.str_join(name)),
+                ..Agent::new(name).with_model("m")
+            })
+            .unwrap();
+        let captured = contexts.clone();
+        session
+            .add_contextual_tool(ContextToolSpec::new(
+                name,
+                "Read own workspace",
+                json!({"type":"object"}),
+                Arc::new(move |_: &Arguments, context: &ToolContext| {
+                    assert_eq!(
+                        std::thread::current().id(),
+                        owner_thread,
+                        "tools stay serialized on the host thread"
+                    );
+                    assert_eq!(context.identity().actor(), name);
+                    assert_eq!(
+                        context.read_file(&own_path.to_string_lossy()).unwrap(),
+                        name
+                    );
+                    assert!(context.read_file(&other_path.to_string_lossy()).is_err());
+                    captured.lock().unwrap().push(context.clone());
+                    Ok(format!("{name} private result"))
+                }),
+            ))
+            .unwrap();
+        providers.push((name, other, provider));
+    }
+    let mut run = session
+        .start(RunOptions {
+            mode: RunMode::HostDriven,
+            ..Default::default()
+        })
+        .unwrap();
+    run.step(RunInput::SelectAgents {
+        assignments: ["left", "right"]
+            .into_iter()
+            .map(|agent| AgentAssignment {
+                agent: agent.into(),
+                instruction: "Use your skill and tool".into(),
+            })
+            .collect(),
+    })
+    .unwrap();
+    let mut reached_input = false;
+    for _ in 0..100 {
+        match run.step(RunInput::Continue).unwrap() {
+            StepOutcome::Progress => {}
+            StepOutcome::Waiting {
+                reason: WaitReason::Input,
+            } => {
+                reached_input = true;
+                break;
+            }
+            other => panic!("Unexpected batch state: {other:?}"),
+        }
+    }
+    assert!(reached_input);
+    for (name, other, provider) in providers {
+        let calls = provider.calls();
+        assert_eq!(calls.len(), 4);
+        for call in calls.iter() {
+            assert!(call.tools.contains(&name.to_string()));
+            assert!(!call.tools.contains(&other.to_string()));
+            assert!(!call.text().contains(&format!("Body of {other}.")));
+            assert!(!call.text().contains(&format!("{other} private result")));
+        }
+        assert!(calls[1].text().contains(&format!("Body of {name}.")));
+        assert!(
+            calls[2].text().contains(&format!("Unknown tool: {other}")),
+            "{}",
+            calls[2].text()
+        );
+        assert!(calls[3].text().contains(&format!("{name} private result")));
+    }
+    let contexts = contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 2, "withheld handlers never execute");
+    assert_ne!(
+        contexts[0].identity().turn_id(),
+        contexts[1].identity().turn_id()
+    );
+    assert_ne!(
+        contexts[0].identity().call_id(),
+        contexts[1].identity().call_id()
+    );
+    for context in contexts.iter() {
+        assert!(context
+            .read_file("data.txt")
+            .unwrap_err()
+            .to_string()
+            .contains("expired"));
+    }
+}
+
 /// Two skills in one turn union their lists. Intersecting would mean loading a
 /// second skill silently disabled the first.
 #[test]

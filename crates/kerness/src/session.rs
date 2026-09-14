@@ -895,8 +895,8 @@ impl Session {
 
     /// Execute the session, blocking until the loop terminates.
     ///
-    /// Drives [`SessionRun`] with legacy result, approval and provider-error
-    /// behavior, then returns the committed result.
+    /// Drives [`SessionRun`] with legacy result coercion and approval behavior.
+    /// Returns the committed result or the original error when execution fails.
     pub fn run(&mut self) -> Result<SessionResult> {
         let mut run = SessionRun::new(self.run_copy(), RunOptions::legacy(), true)?;
         let finished = run.run_to_completion();
@@ -1368,6 +1368,12 @@ impl Session {
              when to summarize, when to check consensus\n\
              - You can summarize, comment, redirect, or challenge participants \
              at any point\n"
+        } else if spec.max_concurrent_agents > 1 {
+            "- You decide who works next; the phases advance on their own\n\
+             - Call on the participants your briefing lists as yet to speak, \
+             individually or in independent batches, until none are left\n\
+             - Never write a participant's turn for them: wait for their \
+             completed answers before combining the findings\n"
         } else {
             "- You decide who speaks next; the phases advance on their own\n\
              - Call on the participants your briefing lists as yet to speak, \
@@ -1375,6 +1381,27 @@ impl Session {
              - Never write a participant's turn for them: until a participant \
              has answered you do not know what it found, and a contribution you \
              compose on its behalf is invention\n"
+        };
+
+        let dispatch_rules = if spec.max_concurrent_agents == 1 {
+            "- Only call on ONE participant at a time".to_string()
+        } else {
+            let example = serde_json::json!({"parallel": [{
+                "agent": participants[0], "instruction": "Your independent task"
+            }]});
+            format!(
+                "- For independent tasks, assign a batch by replying with only one fenced \
+                 kerness JSON block:\n```kerness\n{example}\n```\n\
+                 - Include one entry per selected participant, in the order their results \
+                 should appear. Select only participants yet to speak this round; each \
+                 participant may appear once. Up to {} agents work concurrently.\n\
+                 - Batch members read the same conversation before the batch. They cannot \
+                 see one another's findings until all members finish. Combine their \
+                 completed results on your next turn; use separate batches for dependent work.\n\
+                 - Existing @Name instructions still select one participant. To advance \
+                 or end the session, send the configured keyword in a separate reply.",
+                spec.max_concurrent_agents
+            )
         };
 
         // The harness's own words about itself, when it has any.
@@ -1409,6 +1436,7 @@ impl Session {
             ("{end_rules}", end_rules.as_str()),
             ("{flow_rules}", flow_rules),
             ("{rounds_rule}", rounds_rule.as_str()),
+            ("{dispatch_rules}", dispatch_rules.as_str()),
             ("{orchestrator_instruction}", extra.as_str()),
             ("{gameplan_body}", self.gameplan.body.as_str()),
         ]
@@ -2746,6 +2774,25 @@ mod tests {
         assert!(!prompt.contains("at any point"));
         assert!(prompt.contains("the phases advance on their own"));
         assert!(prompt.contains("Never write a participant's turn for them"));
+        assert!(prompt.contains("Only call on ONE participant at a time"));
+        assert!(!prompt.contains("{dispatch_rules}"));
+
+        let provider = Arc::new(SequenceProvider::new(&["END_SESSION", "Done."]));
+        let mut concurrent = debate(
+            &temp,
+            Arc::clone(&provider) as Arc<dyn Provider>,
+            Arc::new(CaptureChannel::default()),
+            "Pineapple?",
+        );
+        concurrent.gameplan.harness.loop_spec.max_concurrent_agents = 2;
+        concurrent.run().expect("a run");
+        let prompt = provider.system_prompts().remove(0);
+        assert!(prompt.contains("```kerness\n"));
+        assert!(prompt.contains("\"parallel\":["));
+        assert!(prompt.contains("Up to 2 agents work concurrently"));
+        assert!(prompt.contains("same conversation before the batch"));
+        assert!(!prompt.contains("Only call on ONE participant"));
+        assert!(!prompt.contains("one per turn"));
     }
 
     #[test]

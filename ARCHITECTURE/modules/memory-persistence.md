@@ -70,6 +70,9 @@ or contradictory continuation data silently.
   validates the saved contract. Pending approvals keep identity/completed results;
   uncertain interrupted effects need reconciliation before further execution
   (`session/run.rs`, `session_run.rs`).
+- For concurrent batch snapshots and buffered result delivery, read the runtime's
+  [batch contract](../topics/concurrent-batches.md). Per-turn continuations and
+  recorded interruptions survive resume; live worker threads do not.
 
 ## Dependencies and Boundaries
 

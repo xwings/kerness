@@ -45,10 +45,20 @@ a `OnceLock`/`RwLock` slot with a usable Rust default (`http.rs`).
 - A tool-only response is valid even with empty content. An unreadable/empty
   response must surface the proper framework error rather than look successful.
   Call IDs and ordered tool results survive dialect conversion (`toolschema.rs`).
+- HTTP failures retain status, URL and server body; unreadable error bodies carry
+  a read diagnostic. Invalid JSON is a provider response error, distinct from
+  network/IO failure (`http.rs`). Successful-status API error envelopes retain
+  vendor code/message/metadata in the error. OpenAI-compatible `refusal` and
+  `content_filter`, and Anthropic `stop_reason: refusal`, fail before accepting
+  content or tools. Empty and invalid structured replies retain reported stop
+  reasons (`provider/mod.rs`, `openai.rs`). Both session entry points propagate
+  unrecovered errors; [runtime](runtime.md) owns the terminal behavior.
 - Native-tool rejection and reasoning-effort rejection have separate one-way
   latches in the provider instance. Only matching refusal evidence degrades the
   feature; unrelated failures must not disable it. A mixed session resolves each
   agent's effective dialect independently (`provider/mod.rs`, Python provider tests).
+  A concurrent native response retains its declared call/result dialect even if
+  a sibling request disables native tools; later requests honor the fallback.
 - Context windows are supplied by the host/provider, not a bundled model table.
   The runtime combines these declarations with session limits; output token
   limits do not bound input context. No streaming contract is implemented.
@@ -56,10 +66,14 @@ a `OnceLock`/`RwLock` slot with a usable Rust default (`http.rs`).
   unknown (`None`), not fabricated zero. Cached/reasoning tokens are subsets,
   not amounts to add twice. Host pricing supplies integer prices; no live price
   registry exists (`usage.rs`).
-- Thread-local synchronous observation records supplied provider paths; overriding
-  dispatch may yield an opaque logical operation rather than individual request
-  measurements. Hard token/cost caps are rejected; measured thresholds can stop
-  later work only after the observation (`usage.rs`, `session_run.rs`).
+- Thread-local observation stacks attribute concurrent supplied provider paths
+  independently. Nested wrappers transfer a reserved operation to their first
+  attempt; retries reserve individually. Provider/tool count checks and capacity
+  reservations are atomic across a collector, and admitted completions remain
+  recorded after another action exhausts a budget. Overriding dispatch may yield
+  an opaque logical operation rather than individual request measurements. Hard
+  token/cost caps are rejected; measured thresholds can overshoot by operations
+  already in flight (`usage.rs`, `session_run.rs`).
 - Provider URLs/credentials are host configuration. HTTP does not cross command
   `AccessManager` and must not be described as confined by `allowed_hosts`.
 

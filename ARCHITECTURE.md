@@ -20,16 +20,16 @@ and retain cross-owner constraints and verification evidence.
 
 | Fact | Value and evidence |
 | --- | --- |
-| Purpose | Markdown-driven synchronous multi-agent sessions; Rust and Python share one kernel ([entry](crates/kerness/src/lib.rs)). |
+| Purpose | Markdown-driven multi-agent sessions; Rust and Python share one kernel ([entry](crates/kerness/src/lib.rs)). |
 | Toolchain | Rust 2021/MSRV 1.88, workspace version 0.1.2-dev ([Cargo](Cargo.toml)); Python >=3.10, PyO3 0.23/abi3-py310, maturin >=1.7,<2 ([Python](bindings/python/pyproject.toml), [binding](bindings/python/Cargo.toml)). |
 | Platforms | Linux/macOS declared; POSIX access/process assumptions. CI targets Ubuntu/Python 3.10 and 3.13; MSRV/platform gaps are in [build checks](ARCHITECTURE/topics/build-checks.md). |
-| Non-goals | No daemon, async/parallel scheduler, streaming, exact tokenizer or model-price registry. Hosts supply windows/prices; token/cost limits are measured thresholds (provider/memory owners below). |
+| Non-goals | No daemon, async scheduler, streaming, exact tokenizer or model-price registry. Hosts supply windows/prices; token/cost limits are measured thresholds (provider/memory owners below). |
 
 ## System Design
 
 `Session` validates the gameplan/defaults; `SessionRun` owns scheduling, turns,
-approvals and outcomes. Prompts feed providers; tools run in private scratch
-before shared conversation updates. Optional snapshots persist state; hosts
+approvals and outcomes, including optional concurrent batches. Tool effects run
+serially in private turns before conversation updates. Snapshots persist state; hosts
 rebind callbacks on resume ([runtime](ARCHITECTURE/modules/runtime.md)).
 
 The kernel has no Python dependency; bindings translate values and install

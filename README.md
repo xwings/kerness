@@ -374,6 +374,16 @@ print(result.rounds_run, result.end_reason)
 The `add_*` calls return the session, so registration chains if you would rather
 write it that way.
 
+Unrecovered provider failures end the session. Rust `Session::run` returns the
+original error; Python `session.run()` raises its corresponding exception. HTTP
+rejections preserve the server's status code, URL and response body in `ProviderHTTPError`
+attributes `status_code`, `url` and `body`. For partial history and usage after
+failure, use an owned `SessionRun`, which retains the error in `outcome.error`.
+Successful HTTP responses containing API errors, model refusals or content filters
+raise `ProviderError` with the reported reason and server details. Invalid JSON is
+a response error; connection and body IO failures raise `ProviderNetworkError`.
+Empty or invalid structured output includes the stop reason when the server supplies it.
+
 ## Host-controlled runs
 
 `Session::start(RunOptions)` transfers configuration into an owned `SessionRun`.
@@ -382,10 +392,12 @@ needed only when the gameplan explicitly requires one. `step(RunInput)` returns
 progress, an identified waiting state, or a typed terminal outcome with partial
 history, result diagnostics, usage, and any original framework error.
 
-Each step dispatches at most one engine-selected logical provider operation,
+Each sequential step dispatches at most one engine-selected logical provider operation,
 tool invocation, compaction, or maintenance scope, and may settle several local
 effects. Providers may retry synchronously, and callbacks can call provider
 APIs; supplied metering seams count those calls against the run.
+An explicit concurrent batch can dispatch a bounded group of provider operations
+in one step, which waits for that group before returning.
 Events report progress; inputs select an agent, add user text at a turn
 boundary, answer an approval, reconcile an interrupted action, or finish with a
 host-supplied result. `Finish` validates the declared result without an implicit
@@ -425,6 +437,59 @@ Inputs are dictionaries such as
 outcomes carry `status: "progress"`, `"waiting"`, or `"finished"`.
 [`ARCHITECTURE/modules/python-bindings.md`](ARCHITECTURE/modules/python-bindings.md#contracts-and-invariants)
 documents the thin API, callback signatures, and handle lifetimes.
+
+## Concurrent batches
+
+To let the orchestrator assign independent tasks together, add a concurrency
+limit to the gameplan's YAML frontmatter:
+
+```yaml
+loop:
+  max_concurrent_agents: 3
+```
+
+The default is `1`. Above one, the bundled orchestrator prompt explains how to
+select a batch by replying with this explicit block:
+
+````markdown
+```kerness
+{"parallel":[{"agent":"Alice","instruction":"Compare storage options."},{"agent":"Bob","instruction":"Estimate operating costs."}]}
+```
+````
+
+The host-driven Python equivalent is:
+
+```python
+run.step({
+    "kind": "select_agents",
+    "assignments": [
+        {"agent": "Alice", "instruction": "Compare storage options."},
+        {"agent": "Bob", "instruction": "Estimate operating costs."},
+    ],
+})
+```
+
+Rust uses `RunInput::SelectAgents` with a `Vec<AgentAssignment>`. Members must
+be distinct participants still owing a turn this round and fit the remaining
+turn budget. The concurrency limit bounds execution; a batch may contain more
+members than that limit.
+
+Rust callers constructing `LoopSpec` with a struct literal must include the new
+field or use `..Default::default()`. Existing gameplans keep the default of one.
+
+Every member starts with the same conversation snapshot and keeps its own
+tool scratch and loaded skills. Provider calls overlap in bounded groups;
+tool effects and observers run serially on the caller's thread. Approval pauses
+the batch. Once the batch settles, results enter the conversation in assignment
+order and the orchestrator continues with all of them. Successful sibling
+results survive failure or cancellation, and checkpoints retain buffered work
+and pending approvals. Concurrent tasks should be independent: serial tool
+effects do not resolve conflicting file edits.
+
+The Python `run()` and `step()` wrappers release the GIL while the Rust engine
+works. Cancellation remains cooperative, and a step waits for its in-flight
+provider calls to return. The lower-level `OrchestratorLoop::run` callback
+adapter executes batches serially; `Session` uses the concurrent owned engine.
 
 ## What the kernel does while it runs
 

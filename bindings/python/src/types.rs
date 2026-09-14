@@ -1482,7 +1482,9 @@ impl PyLoopSpec {
         advance_on="NEXT_PHASE".to_string(),
         orchestrator_retries=2,
         verdict_rethink=true,
+        max_concurrent_agents=1,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         max_turns: i64,
         max_rounds: i64,
@@ -1491,11 +1493,18 @@ impl PyLoopSpec {
         advance_on: String,
         orchestrator_retries: i64,
         verdict_rethink: bool,
-    ) -> Self {
-        PyLoopSpec {
+        max_concurrent_agents: usize,
+    ) -> PyResult<Self> {
+        if max_concurrent_agents == 0 {
+            return Err(to_py(kerness::Error::Value(
+                "max_concurrent_agents must be at least 1".to_string(),
+            )));
+        }
+        Ok(PyLoopSpec {
             inner: LoopSpec {
                 max_turns,
                 max_rounds,
+                max_concurrent_agents,
                 terminate_on: terminate_on.unwrap_or_else(|| vec!["END_SESSION".to_string()]),
                 phases: phases
                     .unwrap_or_default()
@@ -1506,7 +1515,7 @@ impl PyLoopSpec {
                 orchestrator_retries,
                 verdict_rethink,
             },
-        }
+        })
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -1517,10 +1526,11 @@ impl PyLoopSpec {
 
     fn __repr__(&self) -> String {
         format!(
-            "LoopSpec(max_turns={}, max_rounds={}, phases={})",
+            "LoopSpec(max_turns={}, max_rounds={}, phases={}, max_concurrent_agents={})",
             self.inner.max_turns,
             self.inner.max_rounds,
             self.inner.phases.len(),
+            self.inner.max_concurrent_agents,
         )
     }
 
@@ -1532,6 +1542,11 @@ impl PyLoopSpec {
     #[getter]
     fn max_rounds(&self) -> i64 {
         self.inner.max_rounds
+    }
+
+    #[getter]
+    fn max_concurrent_agents(&self) -> usize {
+        self.inner.max_concurrent_agents
     }
 
     #[getter]

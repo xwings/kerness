@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from threading import Barrier, Event, Lock, get_ident
 
 import pytest
 
@@ -399,6 +400,135 @@ class TestToolCalls:
 
 
 class TestOwnedRunBoundary:
+    @pytest.mark.parametrize("concurrency, mode", [
+        (None, "host_driven"), (2, "host_driven"), (2, "automatic"),
+    ])
+    def test_independent_batches_release_the_gil_and_keep_callback_delivery_order(
+        self, tmp_path, concurrency, mode,
+    ):
+        """Provider callbacks overlap while completed turns return in assignment order."""
+        class ConcurrentProvider(Provider):
+            def __init__(self):
+                super().__init__(retries=0, backoff_sec=0)
+                self.first_pair = Barrier(2, timeout=5)
+                self.bob_finished = Event()
+                self.lock = Lock()
+                self.active = 0
+                self.peak = 0
+                self.calls = []
+                self.finished = []
+                self.threads = set()
+
+            def chat(self, model, messages):
+                with self.lock:
+                    self.active += 1
+                    self.peak = max(self.peak, self.active)
+                    self.calls.append((model, messages))
+                    self.threads.add(get_ident())
+                if concurrency == 2 and model in ("Alice", "Bob"):
+                    self.first_pair.wait()
+                    if model == "Alice":
+                        assert self.bob_finished.wait(timeout=5)
+                with self.lock:
+                    self.active -= 1
+                    self.finished.append(model)
+                if model == "Bob":
+                    self.bob_finished.set()
+                return ProviderResponse(content=f"result for {model}", model=model)
+
+        automatic = mode == "automatic"
+        gameplan = tmp_path / "batch.md"
+        orchestrator = "true" if automatic else "false"
+        limit = "" if concurrency is None else f"  max_concurrent_agents: {concurrency}\n"
+        gameplan.write_text(
+            f"---\nname: batch\nagents:\n  orchestrator: {orchestrator}\n"
+            "  participants: {min: 3}\nloop:\n  max_turns: 10\n  terminate_on: [DONE]\n"
+            f"{limit}result:\n  ok: bool\n---\nIndependent work.\n",
+            encoding="utf-8",
+        )
+        provider = ConcurrentProvider()
+        session = Session(
+            gameplan=str(gameplan), topic="Shared batch context", provider=provider,
+            channel=CaptureChannel(), turn_delay_sec=0,
+            memory=str(tmp_path / "memory.md"), session_file=None,
+            access_policy=confined(tmp_path),
+        )
+        for agent in ("Alice", "Bob", "Cara"):
+            session.add_agent(agent, model=agent)
+        caller = get_ident()
+        events = []
+
+        def observe(event):
+            assert get_ident() == caller
+            events.append(event)
+
+        assignments = [
+            {"agent": agent, "instruction": f"task for {agent}"}
+            for agent in ("Alice", "Bob", "Cara")
+        ]
+        if automatic:
+            moderator = SequenceMockProvider(responses=[
+                "```kerness\n" + json.dumps({"parallel": assignments}) + "\n```",
+                "DONE",
+                '```json\n{"ok":true}\n```',
+            ])
+            session.add_agent("Mod", model="Mod", provider=moderator, role="orchestrator")
+            result = session.run()
+            assert result.end_reason == "keyword"
+            assert result.fields["ok"] is True
+            turns = [
+                (message.sender, message.content) for message in result.history
+                if message.msg_type == "turn" and message.sender != "Mod"
+            ]
+            synthesis = json.dumps(moderator.calls[1]["messages"])
+            for _, content in turns:
+                assert content in synthesis
+        else:
+            run = session.start(mode="host_driven", event_sink=observe)
+            run.step({"kind": "select_agents", "assignments": assignments})
+            with pytest.raises(SessionError, match="boundary|turn|batch"):
+                run.step({"kind": "user_message", "text": "mid-batch"})
+            for _ in range(100):
+                step = run.step()
+                if step["status"] == "waiting":
+                    break
+                assert step["status"] == "progress", step
+            else:
+                pytest.fail("batch did not reach the host boundary")
+            finished = run.step({"kind": "finish", "result": {"ok": True}})
+            assert finished["status"] == "finished"
+            outcome = finished["outcome"]
+            assert outcome["reason"]["kind"] == "completed"
+            turns = [
+                (message["sender"], message["content"])
+                for message in outcome["result"]["history"] if message["msg_type"] == "turn"
+            ]
+            assert outcome["usage"]["totals"]["provider_operations"] == 3
+            kinds = [event["event"] for event in events]
+            first_commit = next(
+                i for i, event in enumerate(kinds) if event["kind"] == "turn_committed"
+            )
+            assert sum(event["kind"] == "provider_finished" for event in kinds[:first_commit]) == 3
+            assert [event["sequence"] for event in events] == list(
+                range(events[0]["sequence"], events[0]["sequence"] + len(events))
+            )
+        assert provider.peak == (concurrency or 1)
+        assert len(provider.calls) == 3
+        if concurrency == 2:
+            assert len(provider.threads) >= 2
+            assert caller not in provider.threads
+            assert provider.finished == ["Bob", "Alice", "Cara"]
+        for model, messages in provider.calls:
+            prompt = json.dumps(messages)
+            assert "Shared batch context" in prompt
+            assert f"task for {model}" in prompt
+            assert "result for " not in prompt
+        assert turns == [
+            ("Alice", "result for Alice"),
+            ("Bob", "result for Bob"),
+            ("Cara", "result for Cara"),
+        ]
+
     @pytest.mark.parametrize("terminal", ["finish", "cancel"])
     def test_inputs_results_events_and_handles_cross_the_boundary(self, tmp_path, terminal):
         """JSON values and independent handles cross once; Rust owns the loop."""
@@ -1244,6 +1374,80 @@ class TestSessionContainment:
 
 
 class TestSessionErrors:
+    @pytest.mark.parametrize("owned", [True, False])
+    @pytest.mark.parametrize("phase", [
+        "opening", "participant", "tool_followup", "final_summary", "batch",
+    ])
+    def test_provider_rejections_keep_the_original_http_details(self, tmp_path, owned, phase):
+        error = ProviderHTTPError(
+            403, "https://example.test/v1/chat/completions",
+            '{"error":{"code":"policy_denied","message":"Request rejected by policy"}}',
+        )
+        replies = {
+            "opening": [],
+            "participant": ["@Alice, answer."],
+            "tool_followup": [
+                "@Alice, answer.",
+                '```tool_calls\n{"tool_calls":[{"name":"lookup","arguments":{}}]}\n```',
+            ],
+            "final_summary": ["END_SESSION"],
+            "batch": [
+                '```kerness\n{"parallel":[{"agent":"Alice","instruction":"Answer."},'
+                '{"agent":"Bob","instruction":"Check."}]}\n```',
+            ],
+        }[phase]
+
+        class RejectingProvider(SequenceMockProvider):
+            def _next_response(self, model):
+                if self._call_index == len(self._responses):
+                    raise error
+                return super()._next_response(model)
+
+        gameplan = tmp_path / "rejections.md"
+        gameplan.write_text(
+            "---\nname: rejections\nagents:\n  orchestrator: true\n"
+            "  participants: {min: 2}\nloop:\n  max_turns: 6\n"
+            "  max_concurrent_agents: 2\n  terminate_on: [END_SESSION]\n---\nAnswer.\n",
+            encoding="utf-8",
+        )
+        provider = RejectingProvider(responses=replies)
+        session = Session(
+            gameplan=str(gameplan), topic="Test rejection", provider=provider,
+            channel=CaptureChannel(), turn_delay_sec=0,
+            memory=str(tmp_path / "memory.md"), session_file=None,
+            access_policy=confined(tmp_path),
+        )
+        for name in ("Alice", "Bob"):
+            session.add_agent(name, model="m")
+        session.add_agent("Mod", model="m", role="orchestrator")
+        effects = []
+        session.add_tool(
+            "lookup", "Look up an answer.", {"type": "object", "properties": {}},
+            lambda args: effects.append(args) or "Looked up answer",
+        )
+        if owned:
+            run = session.start()
+            for _ in range(100):
+                step = run.step()
+                if step["status"] == "finished":
+                    break
+                assert step["status"] == "progress", step
+            else:
+                pytest.fail("provider rejection did not finish the run")
+            assert step["outcome"]["reason"]["kind"] == "failed"
+            assert step["outcome"]["error"] == {"ProviderHttp": {
+                "status_code": error.status_code, "url": error.url, "body": error.body,
+            }}
+        else:
+            with pytest.raises(ProviderHTTPError) as raised:
+                session.run()
+            assert raised.value.status_code == error.status_code
+            assert raised.value.url == error.url
+            assert raised.value.body == error.body
+            assert str(raised.value) == str(error)
+        assert len(provider.calls) == len(replies) + (2 if phase == "batch" else 1)
+        assert effects == ([{}] if phase == "tool_followup" else [])
+
     def test_each_missing_piece_of_a_run_is_named_by_the_error(self):
         """Three ways to be unconfigured, three different messages. They share
         one code path in `run()`'s pre-flight, and a single generic

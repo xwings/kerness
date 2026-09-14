@@ -167,8 +167,8 @@ impl Provider for OpenAiProvider {
 /// Decode the reply as JSON, naming the response shape when it is not.
 ///
 /// The shape rather than the body: a reply that failed to parse is exactly the
-/// text a log should not be filled with, and the key list is enough to tell a
-/// truncated response from a refusal.
+/// text a log should not be filled with. The stop reason identifies truncation;
+/// explicit refusals have already been reported by the response parser.
 fn decode_structured(content: &str, response: &Value, model: &str) -> Result<Value> {
     serde_json::from_str(content).map_err(|err| {
         let keys: Vec<Value> = response
@@ -182,6 +182,13 @@ fn decode_structured(content: &str, response: &Value, model: &str) -> Result<Val
         let mut shape = Map::new();
         shape.insert("keys".to_string(), Value::Array(keys));
         shape.insert("choice_count".to_string(), json!(choice_count));
+        if let Some(reason) = response
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
+        {
+            shape.insert("finish_reason".to_string(), json!(reason));
+        }
         Error::provider(format!(
             "Structured output parsing failed for {model}: {err}. Response shape: {}",
             pyfmt::repr(&Value::Object(shape))

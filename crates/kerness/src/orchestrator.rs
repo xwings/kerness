@@ -382,6 +382,14 @@ pub enum LoopTurnKind {
     Closing,
 }
 
+/// One participant's instruction in an explicitly selected group of turns.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAssignment {
+    pub agent: String,
+    pub instruction: String,
+}
+
 /// One resumable action. Reading it does no IO and does not consume it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -391,6 +399,9 @@ pub enum LoopAction {
         purpose: String,
         instruction: Option<String>,
         kind: LoopTurnKind,
+    },
+    Batch {
+        assignments: Vec<AgentAssignment>,
     },
     Deliver {
         sender: String,
@@ -418,6 +429,7 @@ pub enum LoopAction {
 enum LoopStage {
     Orchestrator { retry: i64 },
     Participant { name: String, instruction: String },
+    Batch { assignments: Vec<AgentAssignment> },
     ClosingDraft,
     ClosingFinal { draft: String },
     Complete,
@@ -507,6 +519,9 @@ impl OrchestratorLoop {
     }
 
     /// Drive the same action machine used by caller-controlled sessions.
+    /// This low-level adapter executes batch members sequentially through its
+    /// host, then delivers their replies together. `SessionRun` supplies the
+    /// concurrent provider execution used by canonical sessions.
     pub fn run(&mut self, host: &mut dyn LoopHost) -> Result<LoopState> {
         if !self.initialized {
             // A completed legacy run can be extended with a larger turn
@@ -523,7 +538,7 @@ impl OrchestratorLoop {
             let action = self.next_action()?;
             if !matches!(
                 action,
-                LoopAction::Turn { .. } | LoopAction::Complete { .. }
+                LoopAction::Turn { .. } | LoopAction::Batch { .. } | LoopAction::Complete { .. }
             ) {
                 // A host callback can save immediately. Its snapshot must
                 // already include the transition and consume this delivery.
@@ -548,6 +563,28 @@ impl OrchestratorLoop {
                         }
                     };
                     self.submit_reply(reply)?;
+                }
+                LoopAction::Batch { assignments } => {
+                    let mut replies = Vec::with_capacity(assignments.len());
+                    for assignment in &assignments {
+                        match host.participant_turn(&assignment.agent, &assignment.instruction) {
+                            Ok(reply) => replies.push(reply),
+                            Err(error) => {
+                                self.submit_batch_partial(
+                                    assignments
+                                        .iter()
+                                        .zip(replies)
+                                        .map(|(assignment, reply)| {
+                                            (assignment.agent.clone(), reply)
+                                        })
+                                        .collect(),
+                                )?;
+                                host.record_position(self.snapshot());
+                                return Err(error);
+                            }
+                        }
+                    }
+                    self.submit_batch(replies)?;
                 }
                 LoopAction::Deliver {
                     sender,
@@ -589,6 +626,9 @@ impl OrchestratorLoop {
                 purpose: format!("turn from {name}"),
                 instruction: Some(instruction.clone()),
                 kind: LoopTurnKind::Participant,
+            },
+            LoopStage::Batch { assignments } => LoopAction::Batch {
+                assignments: assignments.clone(),
             },
             LoopStage::ClosingDraft => LoopAction::Turn {
                 agent: self.orchestrator.clone(),
@@ -638,8 +678,63 @@ impl OrchestratorLoop {
                 });
                 self.stage = LoopStage::Complete;
             }
-            LoopStage::Complete => unreachable!("next_action refused a completed loop"),
+            LoopStage::Batch { .. } | LoopStage::Complete => {
+                unreachable!("next_action refused a non-single-turn loop")
+            }
         }
+        self.record_progress();
+        Ok(())
+    }
+
+    /// Accept every reply in dispatch order, recording the whole group's
+    /// progress before any queued delivery can reach host code.
+    pub fn submit_batch(&mut self, replies: Vec<String>) -> Result<()> {
+        let LoopAction::Batch { assignments } = self.next_action()? else {
+            return Err(Error::session("The loop is not waiting for batch replies"));
+        };
+        if assignments.len() != replies.len() {
+            return Err(Error::session(
+                "The batch reply count does not match its assignments",
+            ));
+        }
+        self.submit_batch_partial(
+            assignments
+                .into_iter()
+                .zip(replies)
+                .map(|(assignment, reply)| (assignment.agent, reply))
+                .collect(),
+        )
+    }
+
+    /// Settle successful members of an interrupted batch without replaying
+    /// failed or unfinished members. Replies must follow assignment order;
+    /// an empty subset is valid when no member completed.
+    pub fn submit_batch_partial(&mut self, replies: Vec<(String, String)>) -> Result<()> {
+        let LoopAction::Batch { assignments } = self.next_action()? else {
+            return Err(Error::session("The loop is not waiting for batch replies"));
+        };
+        let mut next = 0;
+        for (name, _) in &replies {
+            let Some(offset) = assignments[next..]
+                .iter()
+                .position(|assignment| &assignment.agent == name)
+            else {
+                return Err(Error::session(
+                    "Partial batch replies must name assigned participants once, in dispatch order",
+                ));
+            };
+            next += offset + 1;
+        }
+        let mut round_complete = false;
+        for (name, reply) in replies {
+            self.state.turn_count = self.state.turn_count.saturating_add(1);
+            round_complete |= self.phases.record_turn(&name);
+            self.deliver(name, reply, "turn");
+        }
+        if round_complete && !self.phases.exhausted {
+            self.queue_briefing();
+        }
+        self.after_participant();
         self.record_progress();
         Ok(())
     }
@@ -697,6 +792,100 @@ impl OrchestratorLoop {
         Ok(())
     }
 
+    /// Validate a group before the host starts any of its work. A batch stays
+    /// within the current round and reserves one remaining turn per member.
+    pub fn validate_host_batch(&mut self, assignments: &[AgentAssignment]) -> Result<()> {
+        self.initialize_mode(false)?;
+        if self.host_limit_reached()? {
+            return Err(Error::session(
+                "The host-driven run has reached its turn or phase limit",
+            ));
+        }
+        self.validate_batch(assignments, self.state.turn_count)
+    }
+
+    /// Commit a completed host-selected group without automatic routing,
+    /// closing or delivery. Names retain the original assignment order.
+    pub fn commit_host_batch(&mut self, names: &[String]) -> Result<()> {
+        let assignments = names
+            .iter()
+            .map(|name| AgentAssignment {
+                agent: name.clone(),
+                instruction: String::new(),
+            })
+            .collect::<Vec<_>>();
+        self.validate_host_batch(&assignments)?;
+        for name in names {
+            self.state.turn_count = self.state.turn_count.saturating_add(1);
+            self.phases.record_turn(name);
+        }
+        self.record_progress();
+        self.host_limit_reached()?;
+        Ok(())
+    }
+
+    /// Commit and queue host-selected replies as one durable scheduler state.
+    /// The caller drains the queued deliveries before accepting new input.
+    pub fn submit_host_batch(&mut self, replies: Vec<(String, String)>) -> Result<()> {
+        if replies.is_empty() {
+            return Ok(());
+        }
+        let names = replies
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        self.commit_host_batch(&names)?;
+        let first_turn = self.state.turn_count - replies.len() as i64 + 1;
+        for (index, (sender, text)) in replies.into_iter().enumerate() {
+            self.pending.push_back(LoopAction::Deliver {
+                sender,
+                text,
+                turn: first_turn + index as i64,
+                msg_type: "turn".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_batch(&self, assignments: &[AgentAssignment], turn_count: i64) -> Result<()> {
+        if assignments.is_empty() {
+            return Err(Error::session(
+                "A batch must select at least one participant",
+            ));
+        }
+        if i64::try_from(assignments.len()).map_or(true, |count| {
+            count > self.max_turns.saturating_sub(turn_count)
+        }) {
+            return Err(Error::session(
+                "The batch exceeds the remaining turn budget",
+            ));
+        }
+        for (index, assignment) in assignments.iter().enumerate() {
+            if !self.participants.contains(&assignment.agent) {
+                return Err(Error::session(format!(
+                    "Unknown participant '{}' in batch",
+                    assignment.agent
+                )));
+            }
+            if assignments[..index]
+                .iter()
+                .any(|earlier| earlier.agent == assignment.agent)
+            {
+                return Err(Error::session(format!(
+                    "Duplicate participant '{}' in batch",
+                    assignment.agent
+                )));
+            }
+            if !self.phases.pending.contains(&assignment.agent) {
+                return Err(Error::session(format!(
+                    "Participant '{}' already spoke this round",
+                    assignment.agent
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn host_limit_reached(&mut self) -> Result<bool> {
         self.initialize_mode(false)?;
         let reached = self.structure_complete() || self.state.turn_count >= self.max_turns;
@@ -739,6 +928,9 @@ impl OrchestratorLoop {
         if self.initialized {
             return Ok(());
         }
+        if self.spec.max_concurrent_agents == 0 {
+            return Err(Error::session("max_concurrent_agents must be at least 1"));
+        }
         let turn_count = int_at(&self.resume, "turn_count", 0);
         if turn_count < 0 || self.phases.rounds_run < 0 || self.phases.round_in_phase < 0 {
             return Err(Error::session(
@@ -754,13 +946,17 @@ impl OrchestratorLoop {
                 || self.phases.round_in_phase > self.phases.rounds_run
                 || (matches!(
                     saved.stage,
-                    LoopStage::Orchestrator { .. } | LoopStage::Participant { .. }
+                    LoopStage::Orchestrator { .. }
+                        | LoopStage::Participant { .. }
+                        | LoopStage::Batch { .. }
                 ) && turn_count >= self.max_turns)
                 || matches!(saved.stage, LoopStage::Orchestrator { retry } if retry < 0 || retry > self.retries.max(0))
                 || saved.pending.iter().any(|action| {
                     matches!(
                         action,
-                        LoopAction::Turn { .. } | LoopAction::Complete { .. }
+                        LoopAction::Turn { .. }
+                            | LoopAction::Batch { .. }
+                            | LoopAction::Complete { .. }
                     )
                 })
             {
@@ -774,6 +970,9 @@ impl OrchestratorLoop {
                         "Cannot resume pending turn for unknown participant '{name}'"
                     )));
                 }
+            }
+            if let LoopStage::Batch { assignments } = &saved.stage {
+                self.validate_batch(assignments, turn_count)?;
             }
             self.state = saved.state;
             self.stage = saved.stage;
@@ -853,8 +1052,14 @@ impl OrchestratorLoop {
 
     fn accept_orchestrator(&mut self, reply: String, retry: i64) {
         self.state.turn_count = self.state.turn_count.saturating_add(1);
-        let ended = parse_session_end(&reply, &self.spec.terminate_on);
-        let advanced = ended.is_none() && self.phases.advance_requested(&reply);
+        let batch = parse_batch(&reply);
+        // Explicit assignment instructions are data, including any keywords
+        // or @mentions they contain. Only legacy prose carries text controls.
+        let ended = batch
+            .is_none()
+            .then(|| parse_session_end(&reply, &self.spec.terminate_on))
+            .flatten();
+        let advanced = batch.is_none() && ended.is_none() && self.phases.advance_requested(&reply);
         self.deliver(self.orchestrator.clone(), reply.clone(), "orchestrator");
         if let Some(keyword) = ended {
             self.state.consensus_reached = self.spec.consensus_keyword() == Some(keyword.as_str());
@@ -876,6 +1081,26 @@ impl OrchestratorLoop {
             self.closing();
             return;
         }
+        if let Some(batch) = batch {
+            match batch.and_then(|assignments| {
+                self.validate_batch(&assignments, self.state.turn_count)?;
+                Ok(assignments)
+            }) {
+                Ok(assignments) => {
+                    self.stage = LoopStage::Batch {
+                        assignments: assignments
+                            .into_iter()
+                            .map(|assignment| AgentAssignment {
+                                agent: assignment.agent,
+                                instruction: self.turn_instruction(&assignment.instruction),
+                            })
+                            .collect(),
+                    };
+                }
+                Err(error) => self.retry_or_close(retry, Some(error.to_string())),
+            }
+            return;
+        }
         if let Some((name, instruction)) = parse_orchestrator_call(&reply, &self.participants) {
             let asked = if instruction.is_empty() {
                 &reply
@@ -888,9 +1113,18 @@ impl OrchestratorLoop {
             };
         } else if advanced {
             self.stage = LoopStage::Orchestrator { retry: 0 };
-        } else if retry < self.retries {
-            self.pending
-                .push_back(LoopAction::Directive { text: self.hint() });
+        } else {
+            self.retry_or_close(retry, None);
+        }
+    }
+
+    fn retry_or_close(&mut self, retry: i64, detail: Option<String>) {
+        if retry < self.retries {
+            let text = match detail {
+                Some(detail) => format!("Invalid batch: {detail}. {}", self.hint()),
+                None => self.hint(),
+            };
+            self.pending.push_back(LoopAction::Directive { text });
             self.stage = LoopStage::Orchestrator { retry: retry + 1 };
         } else {
             self.state.end_reason = EndReason::Forced;
@@ -927,6 +1161,35 @@ impl OrchestratorLoop {
         }
         hint
     }
+}
+
+/// A dedicated fence makes assignment strings unambiguous with the legacy
+/// text-control protocol. A malformed explicit fence must never fall back to
+/// an @mention or terminator embedded in its payload.
+fn parse_batch(reply: &str) -> Option<Result<Vec<AgentAssignment>>> {
+    if !reply.contains("```kerness") {
+        return None;
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Batch {
+        parallel: Vec<AgentAssignment>,
+    }
+    Some((|| {
+        let body = reply
+            .trim()
+            .strip_prefix("```kerness")
+            .and_then(|text| {
+                text.strip_prefix('\n')
+                    .or_else(|| text.strip_prefix("\r\n"))
+            })
+            .and_then(|text| text.strip_suffix("```"))
+            .filter(|text| !text.contains("```"))
+            .ok_or_else(|| Error::session("A batch reply must be one fenced kerness JSON block"))?;
+        serde_json::from_str::<Batch>(body)
+            .map(|batch| batch.parallel)
+            .map_err(|error| Error::session(format!("Invalid batch assignments: {error}")))
+    })())
 }
 
 /// Build the closing instruction, including the declared result shape.
@@ -1116,6 +1379,7 @@ mod tests {
     struct StubHost {
         replies: VecDeque<String>,
         participant_reply: String,
+        fail_participant: Option<String>,
         /// When set, the closing turn answers with this instead of popping the
         /// queue — so a test can oversupply routing replies without the
         /// leftovers standing in for the summary.
@@ -1147,6 +1411,7 @@ mod tests {
             StubHost {
                 replies: replies.iter().map(|r| r.as_ref().to_string()).collect(),
                 participant_reply: "Said something.".to_string(),
+                fail_participant: None,
                 closing_reply: None,
                 closing_replies: VecDeque::new(),
                 last_closing: None,
@@ -1194,6 +1459,9 @@ mod tests {
         fn participant_turn(&mut self, name: &str, instruction: &str) -> Result<String> {
             self.routed
                 .push((name.to_string(), instruction.to_string()));
+            if self.fail_participant.as_deref() == Some(name) {
+                return Err(Error::session("Participant failed"));
+            }
             Ok(self.participant_reply.clone())
         }
 
@@ -1380,6 +1648,174 @@ mod tests {
             !unknown.directives.is_empty(),
             "an unroutable reply must be re-asked"
         );
+
+        let mut several = StubHost::new(&["@Bob, ask @Alice later.", "END_SESSION"]);
+        run(&mut several, LoopSpec::default());
+        assert_eq!(
+            several.routed[0].0, "Alice",
+            "legacy roster order is unchanged"
+        );
+    }
+
+    #[test]
+    fn explicit_batches_preserve_instructions_and_order_across_checkpoints() {
+        let spec = phased(vec![think(), argue()]);
+        let mut pending = driver(spec.clone());
+        pending.initialize().unwrap();
+        while !pending.pending.is_empty() {
+            pending.acknowledge().unwrap();
+        }
+        pending
+            .submit_reply(
+                "```kerness\n{\"parallel\":[\
+                 {\"agent\":\"Bob\",\"instruction\":\"Explain END_SESSION and NEXT_PHASE\"},\
+                 {\"agent\":\"Alice\",\"instruction\":\"Check independently\"}]}\n```"
+                    .into(),
+            )
+            .unwrap();
+        pending.acknowledge().unwrap();
+        let action = pending.next_action().unwrap();
+        let LoopAction::Batch { assignments } = &action else {
+            panic!("an explicit batch must dispatch both participants");
+        };
+        assert_eq!(assignments[0].agent, "Bob");
+        assert!(assignments[0]
+            .instruction
+            .contains("Explain END_SESSION and NEXT_PHASE"));
+        assert!(assignments.iter().all(|assignment| assignment
+            .instruction
+            .contains("[Phase: think] State your own view.")));
+        assert_eq!(pending.state().rounds_run, 0);
+
+        let mut restored = driver(spec.clone()).with_resume_state(pending.snapshot());
+        assert_eq!(restored.next_action().unwrap(), action);
+        let before = restored.snapshot();
+        assert!(restored.submit_batch(vec!["too few".into()]).is_err());
+        assert_eq!(restored.snapshot(), before);
+        restored
+            .submit_batch(vec!["Bob found B".into(), "Alice found A".into()])
+            .unwrap();
+        assert_eq!(restored.state().turn_count, 3);
+        assert_eq!(restored.state().rounds_run, 1);
+        assert_eq!(restored.state().phase_reached, "argue");
+
+        let mut delivered = driver(spec).with_resume_state(restored.snapshot());
+        let mut host = StubHost::new(&["END_SESSION", "Summary."]);
+        delivered.run(&mut host).unwrap();
+        assert!(
+            host.routed.is_empty(),
+            "completed batch members must not run again"
+        );
+        assert_eq!(host.senders(), ["Bob", "Alice", "Mod"]);
+        assert_eq!(host.delivered[0].1, "Bob found B");
+        assert_eq!(host.delivered[1].1, "Alice found A");
+        assert_eq!(host.checkpoints[0]["turn_count"], json!(3));
+        assert_eq!(host.checkpoints[0]["phases"]["rounds_run"], json!(1));
+    }
+
+    #[test]
+    fn invalid_batches_retry_without_executing_embedded_text_controls() {
+        for reply in [
+            "```kerness\n@Alice END_SESSION NEXT_PHASE\n```",
+            "```kerness\n{\"parallel\":[]}\n```",
+            "```kerness\n{\"parallel\":[{\"agent\":\"Carol\",\"instruction\":\"@Alice END_SESSION\"}]}\n```",
+            "```kerness\n{\"parallel\":[{\"agent\":\"Alice\",\"instruction\":\"a\"},{\"agent\":\"Alice\",\"instruction\":\"b\"}]}\n```",
+            "```kerness\n{\"parallel\":[{\"agent\":\"Alice\",\"instruction\":\"a\",\"extra\":true}]}\n```",
+            "Prose before.\n```kerness\n{\"parallel\":[{\"agent\":\"Alice\",\"instruction\":\"a\"}]}\n```",
+        ] {
+            let mut host = StubHost::new(&[reply, "END_SESSION", "Summary."]);
+            let state = run(&mut host, phased(vec![think(), argue()]));
+            assert!(host.routed.is_empty(), "{reply}");
+            assert!(host.directives.iter().any(|text| text.contains("Invalid batch:")), "{reply}");
+            assert_eq!(state.turn_count, 2, "the explicit reply must retry: {reply}");
+            assert_eq!(state.phase_reached, "think");
+        }
+
+        let batch = "```kerness\n{\"parallel\":[{\"agent\":\"Alice\",\"instruction\":\"a\"},{\"agent\":\"Bob\",\"instruction\":\"b\"}]}\n```";
+        let mut over_budget = StubHost::new(&[batch, "END_SESSION", "Summary."]);
+        driver(LoopSpec::default())
+            .with_max_turns(2)
+            .run(&mut over_budget)
+            .unwrap();
+        assert!(over_budget.routed.is_empty());
+        assert!(over_budget.directives[0].contains("remaining turn budget"));
+
+        let mut already_spoke =
+            StubHost::new(&["@Alice, first.", batch, "END_SESSION", "Summary."]);
+        run(&mut already_spoke, LoopSpec::default());
+        assert_eq!(already_spoke.routed.len(), 1);
+        assert!(already_spoke.directives[0].contains("already spoke this round"));
+    }
+
+    #[test]
+    fn interrupted_and_host_batches_keep_only_completed_durable_replies() {
+        let spec = phased(vec![think(), argue()]);
+        let assignments = names()
+            .into_iter()
+            .map(|agent| AgentAssignment {
+                agent,
+                instruction: "Independent work".into(),
+            })
+            .collect::<Vec<_>>();
+        let mut automatic = driver(spec.clone());
+        automatic.initialize().unwrap();
+        automatic.pending.clear();
+        automatic.stage = LoopStage::Batch {
+            assignments: assignments.clone(),
+        };
+        let before = automatic.snapshot();
+        assert!(automatic
+            .submit_batch_partial(vec![
+                ("Bob".into(), "b".into()),
+                ("Alice".into(), "a".into())
+            ])
+            .is_err());
+        assert_eq!(automatic.snapshot(), before);
+        automatic
+            .submit_batch_partial(vec![("Bob".into(), "completed".into())])
+            .unwrap();
+        assert_eq!(automatic.state().turn_count, 1);
+        assert_eq!(automatic.state().rounds_run, 0);
+        assert_eq!(automatic.snapshot()["phases"]["pending"], json!(["Alice"]));
+        assert!(
+            matches!(automatic.next_action().unwrap(), LoopAction::Deliver { sender, text, turn: 1, .. } if sender == "Bob" && text == "completed")
+        );
+
+        let mut host = driver(spec.clone());
+        host.validate_host_batch(&assignments).unwrap();
+        let before = host.snapshot();
+        assert!(host
+            .validate_host_batch(&[assignments[0].clone(), assignments[0].clone()])
+            .is_err());
+        assert_eq!(host.snapshot(), before);
+        host.submit_host_batch(vec![
+            ("Bob".into(), "b".into()),
+            ("Alice".into(), "a".into()),
+        ])
+        .unwrap();
+        let mut restored = driver(spec).with_resume_state(host.snapshot());
+        assert!(
+            matches!(restored.next_action().unwrap(), LoopAction::Deliver { sender, turn: 1, .. } if sender == "Bob")
+        );
+        assert_eq!(restored.state().turn_count, 2);
+        assert_eq!(restored.state().rounds_run, 1);
+        restored.acknowledge().unwrap();
+        assert!(
+            matches!(restored.next_action().unwrap(), LoopAction::Deliver { sender, turn: 2, .. } if sender == "Alice")
+        );
+
+        let mut failing = StubHost::new(&[
+            "```kerness\n{\"parallel\":[{\"agent\":\"Alice\",\"instruction\":\"a\"},{\"agent\":\"Bob\",\"instruction\":\"b\"}]}\n```",
+        ]);
+        failing.fail_participant = Some("Bob".into());
+        let mut interrupted = driver(LoopSpec::default());
+        assert!(interrupted.run(&mut failing).is_err());
+        assert_eq!(failing.position["turn_count"], json!(2));
+        let mut resumed = driver(LoopSpec::default()).with_resume_state(failing.position);
+        let mut host = StubHost::new(&["END_SESSION", "Summary."]);
+        resumed.run(&mut host).unwrap();
+        assert!(host.routed.is_empty());
+        assert_eq!(host.senders(), ["Alice", "Mod"]);
     }
 
     // ---- Retries ----------------------------------------------------------

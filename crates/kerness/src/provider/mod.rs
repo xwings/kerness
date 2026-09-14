@@ -445,8 +445,13 @@ pub fn supplied_chat_with_retries<P: Provider + ?Sized>(
         // A native tool-use response legitimately carries empty text, so
         // emptiness is only an error when there is no tool call either.
         if response.content.trim().is_empty() && response.tool_calls.is_empty() {
+            let stop = if response.stop_reason.is_empty() {
+                String::new()
+            } else {
+                format!(" (stop reason: {})", response.stop_reason)
+            };
             return Err(Error::ProviderEmpty(format!(
-                "Empty response from {model} for {purpose}"
+                "Empty response from {model} for {purpose}{stop}"
             )));
         }
         Ok(response)
@@ -533,6 +538,25 @@ fn unexpected_response(model: &str, response: &Value) -> Error {
     ))
 }
 
+/// Some gateways return an error envelope with a successful HTTP status.
+/// Keep its code, message, and vendor metadata without inventing an HTTP status.
+fn check_api_error(response: &Value, model: &str) -> Result<()> {
+    if response.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(Error::provider(format!(
+            "API error from {model}: {}",
+            pyfmt::repr(response)
+        )));
+    }
+    Ok(())
+}
+
+fn rejected_response(model: &str, response: &Value, reason: &str) -> Error {
+    Error::provider(format!(
+        "Provider response from {model} indicates {reason}: {}",
+        pyfmt::repr(response)
+    ))
+}
+
 /// The model the backend says answered, which is not always the one asked for.
 fn answering_model(response: &Value, requested: &str) -> String {
     response
@@ -556,20 +580,35 @@ fn reported_usage(response: &Value) -> Map<String, Value> {
 /// `content` is null on a pure tool-call turn, which is why it is coerced
 /// rather than indexed strictly.
 fn openai_response(response: &Value, model: &str) -> Result<(String, Vec<ToolCall>, String)> {
+    check_api_error(response, model)?;
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
-        .ok_or_else(|| unexpected_response(model, response))?;
-    let message = choice
-        .get("message")
-        .filter(|message| message.is_object())
         .ok_or_else(|| unexpected_response(model, response))?;
     let finish_reason = choice
         .get("finish_reason")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    if finish_reason == "content_filter" {
+        return Err(rejected_response(model, response, &finish_reason));
+    }
+    let message = choice
+        .get("message")
+        .filter(|message| message.is_object())
+        .ok_or_else(|| unexpected_response(model, response))?;
+    let refusal = message
+        .get("refusal")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+        || message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| parts.iter().any(|part| part["type"] == "refusal"));
+    if refusal {
+        return Err(rejected_response(model, response, "refusal"));
+    }
 
     let tool_calls = parse_openai_tool_calls(message);
     let content = message.get("content").filter(|content| !content.is_null());
@@ -636,6 +675,10 @@ pub fn convert_messages_for_claude(messages: &[Value]) -> (String, Vec<Value>) {
 /// A response that is only `tool_use` blocks has no text at all, which is
 /// legitimate — so an empty result is an error only when no tool was called.
 fn anthropic_text(response: &Value, model: &str, tool_calls: &[ToolCall]) -> Result<String> {
+    check_api_error(response, model)?;
+    if response["stop_reason"] == "refusal" {
+        return Err(rejected_response(model, response, "refusal"));
+    }
     let blocks = response
         .get("content")
         .and_then(Value::as_array)
@@ -1009,27 +1052,33 @@ mod tests {
 
     #[test]
     fn a_reply_that_is_not_json_is_reported_with_the_response_shape() {
-        let (_guard, _recorder) = install(vec![reply("not json", "gpt-4o", json!({}))]);
-        let error = OpenAiProvider::new(OpenAiConfig {
-            api_key: "sk-test".to_string(),
-            output_schema: Some(answer_schema()),
-            ..OpenAiConfig::default()
-        })
-        .unwrap()
-        .chat("gpt-4o", &[], None, ReasoningEffort::High)
-        .expect_err("the body is not the schema");
+        for (content, stop_reason) in [("not json", ""), (r#"{"answer":"#, "length")] {
+            let mut body = reply(content, "gpt-4o", json!({})).unwrap();
+            body["choices"][0]["finish_reason"] = json!(stop_reason);
+            let (_guard, _recorder) = install(vec![Ok(body)]);
+            let error = OpenAiProvider::new(OpenAiConfig {
+                api_key: "sk-test".to_string(),
+                output_schema: Some(answer_schema()),
+                ..OpenAiConfig::default()
+            })
+            .unwrap()
+            .chat("gpt-4o", &[], None, ReasoningEffort::High)
+            .expect_err("the body is not the schema");
 
-        let message = error.to_string();
-        assert!(
-            message.starts_with("Structured output parsing failed for gpt-4o: "),
-            "{message}"
-        );
-        assert!(
-            message.ends_with(
-                "Response shape: {'keys': ['choices', 'model', 'usage'], 'choice_count': 1}"
-            ),
-            "{message}"
-        );
+            let message = error.to_string();
+            assert!(
+                message.starts_with("Structured output parsing failed for gpt-4o: "),
+                "{message}"
+            );
+            let mut shape = json!({"keys": ["choices", "model", "usage"], "choice_count": 1});
+            if !stop_reason.is_empty() {
+                shape["finish_reason"] = json!(stop_reason);
+            }
+            assert!(
+                message.ends_with(&format!("Response shape: {}", pyfmt::repr(&shape))),
+                "{message}"
+            );
+        }
     }
 
     #[test]
@@ -1167,6 +1216,17 @@ mod tests {
         assert_eq!(collector.snapshot().totals.failed_operations, 3);
         drop(guard);
 
+        let rejection = Error::ProviderHttp {
+            status_code: 429,
+            url: "https://example.com/v1/chat/completions".to_string(),
+            body: r#"{"error":{"code":"rate_limit_exceeded","message":"Please slow down"}}"#
+                .to_string(),
+        };
+        let (guard, recorder) = install(vec![Err(rejection.clone())]);
+        assert_eq!(run(&measured()).unwrap_err(), rejection);
+        assert_eq!(recorder.count(), 3);
+        drop(guard);
+
         let (_guard, recorder) = install(vec![Err(Error::session("always fail"))]);
         let collector = UsageCollector::new(
             RunBudget {
@@ -1257,21 +1317,108 @@ mod tests {
 
     #[test]
     fn every_provider_refuses_a_body_it_cannot_read() {
-        let (_guard, _recorder) = install(vec![Ok(json!({"error": "bad request"}))]);
         let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(openai("sk-test")),
             Box::new(openrouter("sk-test")),
             Box::new(claude("sk-ant-test")),
             Box::new(custom("https://example.com/v1")),
         ];
-        for provider in providers {
-            let error = provider
-                .chat("m", &[user("hi")], None, ReasoningEffort::High)
-                .expect_err("the body is not a reply");
+        for (body, expected) in [
+            (json!({"unexpected": "shape"}), "Unexpected response"),
+            (json!({"error": "bad request"}), "API error"),
+            (
+                json!({"error": {"type": "rate_limit_error", "code": 429,
+                "message": "Please slow down"}, "request_id": "req-123",
+                "choices": [{"message": {"content": "must not succeed"}}],
+                "content": [{"type": "text", "text": "must not succeed"}]}),
+                "API error",
+            ),
+        ] {
+            let (_guard, _recorder) = install(vec![Ok(body.clone())]);
+            for provider in &providers {
+                let error = provider
+                    .chat("m", &[user("hi")], None, ReasoningEffort::High)
+                    .expect_err("the body is not a reply");
+                let message = error.to_string();
+                assert!(
+                    message.starts_with(expected),
+                    "{}: {error}",
+                    provider.name()
+                );
+                assert!(message.contains(&pyfmt::repr(&body)), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_refusals_and_filters_are_errors_even_beside_content_or_tools() {
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(openai("k")),
+            Box::new(openrouter("k")),
+            Box::new(custom("https://example.com/v1")),
+            Box::new(
+                OpenAiProvider::new(OpenAiConfig {
+                    output_schema: Some(answer_schema()),
+                    ..OpenAiConfig::default()
+                })
+                .unwrap(),
+            ),
+        ];
+        for (message, finish_reason, reason) in [
+            (
+                json!({"content": null, "refusal": "Cannot comply with this request"}),
+                "stop",
+                "refusal",
+            ),
+            (
+                json!({"content": "", "refusal": "Cannot comply with this request"}),
+                "stop",
+                "refusal",
+            ),
+            (
+                json!({"content": [{"type": "refusal", "refusal": "Cannot comply"}]}),
+                "stop",
+                "refusal",
+            ),
+            (
+                json!({"content": "partial answer", "tool_calls": [{"id": "c1",
+                "function": {"name": "cmd", "arguments": "{}"}}]}),
+                "content_filter",
+                "content_filter",
+            ),
+        ] {
+            let body = json!({"choices": [{"message": message, "finish_reason": finish_reason}]});
+            let (_guard, _recorder) = install(vec![Ok(body.clone())]);
+            for provider in &providers {
+                let error = provider
+                    .chat("m", &[], None, ReasoningEffort::High)
+                    .unwrap_err();
+                assert!(matches!(error, Error::Provider(_)), "{error}");
+                assert!(
+                    error
+                        .to_string()
+                        .starts_with(&format!("Provider response from m indicates {reason}:")),
+                    "{error}"
+                );
+                assert!(error.to_string().contains(&pyfmt::repr(&body)), "{error}");
+            }
+        }
+        for content in [
+            json!([]),
+            json!([{"type": "text", "text": "Cannot comply"}]),
+        ] {
+            let body = json!({"content": content, "stop_reason": "refusal"});
+            let (_guard, _recorder) = install(vec![Ok(body.clone())]);
+            let error = claude("k")
+                .chat("m", &[], None, ReasoningEffort::High)
+                .unwrap_err();
             assert!(
-                error.to_string().starts_with("Unexpected response"),
-                "{}: {error}",
-                provider.name()
+                error
+                    .to_string()
+                    .starts_with("Provider response from m indicates refusal:"),
+                "{error}"
             );
+            assert!(error.to_string().contains(&pyfmt::repr(&body)), "{error}");
         }
     }
 
@@ -1499,19 +1646,24 @@ mod tests {
         assert_eq!(recorder.count(), 1);
         drop(guard);
 
-        let (_guard, _recorder) = install(vec![Ok(json!({
-            "choices": [{"message": {"content": "   "}}], "model": "m",
-        }))]);
-        let error = OpenAiProvider::new(OpenAiConfig {
-            api_key: "k".to_string(),
-            retries: 0,
-            backoff_sec: 0.0,
-            ..OpenAiConfig::default()
-        })
-        .unwrap()
-        .chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
-        .expect_err("an empty reply beside nothing at all is a failure");
-        assert!(error.is_provider(), "{error}");
+        for stop_reason in ["", "length"] {
+            let (_guard, _recorder) = install(vec![Ok(json!({
+                "choices": [{"message": {"content": "   "}, "finish_reason": stop_reason}], "model": "m",
+            }))]);
+            let error = OpenAiProvider::new(OpenAiConfig {
+                api_key: "k".to_string(),
+                retries: 0,
+                backoff_sec: 0.0,
+                ..OpenAiConfig::default()
+            })
+            .unwrap()
+            .chat_with_retries("m", &[], "turn", None, ReasoningEffort::High)
+            .expect_err("an empty reply beside nothing at all is a failure");
+            assert!(matches!(error, Error::ProviderEmpty(_)), "{error}");
+            if !stop_reason.is_empty() {
+                assert!(error.to_string().contains("stop reason: length"), "{error}");
+            }
+        }
     }
 
     /// Four backends, four spellings. Nothing normalizes between them, so the

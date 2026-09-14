@@ -243,8 +243,8 @@ impl UsageLedger {
     }
 }
 
-/// Hard operation/tool limits are exact at the synchronous action boundary.
-/// Token and cost thresholds can overshoot by the one operation in flight.
+/// Hard operation/tool limits reserve capacity before concurrent actions start.
+/// Token and cost thresholds can overshoot by operations already in flight.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetMode {
@@ -310,6 +310,7 @@ impl std::fmt::Display for BudgetExceeded {
 
 struct CollectorState {
     ledger: UsageLedger,
+    reserved_provider_operations: u64,
     budget: RunBudget,
     pricing: Vec<TokenPricing>,
     started: Instant,
@@ -354,6 +355,7 @@ impl UsageCollector {
         }
         Ok(Self(Arc::new(Mutex::new(CollectorState {
             ledger,
+            reserved_provider_operations: 0,
             budget,
             pricing,
             started: Instant::now(),
@@ -379,15 +381,22 @@ impl UsageCollector {
     /// Check elapsed, token, and cost limits at any action boundary. Provider
     /// and tool counts are checked only for their respective action kinds.
     pub fn check_next(&self) -> Result<()> {
-        self.check(None)
+        Self::check(&mut self.state(), None)
     }
 
     /// Reserve one tool invocation before executing its handler. Denials and
     /// approval waits should not call this; invoked handlers count even on error.
     pub fn begin_tool(&self) -> Result<()> {
-        self.check(Some(false))?;
         let mut state = self.state();
+        Self::check(&mut state, Some(false))?;
         state.ledger.tool_calls = state.ledger.tool_calls.saturating_add(1);
+        Ok(())
+    }
+
+    fn reserve_provider(&self) -> Result<()> {
+        let mut state = self.state();
+        Self::check(&mut state, Some(true))?;
+        state.reserved_provider_operations += 1;
         Ok(())
     }
 
@@ -414,21 +423,24 @@ impl UsageCollector {
         self.with_scope(actor, purpose, || observe(provider, model, true, operation))
     }
 
-    fn check(&self, provider_action: Option<bool>) -> Result<()> {
-        let mut state = self.state();
+    fn check(state: &mut CollectorState, provider_action: Option<bool>) -> Result<()> {
         let budget = &state.budget;
         let ledger = &state.ledger;
         let reason = state.blocked.clone().or_else(|| {
             if budget
                 .max_elapsed_ms
-                .is_some_and(|max| elapsed_ms(&state) >= max)
+                .is_some_and(|max| elapsed_ms(state) >= max)
             {
                 return Some(BudgetExceeded::Elapsed);
             }
             if provider_action == Some(true)
-                && budget
-                    .max_provider_operations
-                    .is_some_and(|max| ledger.totals.provider_operations >= max)
+                && budget.max_provider_operations.is_some_and(|max| {
+                    ledger
+                        .totals
+                        .provider_operations
+                        .saturating_add(state.reserved_provider_operations)
+                        >= max
+                })
             {
                 return Some(BudgetExceeded::ProviderOperations);
             }
@@ -476,6 +488,7 @@ impl UsageCollector {
             _ => NormalizedUsage::default(),
         };
         let mut state = self.state();
+        state.reserved_provider_operations -= 1;
         let cost_microusd = state
             .pricing
             .iter()
@@ -512,7 +525,53 @@ struct Scope {
 
 thread_local! {
     static ACTIVE: RefCell<Option<Scope>> = const { RefCell::new(None) };
+    static OBSERVATIONS: RefCell<Vec<Observation>> = const { RefCell::new(Vec::new()) };
     static CLEANUP: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+struct Observation {
+    collector: UsageCollector,
+    reserved: bool,
+}
+
+struct ObservationGuard(bool);
+
+impl ObservationGuard {
+    fn enter(collector: &UsageCollector) -> Result<Self> {
+        OBSERVATIONS.with(|observations| {
+            let mut observations = observations.borrow_mut();
+            let inherited = observations
+                .iter_mut()
+                .rev()
+                .find(|observation| Arc::ptr_eq(&observation.collector.0, &collector.0))
+                .is_some_and(|parent| std::mem::take(&mut parent.reserved));
+            if !inherited {
+                collector.reserve_provider()?;
+            }
+            // The first nested dispatch owns the wrapper's reservation. Later
+            // attempts reserve independently; delegated wrappers never record.
+            observations.push(Observation {
+                collector: collector.clone(),
+                reserved: true,
+            });
+            Ok(Self(true))
+        })
+    }
+
+    fn take(&mut self) -> Option<Observation> {
+        if !std::mem::take(&mut self.0) {
+            return None;
+        }
+        OBSERVATIONS.with(|observations| observations.borrow_mut().pop())
+    }
+}
+
+impl Drop for ObservationGuard {
+    fn drop(&mut self) {
+        if let Some(observation) = self.take().filter(|observation| observation.reserved) {
+            observation.collector.state().reserved_provider_operations -= 1;
+        }
+    }
 }
 
 /// Cleanup may flush resources but cannot start framework provider work. The
@@ -583,11 +642,9 @@ fn observe(
     let Some(scope) = scope else {
         return operation();
     };
-    scope.collector.check(Some(true))?;
-    let before = scope.collector.state().ledger.totals.provider_operations;
+    let mut observation = ObservationGuard::enter(&scope.collector)?;
     let result = operation();
-    let after = scope.collector.state().ledger.totals.provider_operations;
-    if before == after && scope.collector.blocked_reason().is_none() {
+    if observation.take().is_some_and(|entry| entry.reserved) {
         scope.collector.record(
             &scope.actor,
             provider,
@@ -782,6 +839,109 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_calls_keep_nested_attempts_and_opaque_attribution() {
+        let collector = UsageCollector::new(RunBudget::default(), vec![pricing()]).unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, resumed) = std::sync::mpsc::channel();
+        std::thread::scope(|threads| {
+            let worker_collector = &collector;
+            let pending = threads.spawn(move || {
+                worker_collector.provider_call("alice", "provider", "model", "turn", || {
+                    observe_attempt("provider", "model", || {
+                        started.send(()).unwrap();
+                        resumed
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        reply(2, 3)
+                    })
+                })
+            });
+            ready
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let opaque =
+                collector.provider_call("bob", "provider", "model", "override", || reply(1, 1));
+            release.send(()).unwrap();
+            pending.join().unwrap().unwrap();
+            opaque.unwrap();
+        });
+        let ledger = collector.snapshot();
+        assert_eq!(ledger.totals.provider_operations, 2);
+        assert_eq!(ledger.totals.opaque_operations, 1);
+        assert_eq!(ledger.totals.usage.total_tokens, None);
+        assert_eq!(ledger.by_actor()["alice"].usage.total_tokens, Some(5));
+        assert_eq!(ledger.by_actor()["alice"].cost_microusd, Some(8));
+        assert_eq!(ledger.by_actor()["bob"].provider_operations, 1);
+        assert_eq!(ledger.records[0].actor, "bob");
+        assert_eq!(ledger.records[0].purpose, "override");
+        assert!(ledger.records[0].opaque);
+        assert_eq!(ledger.records[1].actor, "alice");
+        assert_eq!(ledger.records[1].purpose, "turn");
+        assert!(!ledger.records[1].opaque);
+    }
+
+    #[test]
+    fn concurrent_retries_reserve_capacity_and_record_in_flight_results() {
+        let collector = UsageCollector::new(
+            RunBudget {
+                max_provider_operations: Some(3),
+                ..RunBudget::default()
+            },
+            vec![pricing()],
+        )
+        .unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, resumed) = std::sync::mpsc::channel();
+        std::thread::scope(|threads| {
+            let worker_collector = &collector;
+            let pending = threads.spawn(move || {
+                worker_collector.provider_call("alice", "provider", "model", "turn", || {
+                    observe_attempt("provider", "model", || {
+                        started.send(()).unwrap();
+                        resumed
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        reply(2, 3)
+                    })
+                })
+            });
+            ready
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let retry = collector.provider_call("bob", "provider", "model", "turn", || {
+                let _ = observe_provider_call("provider", "model", "initial", || {
+                    observe_attempt("provider", "model", || Err(Error::provider("retry")))
+                });
+                observe_provider_call("provider", "model", "retry", || {
+                    observe_attempt("provider", "model", || reply(2, 3))
+                })?;
+                observe_provider_call("provider", "model", "exhausted", || {
+                    observe_attempt("provider", "model", || reply(2, 3))
+                })
+            });
+            release.send(()).unwrap();
+            pending.join().unwrap().unwrap();
+            assert!(
+                retry.is_err(),
+                "in-flight calls reserve the remaining capacity"
+            );
+        });
+        let ledger = collector.snapshot();
+        assert_eq!(
+            collector.blocked_reason(),
+            Some(BudgetExceeded::ProviderOperations)
+        );
+        assert_eq!(ledger.totals.provider_operations, 3);
+        assert_eq!(ledger.totals.failed_operations, 1);
+        assert_eq!(ledger.totals.opaque_operations, 0);
+        assert_eq!(ledger.by_actor()["alice"].usage.total_tokens, Some(5));
+        assert_eq!(ledger.by_actor()["bob"].provider_operations, 2);
+        assert_eq!(ledger.records[0].purpose, "initial");
+        assert_eq!(ledger.records[1].purpose, "retry");
+        assert_eq!(ledger.records[2].actor, "alice");
+    }
+
+    #[test]
     fn scopes_restore_on_return_and_unwind_without_cross_run_attribution() {
         let one = UsageCollector::new(RunBudget::default(), vec![]).unwrap();
         let two = UsageCollector::new(RunBudget::default(), vec![]).unwrap();
@@ -838,6 +998,24 @@ mod tests {
             without_provider_calls::<()>(|| Err(failure.clone())),
             Err(failure)
         );
+
+        let limited = UsageCollector::new(
+            RunBudget {
+                max_provider_operations: Some(1),
+                ..RunBudget::default()
+            },
+            vec![],
+        )
+        .unwrap();
+        let panicked = std::panic::catch_unwind(|| {
+            limited.provider_call("panic", "provider", "model", "turn", || {
+                observe_attempt("provider", "model", || panic!("provider callback"))
+            })
+        });
+        assert!(panicked.is_err());
+        call(&limited, "after panic", "turn").unwrap();
+        assert_eq!(limited.snapshot().totals.provider_operations, 1);
+        assert_eq!(limited.snapshot().records[0].actor, "after panic");
     }
 
     #[test]
@@ -897,6 +1075,31 @@ mod tests {
         assert!(collector.begin_tool().is_err());
         assert_eq!(collector.snapshot().tool_calls, 1);
         assert_eq!(collector.blocked_reason(), Some(BudgetExceeded::ToolCalls));
+        let collector = UsageCollector::new(
+            RunBudget {
+                max_tool_calls: Some(7),
+                ..RunBudget::default()
+            },
+            vec![],
+        )
+        .unwrap();
+        let start = std::sync::Barrier::new(32);
+        let admitted = std::thread::scope(|threads| {
+            let pending: Vec<_> = (0..32)
+                .map(|_| {
+                    threads.spawn(|| {
+                        start.wait();
+                        u64::from(collector.begin_tool().is_ok())
+                    })
+                })
+                .collect();
+            pending
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .sum::<u64>()
+        });
+        assert_eq!(admitted, 7);
+        assert_eq!(collector.snapshot().tool_calls, admitted);
         let collector = UsageCollector::new(
             RunBudget {
                 max_provider_operations: Some(0),

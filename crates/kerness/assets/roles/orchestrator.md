@@ -17,5 +17,5 @@ Participants:
 Rules:
 - To have a participant speak, mention them with @ (e.g. @{first_participant}, present your opening argument)
 - You can give them specific instructions after the @ mention
-- Only call on ONE participant at a time
+{dispatch_rules}
 {end_rules}{flow_rules}{rounds_rule}{orchestrator_instruction}

@@ -503,10 +503,14 @@ fn a_saved_native_approval_resumes_after_completed_tools_without_replaying_them(
         "next_event",
         "request_id",
         "call_id",
+        "active_id",
     ] {
         let mut malformed = suspended.clone();
         let runtime = &mut malformed["loop"]["runtime"];
-        let expected = if field == "request_id" {
+        let expected = if field == "active_id" {
+            runtime["active"]["id"] = json!(u64::MAX - 1);
+            "active turn identity"
+        } else if field == "request_id" {
             runtime["approval"][field] = json!("mismatched-request");
             "approval identity"
         } else if field == "call_id" {
@@ -619,6 +623,296 @@ fn a_saved_native_approval_resumes_after_completed_tools_without_replaying_them(
             (json!("c2"), json!("second"))
         ]
     );
+}
+
+#[test]
+fn batch_approvals_and_partial_delivery_resume_without_replaying_siblings() {
+    use kerness::tooling::Arguments;
+    use kerness::{
+        AgentAssignment, ContextToolHandler, PreflightAction, RunEventKind, RunInput, StepOutcome,
+        ToolContext, ToolIdentity, WaitReason,
+    };
+    use serde_json::json;
+
+    struct Record {
+        calls: Arc<Mutex<Vec<String>>>,
+        current: std::path::PathBuf,
+        intent: std::path::PathBuf,
+    }
+    impl ContextToolHandler for Record {
+        fn preflight(
+            &self,
+            _: &Arguments,
+            _: &ToolIdentity,
+        ) -> kerness::Result<Option<PreflightAction>> {
+            Ok(Some(PreflightAction::Confirm {
+                description: "Record once".into(),
+            }))
+        }
+        fn call(&self, _: &Arguments, context: &ToolContext) -> kerness::Result<String> {
+            assert_eq!(context.identity().actor(), "P1");
+            std::fs::copy(&self.current, &self.intent).unwrap();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(context.identity().call_id().into());
+            Ok("recorded once".into())
+        }
+    }
+
+    let temp = TempDir::new("batch-resume");
+    let first = common::ToolProvider::new(
+        kerness::ToolDialect::Openai,
+        vec![kerness::ProviderResponse::text("P0 completed")],
+    )
+    .shared();
+    let second = common::ToolProvider::new(
+        kerness::ToolDialect::Openai,
+        vec![
+            common::tool_call_reply("record", json!({}), "record"),
+            kerness::ProviderResponse::text("P1 completed"),
+        ],
+    )
+    .shared();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let handler = Arc::new(Record {
+        calls: calls.clone(),
+        current: temp.join("run.json"),
+        intent: temp.join("intent.json"),
+    });
+    let build = || {
+        let path = temp.write(
+            "batch.md",
+            &HOST_RESUME.replace(
+                "  max_turns: 10",
+                "  max_turns: 10\n  max_concurrent_agents: 2",
+            ),
+        );
+        let mut settings = config(&path.to_string_lossy(), "Resume a batch", first.clone());
+        confine(&mut settings, &temp);
+        settings.session_file = Some(temp.str_join("run.json"));
+        settings.channel = Some(RecordingChannel::new());
+        let mut session = Session::new(settings).unwrap();
+        session
+            .add_agent(Agent::new("P0").with_model("model"))
+            .unwrap();
+        session
+            .add_agent(Agent {
+                provider: Some(second.clone()),
+                ..Agent::new("P1").with_model("model")
+            })
+            .unwrap();
+        session
+            .add_contextual_tool(kerness::ContextToolSpec::new(
+                "record",
+                "Record",
+                json!({"type":"object"}),
+                handler.clone(),
+            ))
+            .unwrap();
+        session
+    };
+    let mut run = build().start(host_options()).unwrap();
+    run.step(RunInput::SelectAgents {
+        assignments: ["P0", "P1"]
+            .into_iter()
+            .map(|agent| AgentAssignment {
+                agent: agent.into(),
+                instruction: "Work independently".into(),
+            })
+            .collect(),
+    })
+    .unwrap();
+    let WaitReason::Approval { request } = waiting(&mut run) else {
+        panic!("approval required")
+    };
+    assert_eq!((first.call_count(), second.call_count()), (1, 1));
+    assert!(calls.lock().unwrap().is_empty());
+    let suspended = saved(&temp, "run.json");
+    assert_eq!(
+        suspended["loop"]["runtime"]["batch"]["completed"][0]["agent"],
+        "P0"
+    );
+    assert_eq!(
+        suspended["loop"]["turn_count"], 0,
+        "results are buffered until join"
+    );
+    drop(run);
+
+    for mutation in [
+        "duplicate_id",
+        "assignment_order",
+        "committing",
+        "uninitialized_active",
+        "counter_overflow",
+    ] {
+        let mut malformed = suspended.clone();
+        let runtime = &mut malformed["loop"]["runtime"];
+        match mutation {
+            "duplicate_id" => {
+                runtime["batch"]["completed"][0]["id"] = runtime["active"]["id"].clone()
+            }
+            "assignment_order" => runtime["batch"]["agents"] = json!(["P1", "P0"]),
+            "committing" => runtime["batch"]["committing"] = json!(true),
+            "counter_overflow" => {
+                runtime["batch"]["committing"] = json!(true);
+                runtime["batch"]["turn_count_before"] = json!(i64::MAX);
+            }
+            "uninitialized_active" => {
+                runtime["batch"]["history"] = Value::Null;
+                runtime["active"]["state"] = Value::Null;
+                runtime["approval"] = Value::Null;
+                runtime["batch"]["completed"][0]["state"] = Value::Null;
+            }
+            _ => unreachable!(),
+        }
+        std::fs::write(
+            temp.join("run.json"),
+            serde_json::to_vec(&malformed).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            refusal(build().start(host_options())).contains("inconsistent batch"),
+            "{mutation}"
+        );
+    }
+    std::fs::write(
+        temp.join("run.json"),
+        serde_json::to_vec(&suspended).unwrap(),
+    )
+    .unwrap();
+
+    let interrupted = Arc::new(Mutex::new(None::<Value>));
+    let capture = interrupted.clone();
+    let path = temp.join("run.json");
+    let mut options = host_options();
+    options.event_sink = Some(Arc::new(move |event: &kerness::RunEvent| {
+        if matches!(&event.event, RunEventKind::TurnCommitted { actor, .. } if actor == "P0") {
+            *capture.lock().unwrap() =
+                Some(serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap());
+        }
+        Ok(())
+    }));
+    let mut cancelled = build().start(options).unwrap();
+    cancelled.control().cancel();
+    let StepOutcome::Finished { outcome } = cancelled.step(RunInput::Continue).unwrap() else {
+        panic!("cancelled")
+    };
+    assert_eq!(outcome.reason, kerness::RunReason::Cancelled);
+    let events = cancelled.drain_events();
+    let committed = events.iter().find(|event| matches!(&event.event, RunEventKind::TurnCommitted { actor, .. } if actor == "P0")).unwrap();
+    assert_eq!(
+        committed.turn_id,
+        suspended["loop"]["runtime"]["batch"]["completed"][0]["id"]
+            .as_u64()
+            .unwrap()
+    );
+    drop(cancelled);
+    let mut terminal = build().start(host_options()).unwrap();
+    assert!(
+        matches!(terminal.step(RunInput::Continue).unwrap(), StepOutcome::Finished { outcome } if outcome.reason == kerness::RunReason::Cancelled)
+    );
+    drop(terminal);
+    std::fs::write(
+        temp.join("run.json"),
+        serde_json::to_vec(interrupted.lock().unwrap().as_ref().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let mut interrupted = build().start(host_options()).unwrap();
+    assert!(
+        matches!(interrupted.step(RunInput::Continue).unwrap(), StepOutcome::Finished { outcome } if outcome.reason == kerness::RunReason::Cancelled)
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "saved cancellation must not request approval or execute the tool"
+    );
+    drop(interrupted);
+    std::fs::write(
+        temp.join("run.json"),
+        serde_json::to_vec(&suspended).unwrap(),
+    )
+    .unwrap();
+
+    let delivery = Arc::new(Mutex::new(None::<Value>));
+    let capture = delivery.clone();
+    let path = temp.join("run.json");
+    let mut options = host_options();
+    options.event_sink = Some(Arc::new(move |event: &kerness::RunEvent| {
+        if matches!(&event.event, RunEventKind::TurnCommitted { actor, .. } if actor == "P0") {
+            *capture.lock().unwrap() =
+                Some(serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap());
+        }
+        Ok(())
+    }));
+    let mut resumed = build().start(options).unwrap();
+    assert_eq!(
+        waiting(&mut resumed),
+        WaitReason::Approval {
+            request: request.clone()
+        }
+    );
+    resumed
+        .step(RunInput::Approve {
+            request_id: request.request_id.clone(),
+            approved: true,
+        })
+        .unwrap();
+    assert_eq!(waiting(&mut resumed), WaitReason::Input);
+    assert_eq!((first.call_count(), second.call_count()), (1, 2));
+    assert_eq!(
+        &*calls.lock().unwrap(),
+        &[request.identity.call_id().to_string()]
+    );
+    assert_eq!(resumed.usage().totals.provider_operations, 3);
+    assert_eq!(resumed.usage().tool_calls, 1);
+    drop(resumed);
+
+    // A crash during join has one delivery left in the scheduler; both paid
+    // replies and their identity metadata already exist in the checkpoint.
+    std::fs::write(
+        temp.join("run.json"),
+        serde_json::to_vec(delivery.lock().unwrap().as_ref().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let mut resumed = build().start(host_options()).unwrap();
+    assert_eq!(waiting(&mut resumed), WaitReason::Input);
+    assert_eq!((first.call_count(), second.call_count()), (1, 2));
+    let StepOutcome::Finished { outcome } = resumed
+        .step(RunInput::Finish { result: json!({}) })
+        .unwrap()
+    else {
+        panic!("finished")
+    };
+    let replies: Vec<_> = outcome
+        .result
+        .history
+        .iter()
+        .filter(|message| message.msg_type == "turn")
+        .map(|message| (message.sender.as_str(), message.content.as_str()))
+        .collect();
+    assert_eq!(replies, [("P0", "P0 completed"), ("P1", "P1 completed")]);
+    drop(resumed);
+
+    // Restoring the earlier intent requires reconciliation; neither sibling
+    // nor the already-performed tool is replayed.
+    std::fs::copy(temp.join("intent.json"), temp.join("run.json")).unwrap();
+    let mut resumed = build().start(host_options()).unwrap();
+    let WaitReason::Indeterminate { action_id, .. } = waiting(&mut resumed) else {
+        panic!("reconciliation required")
+    };
+    resumed
+        .step(RunInput::Reconcile {
+            action_id,
+            result: kerness::ToolResult {
+                name: "record".into(),
+                content: "recorded once".into(),
+                is_error: false,
+            },
+        })
+        .unwrap();
+    assert_eq!(waiting(&mut resumed), WaitReason::Input);
+    assert_eq!((first.call_count(), second.call_count()), (1, 3));
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }
 
 #[test]

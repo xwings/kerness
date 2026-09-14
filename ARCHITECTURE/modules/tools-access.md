@@ -70,6 +70,10 @@ in `exec.rs` require preserving their documented size/lifetime assumptions.
   use after return fails, and command preflight grants one frozen command/cwd
   once. Session memory/snapshot/channel file destinations are also checked at
   setup, before model tools can run (`session.rs`, `access_e2e.rs`).
+- Batches serialize tool effects and approvals on the calling thread. Each turn
+  retains its own skill activation and selected permissions; workers receive
+  captured tool specs. Read [batch contracts](../topics/concurrent-batches.md)
+  when changing tool selection or concurrent turn identity.
 
 ## Dependencies and Boundaries
 

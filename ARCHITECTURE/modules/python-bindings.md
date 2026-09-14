@@ -58,6 +58,11 @@ fixtures in `tests/conftest.py` and patched `kerness.provider.http_post_json`.
 - `session.start(mode="host_driven")` returns an owned run; `step` accepts tagged
   dictionaries and returns progress/waiting/finished dictionaries matching Rust
   serialization. An event sink receives one event dictionary (`src/run.rs`).
+- `LoopSpec.max_concurrent_agents` exposes the positive batch cap (default one).
+  `select_agents` accepts assignment dictionaries. Both `Session.run` and
+  `SessionRun.step` release the GIL while the kernel runs provider batches;
+  Python callbacks reacquire it. Read [batch contracts](../topics/concurrent-batches.md)
+  when changing these scheduling or callback boundaries.
 - Contextual handlers receive `(arguments, context)`; optional preflight receives
   `(arguments, identity)` and returns `None` or a declared action dictionary.
   The detached context handle retains engine identity but expires after the
@@ -67,6 +72,7 @@ fixtures in `tests/conftest.py` and patched `kerness.provider.http_post_json`.
   decides which Python keywords can be forwarded; retry/fallback policies stay
   in Rust. Pydantic is optional via `structured`; schema/response validation must
   not alter plain-text or tool-only behavior (`kerness/provider.py`).
+  JSON/schema decoding failures retain reported stop reasons.
 - Workspace version is the artifact version source; Python exports the compiled
   extension's version. PyO3 uses `abi3-py310`. Package README/LICENSE symlinks
   supply metadata. Bundled asset copies must agree with Rust; build rules exclude

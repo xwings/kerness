@@ -23,6 +23,9 @@ use crate::tooling::{ToolCall, INVALID_CALL};
 use crate::toolkit::ToolResult;
 use crate::usage::{BudgetExceeded, RunBudget, TokenPricing, UsageCollector, UsageLedger};
 
+mod batch;
+use batch::BatchState;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
@@ -105,6 +108,10 @@ pub enum RunInput {
     SelectAgent {
         agent: String,
         instruction: String,
+    },
+    /// Assign independent participant turns against one conversation snapshot.
+    SelectAgents {
+        assignments: Vec<crate::orchestrator::AgentAssignment>,
     },
     UserMessage {
         text: String,
@@ -212,6 +219,8 @@ pub struct RunEvent {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActiveTurn {
+    #[serde(default)]
+    id: u64,
     agent: String,
     purpose: String,
     instruction: Option<String>,
@@ -219,6 +228,12 @@ struct ActiveTurn {
     state: Option<AgentTurn>,
     needs_fit: bool,
     overflow_retry: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    loaded_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    exchanges: Vec<Value>,
+    #[serde(skip)]
+    activation: Option<Arc<crate::skill::runtime::SkillActivation>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -246,6 +261,8 @@ struct RuntimeSnapshot {
     started: bool,
     contract: Value,
     active: Option<ActiveTurn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    batch: Option<BatchState>,
     approval: Option<ApprovalRequest>,
     approved: bool,
     intent: Option<ActionIntent>,
@@ -259,13 +276,15 @@ struct RuntimeSnapshot {
 /// An owned run. A step dispatches at most one engine-selected provider
 /// operation, tool invocation or memory-maintenance scope, and may settle
 /// multiple local effects. Providers can retry and callbacks can make nested
-/// calls synchronously. Dropping closes resources; durable suspension requires
+/// calls synchronously. An explicitly selected batch can dispatch a bounded
+/// group of provider operations concurrently; the step joins them before
+/// returning. Tools and observers still run on the caller's thread.
+/// Dropping closes resources; durable suspension requires
 /// a configured session file and a successful checkpoint.
 pub struct SessionRun {
     pub(super) session: Session,
     scheduler: OrchestratorLoop,
     options: RunOptions,
-    legacy: bool,
     control: RunControl,
     usage: UsageCollector,
     run_id: String,
@@ -275,6 +294,7 @@ pub struct SessionRun {
     started: bool,
     contract: Value,
     active: Option<ActiveTurn>,
+    batch: Option<BatchState>,
     approval: Option<ApprovalRequest>,
     approved: bool,
     intent: Option<ActionIntent>,
@@ -313,7 +333,6 @@ impl SessionRun {
             session,
             scheduler,
             options,
-            legacy,
             control: RunControl::default(),
             usage,
             run_id,
@@ -323,6 +342,7 @@ impl SessionRun {
             started: false,
             contract,
             active: None,
+            batch: None,
             approval: None,
             approved: false,
             intent: None,
@@ -491,6 +511,18 @@ impl SessionRun {
                     LoopTurnKind::Participant,
                 )
             }
+            RunInput::SelectAgents { mut assignments } => {
+                self.require_boundary()?;
+                if self.options.mode != RunMode::HostDriven {
+                    return Err(Error::session("Agent selection requires host_driven mode."));
+                }
+                self.scheduler.validate_host_batch(&assignments)?;
+                for assignment in &mut assignments {
+                    assignment.instruction =
+                        self.scheduler.host_instruction(&assignment.instruction);
+                }
+                self.begin_batch(assignments)
+            }
             RunInput::UserMessage { text } => {
                 self.require_boundary()?;
                 self.session.conversation.directive(text);
@@ -509,6 +541,7 @@ impl SessionRun {
 
     fn require_boundary(&self) -> Result<()> {
         if self.active.is_some()
+            || self.batch.is_some()
             || self.approval.is_some()
             || self.intent.is_some()
             || self.closing.is_some()
@@ -528,6 +561,9 @@ impl SessionRun {
         }
         if self.closing.is_some() {
             return self.advance_closing();
+        }
+        if self.batch.as_ref().is_some_and(BatchState::is_interrupted) {
+            return self.advance_batch();
         }
         if let Some(intent) = &self.intent {
             self.usage.check_next()?;
@@ -580,6 +616,9 @@ impl SessionRun {
                 return Ok(StepOutcome::Progress);
             }
         }
+        if self.batch.is_some() {
+            return self.advance_batch();
+        }
         if self.active.is_some() {
             return self.advance_turn();
         }
@@ -598,6 +637,7 @@ impl SessionRun {
             } => {
                 self.begin_turn(agent, purpose, instruction, kind)?;
             }
+            LoopAction::Batch { assignments } => self.begin_batch(assignments)?,
             LoopAction::Complete { .. } => return self.finish(RunReason::Completed, None, None),
             effect => self.apply_effect(effect)?,
         }
@@ -613,6 +653,7 @@ impl SessionRun {
                 msg_type,
             } => {
                 self.scheduler.acknowledge()?;
+                self.commit_batch_exchanges(&sender);
                 self.deliver(&sender, &text, turn, &msg_type)?;
             }
             LoopAction::Directive { text } => {
@@ -644,6 +685,9 @@ impl SessionRun {
     // Commit already-paid responses before applying cancellation or a budget
     // to the next operation. This never starts a provider or invokes a tool.
     fn settle_ready(&mut self) -> Result<()> {
+        if self.batch.is_some() {
+            return self.settle_batch(true);
+        }
         if let Some(active) = &self.active {
             let Some(turn) = &active.state else {
                 return Ok(());
@@ -665,7 +709,9 @@ impl SessionRun {
         if self.options.mode == RunMode::Automatic {
             loop {
                 match self.scheduler.next_action()? {
-                    LoopAction::Turn { .. } | LoopAction::Complete { .. } => break,
+                    LoopAction::Turn { .. }
+                    | LoopAction::Batch { .. }
+                    | LoopAction::Complete { .. } => break,
                     effect => self.apply_effect(effect)?,
                 }
             }
@@ -706,6 +752,7 @@ impl SessionRun {
             .checked_add(1)
             .ok_or_else(|| Error::session("Run turn identity exhausted."))?;
         self.active = Some(ActiveTurn {
+            id: self.turn_id,
             agent: name,
             purpose,
             instruction: if kind == LoopTurnKind::Closing {
@@ -717,6 +764,9 @@ impl SessionRun {
             state: None,
             needs_fit: true,
             overflow_retry: false,
+            loaded_skills: Vec::new(),
+            exchanges: Vec::new(),
+            activation: lock(&self.session.shared.activation).clone(),
         });
         self.checkpoint()
     }
@@ -804,10 +854,8 @@ impl SessionRun {
             &self.session.dispatcher,
             &active.base_prompt,
         )
-        .with_tools(move || advertising.active_tools());
-        if !self.legacy {
-            runner = runner.with_strict_errors();
-        }
+        .with_tools(move || advertising.active_tools())
+        .with_strict_errors();
         let result = self
             .usage
             .with_scope(&agent.name, &active.purpose, || runner.advance(&mut turn));
@@ -855,8 +903,13 @@ impl SessionRun {
             ToolIdentity {
                 actor,
                 run_id: self.run_id.clone(),
-                turn_id: self.turn_id,
-                call_id: format!("{}:{}:{}", self.run_id, self.turn_id, self.next_call),
+                turn_id: self.active.as_ref().unwrap().id,
+                call_id: format!(
+                    "{}:{}:{}",
+                    self.run_id,
+                    self.active.as_ref().unwrap().id,
+                    self.next_call
+                ),
             }
         };
         if let Some(result) = invalid {
@@ -1032,6 +1085,12 @@ impl SessionRun {
     }
 
     fn record_exchanges(&mut self, turn: &mut AgentTurn) {
+        if self.batch.is_some() {
+            if let Some(active) = &mut self.active {
+                active.exchanges.extend(turn.take_recorded());
+                return;
+            }
+        }
         for message in turn.take_recorded() {
             if self.session.tool_results_in_history {
                 self.session.conversation.raw(
@@ -1081,6 +1140,9 @@ impl SessionRun {
             outcome.reason = reason;
             outcome.error = error;
             return self.finalize(outcome);
+        }
+        if reason != RunReason::Completed {
+            self.interrupt_batch(reason.clone(), error.clone());
         }
         if let Err(failure) = self.settle_ready() {
             if error.is_none() {
@@ -1225,10 +1287,21 @@ impl SessionRun {
     }
 
     fn emit(&mut self, event: RunEventKind) -> Result<()> {
+        let id = if let RunEventKind::TurnCommitted { actor, .. } = &event {
+            self.batch.as_ref().and_then(|batch| batch.turn_id(actor))
+        } else {
+            None
+        }
+        .or_else(|| self.active.as_ref().map(|turn| turn.id))
+        .unwrap_or(self.turn_id);
+        self.emit_for(id, event)
+    }
+
+    fn emit_for(&mut self, turn_id: u64, event: RunEventKind) -> Result<()> {
         let event = RunEvent {
             sequence: self.next_event,
             run_id: self.run_id.clone(),
-            turn_id: self.turn_id,
+            turn_id,
             event,
         };
         self.next_event = self
@@ -1254,7 +1327,8 @@ impl SessionRun {
             next_event: self.next_event,
             started: self.started,
             contract: self.contract.clone(),
-            active: self.active.clone(),
+            active: self.active.as_ref().map(ActiveTurn::captured),
+            batch: self.batch.as_ref().map(BatchState::captured),
             approval: self.approval.clone(),
             approved: self.approved,
             intent: self.intent.clone(),
@@ -1274,7 +1348,7 @@ impl SessionRun {
     }
 
     fn restore(&mut self, value: Value) -> Result<()> {
-        let saved: RuntimeSnapshot = serde_json::from_value(value)
+        let mut saved: RuntimeSnapshot = serde_json::from_value(value)
             .map_err(|error| Error::session(format!("Invalid run checkpoint: {error}")))?;
         if saved.contract != self.contract {
             return Err(Error::session("Run checkpoint contracts differ. Re-register the same providers, tools, gameplan, options, and binding_version."));
@@ -1302,6 +1376,7 @@ impl SessionRun {
         if let Some(closing) = &saved.closing {
             if closing.next_scope > closing.scopes.len()
                 || saved.active.is_some()
+                || saved.batch.is_some()
                 || saved.terminal.is_some()
             {
                 return Err(Error::session(
@@ -1309,7 +1384,15 @@ impl SessionRun {
                 ));
             }
         }
-        if let Some(active) = &saved.active {
+        if let Some(active) = &mut saved.active {
+            if active.id == 0 {
+                active.id = saved.turn_id;
+            }
+            if saved.batch.is_none() && active.id != saved.turn_id {
+                return Err(Error::session(
+                    "Run checkpoint active turn identity is inconsistent.",
+                ));
+            }
             if !self
                 .session
                 .agents
@@ -1326,6 +1409,7 @@ impl SessionRun {
             for skill in &saved.loaded_skills {
                 activation.load(skill)?;
             }
+            active.activation = Some(activation);
             for (identity, call) in saved
                 .approval
                 .iter()
@@ -1339,9 +1423,9 @@ impl SessionRun {
             {
                 if identity.actor != active.agent
                     || identity.run_id != saved.run_id
-                    || identity.turn_id != saved.turn_id
+                    || identity.turn_id != active.id
                     || identity.call_id
-                        != format!("{}:{}:{}", saved.run_id, saved.turn_id, saved.next_call)
+                        != format!("{}:{}:{}", saved.run_id, active.id, saved.next_call)
                     || active.state.as_ref().and_then(AgentTurn::pending_call) != Some(call)
                 {
                     return Err(Error::session(
@@ -1357,6 +1441,7 @@ impl SessionRun {
                 "Run checkpoint has suspended work without an active turn.",
             ));
         }
+        self.validate_batch_snapshot(&saved)?;
         self.usage = UsageCollector::restore(
             self.options.budget.clone(),
             self.options.pricing.clone(),
@@ -1369,6 +1454,7 @@ impl SessionRun {
         self.next_event = saved.next_event;
         self.started = saved.started;
         self.active = saved.active;
+        self.batch = saved.batch;
         self.approval = saved.approval;
         self.approved = saved.approved;
         self.intent = saved.intent;

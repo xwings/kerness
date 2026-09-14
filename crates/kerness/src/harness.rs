@@ -119,6 +119,9 @@ impl Default for PhaseSpec {
 pub struct LoopSpec {
     pub max_turns: i64,
     pub max_rounds: i64,
+    /// Maximum participant provider calls executed together in an explicit
+    /// batch. One preserves sequential execution.
+    pub max_concurrent_agents: usize,
     pub terminate_on: Vec<String>,
     pub phases: Vec<PhaseSpec>,
     /// Keyword the orchestrator uses to advance a phase early.
@@ -139,6 +142,7 @@ impl Default for LoopSpec {
         LoopSpec {
             max_turns: 50,
             max_rounds: 3,
+            max_concurrent_agents: 1,
             terminate_on: vec!["END_SESSION".to_string()],
             phases: Vec::new(),
             advance_on: "NEXT_PHASE".to_string(),
@@ -542,10 +546,27 @@ fn parse_loop(raw: Option<&Value>, source: &str) -> Result<LoopSpec> {
             "'loop.terminate_on' in {source} contains no usable keywords."
         )));
     }
+    if matches!(raw.get("max_concurrent_agents"), Some(Value::Number(number)) if number.is_f64()) {
+        return Err(Error::GameplanLoad(format!(
+            "'loop.max_concurrent_agents' in {source} must be an integer."
+        )));
+    }
 
     Ok(LoopSpec {
         max_turns: parse_int_at_least(raw.get("max_turns"), 50, 1, "loop.max_turns", source)?,
         max_rounds: parse_int_at_least(raw.get("max_rounds"), 3, 1, "loop.max_rounds", source)?,
+        max_concurrent_agents: usize::try_from(parse_int_at_least(
+            raw.get("max_concurrent_agents"),
+            1,
+            1,
+            "loop.max_concurrent_agents",
+            source,
+        )?)
+        .map_err(|_| {
+            Error::GameplanLoad(format!(
+                "'loop.max_concurrent_agents' in {source} exceeds this platform's limit."
+            ))
+        })?,
         terminate_on: terminate,
         phases: parse_phases(get(raw, "phases"), source)?,
         advance_on: raw
@@ -894,6 +915,13 @@ mod tests {
         let loop_spec = ok(json!({})).loop_spec;
         assert_eq!(loop_spec.terminate_on, names(&["END_SESSION"]));
         assert_eq!(loop_spec.max_rounds, 3);
+        assert_eq!(loop_spec.max_concurrent_agents, 1);
+        assert_eq!(
+            ok(json!({"loop": {"max_concurrent_agents": 3}}))
+                .loop_spec
+                .max_concurrent_agents,
+            3
+        );
         assert!(loop_spec.phases.is_empty());
         assert!(loop_spec.verdict_rethink);
 
@@ -938,6 +966,11 @@ mod tests {
         // because non-empty strings are truthy.
         assert!(message(json!({"loop": {"max_rounds": "many"}})).contains("must be an integer"));
         assert!(message(json!({"loop": {"max_rounds": true}})).contains("must be an integer"));
+        for value in [json!(true), json!("many"), json!(1.5)] {
+            assert!(message(json!({"loop": {"max_concurrent_agents": value}}))
+                .contains("must be an integer"));
+        }
+        assert!(message(json!({"loop": {"max_concurrent_agents": 0}})).contains(">= 1"));
         assert!(
             message(json!({"loop": {"verdict_rethink": "false"}})).contains("must be a boolean")
         );

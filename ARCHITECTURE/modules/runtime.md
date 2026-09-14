@@ -11,11 +11,11 @@ delivery, contextual handle lifetime, core exports/utilities, or Rust examples.
 
 ## Responsibility and Status
 
-Implemented: one calling-thread engine serves automatic and host-driven runs.
+Implemented: one owned engine serves automatic and host-driven runs.
 Owns configuration resolution, run/turn state, scheduling, prompt assembly,
 delivery and typed outcomes. Verification is recorded below; live model behavior
-is not established by scripted tests. Parallel scheduling and forcibly
-interrupting arbitrary callbacks are outside the current contract.
+is not established by scripted tests. Explicit participant batches overlap
+bounded provider calls; tools and observers stay on the caller's thread.
 
 ## Code Map
 
@@ -45,11 +45,14 @@ currently add local rules.
 ## Contracts and Invariants
 
 - `Session::start` consumes configuration into a run; `run` uses the same engine
-  with legacy result coercion, provider-error placeholders and callback approval
-  behavior. Owned execution exposes typed outcomes and partial diagnostics
+  with legacy result coercion and callback approval behavior. Provider failures
+  propagate unchanged from sequential and batch turns: `run` returns the original
+  error, including HTTP status, URL and body; owned execution retains it in
+  `RunOutcome.error` with typed termination and partial diagnostics
   (`session.rs`, `session/run.rs`, `session/outcome.rs`; `tests/session_run.rs`).
-- A step selects at most one logical provider/tool/compaction/maintenance
-  operation, while settling local effects. Provider retries and nested host
+- A sequential step selects at most one logical provider/tool/compaction/maintenance
+  operation, while settling local effects. A batch step may join a bounded group
+  of provider calls. Provider retries and nested host
   calls may perform more work inside that operation. Cancellation is cooperative;
   terminal `Continue` repeats the outcome, other terminal inputs fail.
 - Provider and model inherit as a pair: supplying an agent provider requires an
@@ -59,6 +62,8 @@ currently add local rules.
 - Agent tool exchanges stay in private scratch. Invalid calls/repeated failures
   terminate a turn, not silently restart tools. The dispatcher and prompt must
   see the same available tools (`agent_runtime.rs`, `Session` shared tools).
+- For batch scheduling, per-turn activation, ordered commits, cancellation or
+  batch snapshots, read [Concurrent batches](../topics/concurrent-batches.md).
 - `ToolContext` identity is engine-created. Cloned handles expire with the
   invocation lease; preflight is side-effect-free. Approval IDs and frozen call
   arguments survive checkpoints; unknown interrupted effects require host
@@ -106,8 +111,8 @@ Baseline validation results are tracked in [build checks](../topics/build-checks
 
 ## Known Gaps
 
-Cancellation cannot preempt arbitrary blocking providers/callbacks. No concurrent
-agent scheduler, streaming or MCP/workflow adapter is implemented in this tree;
-adding one needs an explicit new contract, not an inferred extension of `step`.
+Cancellation cannot preempt blocking providers/callbacks. Batch provider waves
+join before a step returns; continuous agents, inboxes, streaming and MCP/workflow
+adapters are outside this contract.
 The lower-level public runtime helpers remain supported alongside owned runs;
 no replacement or removal schedule is established by source.

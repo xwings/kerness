@@ -344,6 +344,8 @@ class OpenAIProvider(Provider):
                     "keys": list(raw.keys()) if isinstance(raw, dict) else [],
                     "choice_count": len(raw.get("choices", [])) if isinstance(raw, dict) else 0,
                 }
+                if resp.stop_reason:
+                    response_shape["finish_reason"] = resp.stop_reason
                 raise ProviderError(
                     f"Structured output parsing failed for {model}: {exc}. "
                     f"Response shape: {response_shape}"

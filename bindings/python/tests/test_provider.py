@@ -247,22 +247,28 @@ class TestOpenAIChat:
         assert nested.structured.chosen.action == "chi"
         assert nested.structured.legal_actions[0].consume_tiles == ["2p", "4p"]
 
-    @pytest.mark.parametrize("output_type, content", [
+    @pytest.mark.parametrize("output_type, content, stop_reason", [
         # Missing a required top-level field.
-        (StructuredAnswer, '{"answer":"oops"}'),
+        (StructuredAnswer, '{"answer":"oops"}', ""),
         # Missing a required field inside a nested model.
         (ComplexTurnDecision,
          '{"player":"South","legal_actions":[{"action":"chi","tile":"3p"}],'
-         '"chosen":null,"meta":{"round_idx":3,"wall_remaining":54}}'),
+         '"chosen":null,"meta":{"round_idx":3,"wall_remaining":54}}', ""),
+        # Truncation can leave invalid JSON or valid JSON missing schema fields.
+        (StructuredAnswer, '{"answer":', "length"),
+        (StructuredAnswer, '{"answer":"oops"}', "length"),
     ])
     @patch("kerness.provider.http_post_json")
     def test_a_reply_that_does_not_validate_raises(
-        self, mock_post, output_type, content
+        self, mock_post, output_type, content, stop_reason
     ):
         mock_post.return_value = _reply(content)
+        mock_post.return_value["choices"][0]["finish_reason"] = stop_reason
         provider = OpenAIProvider(api_key="sk-test", output_type=output_type)
-        with pytest.raises(ProviderError, match="Structured output parsing failed"):
+        with pytest.raises(ProviderError, match="Structured output parsing failed") as caught:
             provider.chat("gpt-4o", [])
+        if stop_reason:
+            assert "'finish_reason': 'length'" in str(caught.value)
 
 
 class TestOpenAIOAuthChat:
@@ -383,6 +389,17 @@ class TestChatWithRetries:
         with pytest.raises(ProviderError, match="All retries exhausted"):
             provider.chat_with_retries("m", [], purpose="test")
 
+        rejection = ProviderHTTPError(429, "https://example.com/v1/chat/completions",
+                                      '{"error":{"message":"Please slow down"}}')
+        mock_post.reset_mock()
+        mock_post.side_effect = rejection
+        with pytest.raises(ProviderHTTPError) as caught:
+            provider.chat_with_retries("m", [], purpose="test")
+        assert (caught.value.status_code, caught.value.url, caught.value.body) == (
+            rejection.status_code, rejection.url, rejection.body
+        )
+        assert mock_post.call_count == 3
+
 
 class TestCustomProvider:
     @patch("kerness.provider.http_post_json")
@@ -453,19 +470,49 @@ class TestCustomProvider:
 
 
 class TestAnUnreadableEnvelope:
+    @pytest.mark.parametrize("body, expected", [
+        ({"unexpected": "shape"}, "Unexpected response"),
+        ({"error": "bad request"}, "API error"),
+        ({"error": {"type": "rate_limit_error", "message": "Please slow down"},
+          "request_id": "req-123"}, "API error"),
+    ])
     @patch("kerness.provider.http_post_json")
-    def test_every_provider_refuses_a_body_it_cannot_read(self, mock_post):
-        """One contract across three transports: a body that is not the shape
+    def test_every_provider_refuses_a_body_it_cannot_read(self, mock_post, body, expected):
+        """One contract across backends: a body that is not the shape
         the API documents is an error, not a `ProviderResponse` carrying junk
         that a turn then puts in front of a model."""
-        mock_post.return_value = {"error": "bad request"}
+        mock_post.return_value = body
         for provider in (
+            OpenAIProvider(api_key="sk-test"),
             OpenRouterProvider(api_key="sk-test"),
             ClaudeProvider(api_key="sk-ant-test"),
             CustomProvider(url="https://example.com/v1", api_key="sk-test"),
         ):
-            with pytest.raises(ProviderError, match="Unexpected response"):
+            with pytest.raises(ProviderError, match=expected) as caught:
                 provider.chat("m", [{"role": "user", "content": "hi"}])
+            assert repr(body) in str(caught.value)
+
+    @pytest.mark.parametrize("backend, body, reason", [
+        ("openai", {"choices": [{"message": {"content": "", "refusal": "Cannot comply"},
+                                 "finish_reason": "stop"}]}, "refusal"),
+        ("openrouter", {"choices": [{"message": {"content": "partial"},
+                                     "finish_reason": "content_filter"}]}, "content_filter"),
+        ("custom", {"choices": [{"message": {"content": None, "refusal": "Cannot comply"}}]}, "refusal"),
+        ("claude", {"content": [{"type": "text", "text": "Cannot comply"}],
+                    "stop_reason": "refusal"}, "refusal"),
+    ])
+    @patch("kerness.provider.http_post_json")
+    def test_rejection_details_survive_parsing_and_retries(self, mock_post, backend, body, reason):
+        providers = {
+            "openai": OpenAIProvider(api_key="k", output_type=StructuredAnswer, retries=1, backoff_sec=0),
+            "openrouter": OpenRouterProvider(api_key="k", retries=1, backoff_sec=0),
+            "custom": CustomProvider(url="https://example.com/v1", api_key="k", retries=1, backoff_sec=0),
+            "claude": ClaudeProvider(api_key="k", retries=1, backoff_sec=0),
+        }
+        mock_post.return_value = body
+        with pytest.raises(ProviderError, match=f"Provider response from m indicates {reason}") as caught:
+            providers[backend].chat_with_retries("m", [], purpose="test")
+        assert repr(body) in str(caught.value)
 
 
 CMD_SPEC = ToolSpec(

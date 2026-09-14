@@ -75,8 +75,8 @@ impl Error {
     /// code of its own: OpenAI and OpenRouter answer 400, Anthropic 400 or 413,
     /// and all of them say what actually happened only in the body. A phrase
     /// list is wrong when a vendor rewrites its message, and wrong in the safe
-    /// direction — an unrecognised refusal is absorbed as an ordinary provider
-    /// failure, which is what happens today.
+    /// direction — an unrecognised refusal remains an ordinary provider
+    /// failure and reaches the caller when recovery is exhausted.
     pub fn is_context_overflow(&self) -> bool {
         let Error::ProviderHttp {
             status_code, body, ..

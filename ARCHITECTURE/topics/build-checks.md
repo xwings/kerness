@@ -77,14 +77,14 @@ topic is navigation/check guidance, not an extra runtime subsystem.
 ## Evidence and Gaps
 
 Verified locally with Rust/Cargo 1.88.0 and Python 3.13.5: root format/Clippy
-checks, 525 Rust unit/integration tests plus one doctest, locked all-targets
+checks, 539 Rust unit/integration tests plus one doctest, locked all-targets
 compilation, example builds and warning-free rustdoc. `offline_debate`,
 `host_control` and `resume_approval` completed offline; host control recorded
 one provider operation and resumed approval executed each saved note once.
 The minimum check used `cargo check --workspace --all-targets --locked` with
 the active 1.88.0 toolchain, equivalent to the explicit selector above.
 
-An isolated maturin 1.15.0 build with dev extras passed 502 Python tests,
+An isolated maturin 1.15.0 build with dev extras passed 505 Python tests,
 installed-package selfcheck including assets/Pydantic, Ruff 0.16.7, and the
 Python host-control example. These results establish the local baseline;
 rerun affected checks when source or configuration changes.

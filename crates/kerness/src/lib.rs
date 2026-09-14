@@ -55,6 +55,7 @@ pub use crate::context::ContextSource;
 pub use crate::conversation::{ChatMessage, Conversation, Message, Turn};
 pub use crate::error::{Error, Result};
 pub use crate::memory::Memory;
+pub use crate::orchestrator::AgentAssignment;
 pub use crate::persona::PersonaConfig;
 pub use crate::provider::{Provider, ProviderResponse, ReasoningEffort};
 pub use crate::role::{Position, RoleConfig};

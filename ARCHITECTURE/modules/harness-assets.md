@@ -53,6 +53,16 @@ Inventory tests discover assets from disk rather than keeping a second name list
   tools/skills/context, reporting all violations before the first provider call.
   A declared but unregistered requirement must not disappear silently
   (`tests/harness_contract.rs`). `Skill` is a reserved tool name.
+- `loop.max_concurrent_agents` is a positive integer, default one. It caps
+  participant provider execution in explicitly selected batches; changing the
+  cap alone does not select a batch. Above one, the bundled orchestrator prompt
+  describes a complete `kerness` fenced JSON reply containing
+  `{"parallel":[{"agent":"Name","instruction":"Task"}]}`. Members must be
+  distinct registered participants still owed a turn in the current round,
+  and fit the remaining turn budget. Each receives the active phase instruction.
+  Ordinary `@Name` routing retains its first-match behavior; malformed explicit
+  batches follow orchestrator retries, with embedded keywords treated as data
+  (`harness.rs`, `orchestrator.rs`, `Session::build_orchestrator_prompt`).
 - Roles determine position from frontmatter; persona only decorates prompts.
   Absent role/prose resolves to participant, never privilege inferred from a word
   in the text (`role.rs`, `agent.rs`). Persona sections are optional.

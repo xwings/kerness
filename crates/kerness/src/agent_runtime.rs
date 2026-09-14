@@ -400,7 +400,13 @@ impl<'a> AgentRunner<'a> {
             }
             Err(error) => return Err(error),
         };
-        turn.accept_response(&response, self.provider.effective_dialect());
+        // Another request can disable native tools while this one is in flight.
+        // Returned native calls still require their original call/result shape.
+        let mut dialect = self.provider.effective_dialect();
+        if dialect == ToolDialect::Text && !response.tool_calls.is_empty() {
+            dialect = self.provider.tool_dialect();
+        }
+        turn.accept_response(&response, dialect);
         self.record_pending(turn);
         Ok(Some(response))
     }
@@ -1108,6 +1114,188 @@ mod tests {
                 .any(|message| message.to_string().contains(FOLLOWUP_PROMPT)),
             "{followup:?}"
         );
+    }
+
+    #[test]
+    fn concurrent_fallback_preserves_an_in_flight_native_tool_response() {
+        struct Request {
+            model: String,
+            messages: Vec<Value>,
+            native: bool,
+        }
+        struct SharedProvider {
+            base: ProviderBase,
+            dialect: ToolDialect,
+            requests: Mutex<Vec<Request>>,
+            changed: std::sync::Condvar,
+        }
+        impl Provider for SharedProvider {
+            fn name(&self) -> &str {
+                "shared"
+            }
+            fn base(&self) -> &ProviderBase {
+                &self.base
+            }
+            fn tool_dialect(&self) -> ToolDialect {
+                self.dialect
+            }
+            fn chat(
+                &self,
+                model: &str,
+                messages: &[Value],
+                tools: Option<&[ToolSpec]>,
+                _: ReasoningEffort,
+            ) -> Result<ProviderResponse> {
+                let mut requests = self.requests.lock().unwrap();
+                let prior = requests
+                    .iter()
+                    .filter(|request| request.model == model)
+                    .count();
+                requests.push(Request {
+                    model: model.into(),
+                    messages: messages.to_vec(),
+                    native: tools.is_some(),
+                });
+                self.changed.notify_all();
+                if prior == 0 {
+                    let (waiting, timeout) = self
+                        .changed
+                        .wait_timeout_while(
+                            requests,
+                            std::time::Duration::from_secs(5),
+                            |requests| {
+                                if model == "native" {
+                                    !requests.iter().any(|request| {
+                                        request.model == "fallback" && !request.native
+                                    })
+                                } else {
+                                    !requests.iter().any(|request| request.model == "native")
+                                }
+                            },
+                        )
+                        .unwrap();
+                    requests = waiting;
+                    if timeout.timed_out() {
+                        return Err(Error::session(
+                            "native and fallback requests did not overlap",
+                        ));
+                    }
+                    drop(requests);
+                    if model == "fallback" {
+                        return Err(Error::ProviderHttp {
+                            status_code: 400,
+                            url: "https://example.test".into(),
+                            body: "tools are unsupported".into(),
+                        });
+                    }
+                    return Ok(ProviderResponse {
+                        tool_calls: vec![
+                            ToolCall::new("ping", Arguments::new()).with_id("native-id")
+                        ],
+                        ..ProviderResponse::default()
+                    });
+                }
+                if model == "fallback" && prior == 1 {
+                    return Ok(ProviderResponse::text(call_block("ping")));
+                }
+                Ok(ProviderResponse::text(format!("done {model}")))
+            }
+        }
+
+        for dialect in [ToolDialect::Openai, ToolDialect::Anthropic] {
+            let provider = SharedProvider {
+                base: ProviderBase::new(0, 0.0, None),
+                dialect,
+                requests: Mutex::new(Vec::new()),
+                changed: std::sync::Condvar::new(),
+            };
+            let (_, dispatcher) = fixture(ping());
+            let turns = std::thread::scope(|threads| {
+                let provider = &provider;
+                let dispatcher = &dispatcher;
+                let pending = ["native", "fallback"].map(|model| {
+                    threads.spawn(move || {
+                        let agent = Agent::new(model).with_model(model);
+                        let mut runner =
+                            AgentRunner::new(&agent, provider, messages_for, dispatcher, "BASE")
+                                .with_tools(ping)
+                                .with_strict_errors();
+                        let mut turn = runner.start(&[], "turn", None);
+                        runner.advance(&mut turn)?;
+                        Ok::<_, Error>((model, turn))
+                    })
+                });
+                pending.map(|thread| thread.join().unwrap().unwrap())
+            });
+            assert_eq!(provider.effective_dialect(), ToolDialect::Text);
+            for (model, mut turn) in turns {
+                let call = turn
+                    .pending_call()
+                    .cloned()
+                    .expect("accepted response retains its tool call");
+                assert_eq!(call.id, if model == "native" { "native-id" } else { "c1" });
+                turn.accept_tool_result(dispatcher.execute(&call, model))
+                    .unwrap();
+                turn = AgentTurn::from_snapshot(&turn.snapshot()).unwrap();
+                let agent = Agent::new(model).with_model(model);
+                let mut runner =
+                    AgentRunner::new(&agent, &provider, messages_for, &dispatcher, "BASE")
+                        .with_tools(ping)
+                        .with_strict_errors();
+                runner.advance(&mut turn).unwrap();
+                assert_eq!(turn.text(), Some(format!("done {model}").as_str()));
+            }
+            let requests = provider.requests.lock().unwrap();
+            for model in ["native", "fallback"] {
+                assert!(
+                    requests
+                        .iter()
+                        .find(|request| request.model == model)
+                        .unwrap()
+                        .native
+                );
+            }
+            let native = requests
+                .iter()
+                .rev()
+                .find(|request| request.model == "native")
+                .unwrap();
+            assert!(
+                !native.native,
+                "future requests honor the shared fallback latch"
+            );
+            let [.., assistant, result] = native.messages.as_slice() else {
+                panic!("native exchange");
+            };
+            match dialect {
+                ToolDialect::Openai => {
+                    assert_eq!(assistant["tool_calls"][0]["id"], "native-id");
+                    assert_eq!(
+                        result,
+                        &json!({"role":"tool", "tool_call_id":"native-id", "content":"pong"})
+                    );
+                }
+                ToolDialect::Anthropic => {
+                    assert_eq!(assistant["content"][0]["id"], "native-id");
+                    assert_eq!(result["content"][0]["tool_use_id"], "native-id");
+                    assert_eq!(result["content"][0]["content"], "pong");
+                }
+                ToolDialect::Text => unreachable!(),
+            }
+            let fallback = requests
+                .iter()
+                .rev()
+                .find(|request| request.model == "fallback")
+                .unwrap();
+            assert!(!fallback.native);
+            assert!(fallback
+                .messages
+                .contains(&json!({"role":"assistant", "content":"[Tool:ping] pong"})));
+            assert_eq!(
+                fallback.messages.last().unwrap()["content"],
+                FOLLOWUP_PROMPT
+            );
+        }
     }
 
     #[test]

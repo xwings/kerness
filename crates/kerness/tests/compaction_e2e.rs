@@ -214,6 +214,162 @@ fn an_empty_summary_leaves_the_history_alone() {
     );
 }
 
+#[test]
+fn a_batch_overflow_compacts_private_history_without_replaying_tools_or_siblings() {
+    use kerness::provider::{Provider, ProviderBase, ProviderResponse, ReasoningEffort};
+    use kerness::tooling::{Arguments, ToolSpec};
+    use kerness::{
+        AgentAssignment, Error, RunInput, RunMode, RunOptions, StepOutcome, ToolDialect, WaitReason,
+    };
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+
+    struct Overflow {
+        inner: common::ToolProvider,
+        requests: Mutex<Vec<Vec<Value>>>,
+    }
+    impl Provider for Overflow {
+        fn name(&self) -> &str {
+            "overflow"
+        }
+        fn base(&self) -> &ProviderBase {
+            self.inner.base()
+        }
+        fn tool_dialect(&self) -> ToolDialect {
+            ToolDialect::Openai
+        }
+        fn chat(
+            &self,
+            model: &str,
+            messages: &[Value],
+            tools: Option<&[ToolSpec]>,
+            effort: ReasoningEffort,
+        ) -> kerness::Result<ProviderResponse> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(messages.to_vec());
+            if requests.len() == 2 {
+                return Err(Error::ProviderHttp {
+                    status_code: 413,
+                    url: "https://offline.invalid".into(),
+                    body: "context length exceeded".into(),
+                });
+            }
+            self.inner.chat(model, messages, tools, effort)
+        }
+    }
+    let temp = TempDir::new("batch-overflow");
+    let path = temp.write("batch.md", "---\nname: batch\nagents:\n  orchestrator: false\n  participants: {min: 2}\nloop:\n  max_concurrent_agents: 2\n  max_rounds: 2\n---\nIndependent tasks.\n");
+    let summary = ScriptedProvider::new()
+        .on("compaction", &["Earlier background summarized."])
+        .fallback(&["Bob completed"])
+        .shared();
+    let mut settings = config(&path.to_string_lossy(), "Keep the topic", summary.clone());
+    settings.max_context_tokens = 1800;
+    settings.channel = Some(RecordingChannel::new());
+    let alice = Arc::new(Overflow {
+        inner: common::ToolProvider::new(
+            ToolDialect::Openai,
+            vec![
+                common::tool_call_reply("record", json!({}), "once"),
+                ProviderResponse::text("Alice completed"),
+            ],
+        ),
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut session = Session::new(settings).unwrap();
+    session
+        .add_agent(Agent {
+            provider: Some(alice.clone()),
+            ..Agent::new("Alice").with_model("m")
+        })
+        .unwrap();
+    session
+        .add_agent(Agent::new("Bob").with_model("m"))
+        .unwrap();
+    session
+        .add_agent(Agent::new("Mod").with_model("m").with_role("orchestrator"))
+        .unwrap();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let called = effects.clone();
+    session
+        .add_tool(
+            "record",
+            "Record once",
+            json!({"type":"object"}),
+            Arc::new(move |_: &Arguments, _: &str| {
+                called.fetch_add(1, Ordering::SeqCst);
+                Ok("private tool evidence".into())
+            }),
+        )
+        .unwrap();
+    let mut run = session
+        .start(RunOptions {
+            mode: RunMode::HostDriven,
+            ..Default::default()
+        })
+        .unwrap();
+    for index in 0..6 {
+        run.step(RunInput::UserMessage {
+            text: format!("history-{index} {}", "x".repeat(850)),
+        })
+        .unwrap();
+    }
+    run.step(RunInput::SelectAgents {
+        assignments: ["Alice", "Bob"]
+            .into_iter()
+            .map(|agent| AgentAssignment {
+                agent: agent.into(),
+                instruction: "Keep this independent instruction".into(),
+            })
+            .collect(),
+    })
+    .unwrap();
+    let mut done = false;
+    for _ in 0..100 {
+        match run.step(RunInput::Continue).unwrap() {
+            StepOutcome::Progress => {}
+            StepOutcome::Waiting {
+                reason: WaitReason::Input,
+            } => {
+                done = true;
+                break;
+            }
+            other => panic!("Unexpected batch result: {other:?}"),
+        }
+    }
+    assert!(done);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    let requests = alice.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let before = serde_json::to_string(&requests[1]).unwrap();
+    let after = serde_json::to_string(&requests[2]).unwrap();
+    assert!(before.contains("history-0"));
+    assert!(!after.contains("history-0"));
+    assert!(after.contains(SUMMARY_PREFIX));
+    assert!(after.contains("Keep this independent instruction"));
+    assert_eq!(after.matches("private tool evidence").count(), 1);
+    assert!(!after.contains("Bob completed"));
+    assert_eq!(
+        summary
+            .purposes()
+            .iter()
+            .filter(|purpose| purpose.as_str() == "compaction")
+            .count(),
+        1
+    );
+    assert_eq!(
+        summary
+            .purposes()
+            .iter()
+            .filter(|purpose| purpose.starts_with("turn from Bob"))
+            .count(),
+        1
+    );
+}
+
 /// The count that ends up in the session file is the run's own, so an
 /// interrupted session does not forget what it has already summarized.
 #[test]
