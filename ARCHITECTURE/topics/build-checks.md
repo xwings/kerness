@@ -89,11 +89,9 @@ installed-package selfcheck including assets/Pydantic, Ruff 0.16.7, and the
 Python host-control example. These results establish the local baseline;
 rerun affected checks when source or configuration changes.
 
-Existing configuration gap: the CI job named MSRV 1.88 actually selects
-`dtolnay/rust-toolchain@1.120.0` ([CI](../../.github/workflows/ci.yml)). Thus its name
-does not prove Rust 1.88 coverage. Correcting that pin is a proposed follow-up,
-not part of this architecture update. Local minimum-toolchain verification can
-independently establish compilation at 1.88.
+The CI job named MSRV 1.88 selects `dtolnay/rust-toolchain@1.88.0`
+([CI](../../.github/workflows/ci.yml)) and checks all workspace targets against
+the committed dependency resolution with `--locked`.
 
 The [wheel build matrix](../../.github/workflows/release.yml) includes Windows
 despite POSIX-only declared support/access assumptions. Windows runtime behavior
