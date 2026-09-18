@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/xwings/kerness"
 
 [workspace.dependencies]
-fancy-regex = "0.14"
+fancy-regex = "0.19"
 libc = "0.2"
 regex = "1.11"
 serde = { version = "1", features = ["derive"] }
