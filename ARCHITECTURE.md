@@ -1,8 +1,10 @@
 ---
-eatmycode_version: "2.0.0"
+eatmycode_version: "2.1.0"
 ---
 
 # Kerness Architecture
+
+Generated with [eatmycode](https://github.com/xwings/eatmycode).
 
 ## Read First
 
@@ -21,9 +23,9 @@ and retain cross-owner constraints and verification evidence.
 | Fact | Value and evidence |
 | --- | --- |
 | Purpose | Markdown-driven multi-agent sessions; Rust and Python share one kernel ([entry](crates/kerness/src/lib.rs)). |
-| Toolchain | Rust 2021/MSRV 1.88, workspace version 0.1.2-dev ([Cargo](Cargo.toml)); Python >=3.10, PyO3 0.23/abi3-py310, maturin >=1.7,<2 ([Python](bindings/python/pyproject.toml), [binding](bindings/python/Cargo.toml)). |
+| Toolchain | Rust 2021/MSRV 1.88, workspace version 0.1.3-dev ([Cargo](Cargo.toml)); Python >=3.10, PyO3 0.23/abi3-py310, maturin >=1.7,<2 ([Python](bindings/python/pyproject.toml), [binding](bindings/python/Cargo.toml)). |
 | Platforms | Linux/macOS declared; POSIX access/process assumptions. CI targets Ubuntu/Python 3.10 and 3.13; MSRV/platform gaps are in [build checks](ARCHITECTURE/topics/build-checks.md). |
-| Non-goals | No daemon, async scheduler, streaming, exact tokenizer or model-price registry. Hosts supply windows/prices; token/cost limits are measured thresholds (provider/memory owners below). |
+| Non-goals | No daemon, async scheduler, streaming, exact tokenizer or model-price registry. Hosts supply windows/prices; token/cost limits are measured thresholds (provider/memory owners). |
 
 ## System Design
 
@@ -46,7 +48,7 @@ keys must be consumed by validation, rendering or execution
 | Required | Runtime features live in Rust; Python supplies interpreter glue/re-exports ([README](README.md#two-artifacts-one-kernel), [binding rules](ARCHITECTURE/modules/python-bindings.md#local-conventions)). |
 | Configured | Default rustfmt, Clippy/rustdoc warnings fail; Ruff E4/E7/E9/F, py310, bootstrap E402 exemption. No Python formatter/type checker ([CI](.github/workflows/ci.yml), [pyproject](bindings/python/pyproject.toml)). |
 | Observed | Rust snake_case functions/files, CamelCase types, uppercase constants; `//!`/`///` docs, logging seams, trait/closure composition ([session](crates/kerness/src/session.rs)). Python `Py*` wrappers, ABCs, explicit `__all__`; pytest behavior names. |
-| Established project additions | IO uses crate `Error`/`Result`; docs describe current contracts; accepted harness keys need consumers; bundled assets stay generic/equal; tests discover assets/modules and directly exercise security boundaries ([harness](ARCHITECTURE/modules/harness-assets.md), [access tests](crates/kerness/tests/access_e2e.rs), [packaging tests](bindings/python/tests/test_packaging.py)). |
+| Project additions | IO uses crate `Error`/`Result`; docs describe current contracts; accepted harness keys need consumers; bundled assets stay generic/equal; tests discover assets/modules and directly exercise security boundaries ([harness](ARCHITECTURE/modules/harness-assets.md), [access tests](crates/kerness/tests/access_e2e.rs), [packaging tests](bindings/python/tests/test_packaging.py)). |
 | Artifacts | Maintain both asset copies. Cargo manages `Cargo.lock`; maturin rebuilds `_core`; never edit generated binaries/caches ([.gitignore](.gitignore)). |
 
 ## Verification
@@ -57,7 +59,7 @@ for setup, manifests/CI, fixtures, doc routing or both-language validation.
 | Change/check | Command and working directory | Prerequisites / pass evidence |
 | --- | --- | --- |
 | Rust suite | `cargo test --workspace` | Rust >=1.88; tests pass. |
-| Rust style/build | `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets -- -D warnings` | rustfmt/Clippy; exit 0. |
+| Rust style | `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets -- -D warnings` | rustfmt/Clippy; exit 0. |
 | Local run | `cargo run -p kerness --example offline_debate` | No credentials; completed session. |
 | Python | `.venv/bin/python -m pytest bindings/python/tests -q`; `.venv/bin/python -m kerness.selfcheck`; `.venv/bin/ruff check bindings/python` | Linked setup first; tests, OK selfcheck, lint pass. |
 

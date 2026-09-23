@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "2.0.0"
+eatmycode_version: "2.1.0"
 ---
 
 # Session runtime
@@ -24,7 +24,7 @@ Paths are under `crates/kerness/`.
 | Path / symbol | Role |
 | --- | --- |
 | [src/session.rs](../../crates/kerness/src/session.rs), `Session`; [src/agent.rs](../../crates/kerness/src/agent.rs) | Load, register and validate; resolve defaults, shared resources and persistence identity. |
-| [src/session/run.rs](../../crates/kerness/src/session/run.rs), `SessionRun::step`; `src/session/{capabilities,outcome}.rs` | Owned continuation, events, approvals, invocation leases and result validation. |
+| [src/session/run.rs](../../crates/kerness/src/session/run.rs), `SessionRun::step`; `src/session/run/batch.rs`, `src/session/{capabilities,outcome}.rs` | Owned continuation, batch waves, events, approvals, invocation leases and result validation. |
 | [src/agent_runtime.rs](../../crates/kerness/src/agent_runtime.rs), `AgentTurn`; [src/orchestrator.rs](../../crates/kerness/src/orchestrator.rs), `OrchestratorLoop` | Private provider/tool scratch; scheduler actions, phases and stopping rules. |
 | [src/prompting.rs](../../crates/kerness/src/prompting.rs), `PromptAssembler`; `src/context.rs`, `src/channel.rs` | Prompt ordering, named context and delivery sinks. |
 | `src/{lib,error,utils,pyfmt,logging}.rs`; [tests/session_run.rs](../../crates/kerness/tests/session_run.rs), [tests/public_api.rs](../../crates/kerness/tests/public_api.rs); `examples/` | Shared core surface/errors/rendering/retry/logging; public behavior and runnable consumers. Test-helper implementation belongs to build checks. |

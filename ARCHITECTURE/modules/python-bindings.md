@@ -1,5 +1,5 @@
 ---
-eatmycode_version: "2.0.0"
+eatmycode_version: "2.1.0"
 ---
 
 # Python bindings
@@ -59,7 +59,7 @@ fixtures in `tests/conftest.py` and patched `kerness.provider.http_post_json`.
   dictionaries and returns progress/waiting/finished dictionaries matching Rust
   serialization. An event sink receives one event dictionary (`src/run.rs`).
 - `LoopSpec.max_concurrent_agents` exposes the positive batch cap (default one).
-  `select_agents` accepts assignment dictionaries. Both `Session.run` and
+  A `select_agents` step input carries assignment dictionaries. Both `Session.run` and
   `SessionRun.step` release the GIL while the kernel runs provider batches;
   Python callbacks reacquire it. Read [batch contracts](../topics/concurrent-batches.md)
   when changing these scheduling or callback boundaries.
@@ -116,8 +116,7 @@ Rust checks remain required for adapter edits. See
 `src/errors.rs::to_py` maps Rust `Error::Io` to Python `OSError`, but `from_py`
 has no corresponding `OSError` branch and falls back to `Error::Session`.
 Arbitrary Python exception classes also fall through that path; callbacks do not
-promise exact exception-type round trips. This is an existing conversion gap,
-not a new exception-preservation guarantee.
+promise exact exception-type round trips; this is an existing conversion gap.
 
 No independent Python type-checking gate or full interpreter/platform matrix is
 available locally. A stale `_core` may make source edits invisible; rebuild before
